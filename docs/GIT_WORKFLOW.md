@@ -70,6 +70,29 @@ PRs are worth it solo once real code exists: the description forces a moment of 
 be comfortable explaining this decision to a future contributor?" before it lands.
 Pre-code, they are overhead with no payoff — not used in Phase 1.
 
+### Mandatory agent reviews
+
+Any PR that touches files under `src/` must run both `pillars-reviewer` and
+`rust-idiom-reviewer` against the diff before merge. This is not optional and not a
+judgment call — it is a hard requirement of this workflow, the same way the commit-message
+format is not optional.
+
+PRs that only touch `docs/`, `.claude/`, or config files are exempt — there is no Rust
+code to review.
+
+### PR description requirements
+
+Every PR description must include, at minimum:
+
+1. **What changed** — one or two sentences summarising the change. Not a restated commit
+   log; explain the *why* or the *what* at a higher level.
+2. **Build status** — explicit confirmation that `cargo build`, `cargo check`, and
+   `cargo clippy -- -D warnings` all pass on the branch.
+3. **Agent review summary** (required if `src/` was touched) — what `pillars-reviewer`
+   and `rust-idiom-reviewer` found, including "no issues found" if applicable. Silence
+   is not an acceptable substitute for confirmation: this mirrors how the agents
+   themselves are instructed not to let silence read as approval.
+
 ### Merge method
 
 Always use **"Create a merge commit"** on GitHub — not "Squash and merge" or
@@ -88,3 +111,13 @@ a rule with exceptions.
 to merge commits only so the convention is enforced by the UI rather than just documented.
 Apply manually: GitHub → repo Settings → General → Pull Requests → uncheck "Allow squash
 merging" and "Allow rebase merging", leave only "Allow merge commits" checked.
+
+### Branch cleanup after merge
+
+After a PR is merged, delete the feature branch to prevent stale branches accumulating.
+This is standard practice, not optional.
+
+- On GitHub: click **"Delete branch"** in the PR after merging.
+- Locally: `git branch -d <branch>` (safe delete — refuses if branch is unmerged).
+- The remote tracking ref is removed automatically when you use GitHub's button; to clean
+  it up manually: `git push origin --delete <branch>`.
