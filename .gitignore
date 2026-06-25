@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+dist/
+target/
+out/
+
+# Compiler outputs
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.wasm
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Claude Code — local-only overrides (not shared project context)
+# CLAUDE.md and .claude/agents/ are intentionally tracked; don't add them here.
+.claude/settings.local.json
+CLAUDE.local.md
