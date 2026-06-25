@@ -69,3 +69,22 @@ confirmation before Claude Code runs either command.
 PRs are worth it solo once real code exists: the description forces a moment of "would I
 be comfortable explaining this decision to a future contributor?" before it lands.
 Pre-code, they are overhead with no payoff — not used in Phase 1.
+
+### Merge method
+
+Always use **"Create a merge commit"** on GitHub — not "Squash and merge" or
+"Rebase and merge".
+
+Reason: merge commits preserve branch structure and per-commit history within a PR. As
+the project grows beyond solo contribution, this makes it possible to trace which PR
+introduced a given change (`git log --merges`, `git log --first-parent`) without
+reconstructing history from squashed blobs.
+
+This applies even to single-commit PRs (like PR #1) for consistency. In that specific
+case squash would produce an identical result, but one unconditional rule is better than
+a rule with exceptions.
+
+**Repo settings:** If GitHub currently allows all three merge methods, restrict the repo
+to merge commits only so the convention is enforced by the UI rather than just documented.
+Apply manually: GitHub → repo Settings → General → Pull Requests → uncheck "Allow squash
+merging" and "Allow rebase merging", leave only "Allow merge commits" checked.
