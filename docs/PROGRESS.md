@@ -3,6 +3,37 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-26
+
+**What was implemented:**
+- Docs reorganization only. No src/ changes.
+
+**Design decisions made (and why):**
+- Created `docs/SYNTAX_SPEC.md` as the canonical home for Ofan's concrete syntax
+  (keywords, operators, literal forms, token rules). Populated from lexer PRD session
+  content; source preserved as `docs/prds/2026-06-26-lexer.md`.
+- Split `docs/PHILOSOPHY.md` §5 from one "Resolved" block into three distinct subsections
+  (5.1 implementation language & backend; 5.2 launch niche & sequencing; 5.3 C/C++ interop
+  scope). Structural split only — no substance changes.
+- Updated `CLAUDE.md` and `CONTRIBUTING.md` to point syntax questions to `SYNTAX_SPEC.md`
+  and semantics/type-system questions to `PHILOSOPHY.md`.
+
+**Pending / next step:**
+- Apply lexer reviewer findings on `feat/lexer-implementation` branch:
+  - Add `Copy + Hash` to `Span` (rust-idiom reviewer, medium)
+  - Split `MalformedNumber { detail: String }` into typed variants (rust-idiom reviewer, medium)
+  - Fix misleading `&`/`|` lone-character error message (both reviewers)
+  - Fix dead `escape_pos` binding (rust-idiom reviewer, low)
+  - Fix ident start/continuation Unicode inconsistency (pillars reviewer, low)
+  - Decide `Token::Str/Ident` ownership: `String` vs. zero-copy `&'src str` (rust-idiom reviewer, medium — design decision)
+- Then commit, run pillars-reviewer + rust-idiom-reviewer on final diff, open PR #4.
+- Resolve §1 Comments and §2 Identifiers/casing in SYNTAX_SPEC.md (separate design session).
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## Last session: 2026-06-25
 
 **What was implemented:**

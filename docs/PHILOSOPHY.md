@@ -129,7 +129,11 @@ competitors" (that game is lost on resources alone). The viable strategy is:
 
 ## 5. Technical decisions
 
-### 5.1 — Resolved
+> Ofan's concrete syntax (keywords, operators, literal forms, token rules) is documented in
+> [`docs/SYNTAX_SPEC.md`](SYNTAX_SPEC.md). This section covers implementation-stack and
+> strategy decisions only.
+
+### 5.1 — Implementation language & backend
 
 **Implementation language: Rust**
 Rationale: writing a memory-safety-focused compiler in a language with silent UB (C/C++)
@@ -141,6 +145,8 @@ Rationale: near-free multi-platform reach (x86, ARM, RISC-V, WASM, microcontroll
 without writing per-architecture codegen by hand. Cranelift was evaluated as a lighter
 alternative but lacks the platform coverage and optimization maturity needed to compete
 with C/C++ output quality. `inkwell` is the selected Rust binding.
+
+### 5.2 — Launch niche & sequencing
 
 **Launch niche and sequencing strategy**
 The five originally-listed target domains (microcontrollers, speedcoding, web dev, app dev,
@@ -163,6 +169,8 @@ product before claiming general-purpose status.
 
 Web and app development are explicitly deferred — sequenced later, not abandoned.
 
+### 5.3 — C/C++ interop scope (v1)
+
 **C/C++ interop — v1 scope**
 - *Direction*: calling INTO existing C code only (drivers, SDKs). Being called FROM C/C++
   (embedding Ofan as a library with a stable ABI) is out of scope for v1.
@@ -178,6 +186,6 @@ Web and app development are explicitly deferred — sequenced later, not abandon
   Ofan's own lexer/parser exist. A `@c_import`-equivalent ergonomic wrapper is noted as a
   possible future goal once the core compiler is mature — not a v1 commitment.
 
-### 5.2 — Still pending
+### 5.4 — Still pending
 
 _(None at this stage.)_

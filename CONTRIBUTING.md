@@ -52,8 +52,9 @@ src/
 
 ## Design decisions
 
-Every language design decision belongs in `docs/PHILOSOPHY.md` with its rationale.
-Read it before touching lexer/parser/type-checker/codegen.
+Syntax decisions (token shapes, keywords, operators, literals) belong in
+`docs/SYNTAX_SPEC.md`. All other language decisions (semantics, type system, memory model)
+belong in `docs/PHILOSOPHY.md`. Read both before touching lexer/parser/type-checker/codegen.
 
 ## Workflow
 
