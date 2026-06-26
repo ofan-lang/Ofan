@@ -142,7 +142,42 @@ without writing per-architecture codegen by hand. Cranelift was evaluated as a l
 alternative but lacks the platform coverage and optimization maturity needed to compete
 with C/C++ output quality. `inkwell` is the selected Rust binding.
 
+**Launch niche and sequencing strategy**
+The five originally-listed target domains (microcontrollers, speedcoding, web dev, app dev,
+game dev) cluster into two groups:
+- *Lean cluster*: microcontrollers, speedcoding, game dev — no/minimal runtime, direct
+  performance focus, no mandatory OS/heap assumptions.
+- *Rich cluster*: web dev, app dev — richer stdlib, OS/platform integration, heavier runtime
+  assumptions.
+
+Building the lean cluster first is the correct sequence: retrofitting a heavy runtime down
+to bare-metal later is far harder than building lean and layering richness on top. The risk
+of starting rich and trimming down is that hidden heap/OS assumptions bake into the language
+before they can be avoided.
+
+**Anchor project**: a small, real, useful CLI tool (speedcoding-shaped), built from day one
+under the constraint of no mandatory OS/heap assumptions — even before microcontroller
+support exists. This keeps the core honest systems territory from day one, not retrofitted
+later. This mirrors the Zig/Tigerbeetle and Rust/Servo patterns: prove value in a real
+product before claiming general-purpose status.
+
+Web and app development are explicitly deferred — sequenced later, not abandoned.
+
+**C/C++ interop — v1 scope**
+- *Direction*: calling INTO existing C code only (drivers, SDKs). Being called FROM C/C++
+  (embedding Ofan as a library with a stable ABI) is out of scope for v1.
+- *Language scope*: C only. C++ is reachable only via C-compatible shim layers — the
+  standard approach most C++ libraries already expose. No native C++ ABI / template /
+  exception support planned.
+- *Mechanism*: explicit `extern` block with hand-written or tool-generated bindings
+  (Rust-style), NOT direct C-header parsing (Zig-style `@cImport`-equivalent). Rationale:
+  (a) keeps the FFI boundary explicit and auditable in source — a visible `extern` block can
+  be grepped and reviewed, consistent with pillar 2.1 (no silent behavior); unlike an opaque
+  header import, there is no ambiguity about what is being imported or what ABI is assumed;
+  (b) avoids building a second parser (for C's grammar including preprocessor macros) before
+  Ofan's own lexer/parser exist. A `@c_import`-equivalent ergonomic wrapper is noted as a
+  possible future goal once the core compiler is mature — not a v1 commitment.
+
 ### 5.2 — Still pending
 
-- Concrete C/C++ interop mechanism.
-- Concrete launch niche, based on an in-house anchor project.
+_(None at this stage.)_
