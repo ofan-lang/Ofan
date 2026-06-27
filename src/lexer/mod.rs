@@ -615,4 +615,61 @@ mod tests {
             Err(LexError::MissingDigitsAfterBase { marker: 'o', .. })
         ));
     }
+
+    #[test]
+    fn lex_err_misplaced_digit_separator_decimal() {
+        // trailing
+        assert!(matches!(
+            lex("1000_"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+        // doubled
+        assert!(matches!(
+            lex("1__000"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_misplaced_digit_separator_hex() {
+        // leading after prefix
+        assert!(matches!(
+            lex("0x_FF"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+        // trailing
+        assert!(matches!(
+            lex("0xFF_"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+        // doubled
+        assert!(matches!(
+            lex("0x1__2"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_misplaced_digit_separator_float() {
+        // trailing in frac
+        assert!(matches!(
+            lex("1.5_"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+        // doubled in frac
+        assert!(matches!(
+            lex("1.5__3"),
+            Err(LexError::MisplacedDigitSeparator { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_digit_separator_valid_positions() {
+        // valid: between digits in decimal, hex, binary, octal, and float
+        assert!(matches!(lex("1_000"), Ok(_)));
+        assert!(matches!(lex("0xFF_00"), Ok(_)));
+        assert!(matches!(lex("0b1010_0101"), Ok(_)));
+        assert!(matches!(lex("0o17_77"), Ok(_)));
+        assert!(matches!(lex("3.141_592"), Ok(_)));
+    }
 }

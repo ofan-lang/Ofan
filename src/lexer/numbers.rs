@@ -1,6 +1,6 @@
+use super::{LexError, Span, Token};
 use std::iter::Peekable;
 use std::str::CharIndices;
-use super::{LexError, Span, Token};
 
 // First digit is consumed by the caller (passed as `first_digit`).
 pub(super) fn scan_number<'src>(
@@ -34,14 +34,20 @@ pub(super) fn scan_number<'src>(
         };
 
         let mut digits = String::new();
+        let mut have_digit = false;
         while chars
             .peek()
             .is_some_and(|&(_, c)| is_valid_digit(c) || c == '_')
         {
             let (p, c) = chars.next().unwrap();
             end = p + 1;
-            if c != '_' {
+            if c == '_' {
+                if !have_digit || !chars.peek().is_some_and(|&(_, nc)| is_valid_digit(nc)) {
+                    return Err(LexError::MisplacedDigitSeparator { byte: p });
+                }
+            } else {
                 digits.push(c);
+                have_digit = true;
             }
         }
 
@@ -51,8 +57,8 @@ pub(super) fn scan_number<'src>(
                 marker: prefix_ch,
             });
         }
-        let value = i64::from_str_radix(&digits, radix)
-            .map_err(|_| LexError::IntegerOverflow { start })?;
+        let value =
+            i64::from_str_radix(&digits, radix).map_err(|_| LexError::IntegerOverflow { start })?;
         Ok((Token::Integer(value), Span { start, end }))
     } else {
         let mut int_digits = String::new();
@@ -63,7 +69,11 @@ pub(super) fn scan_number<'src>(
         {
             let (p, c) = chars.next().unwrap();
             end = p + 1;
-            if c != '_' {
+            if c == '_' {
+                if !chars.peek().is_some_and(|&(_, nc)| nc.is_ascii_digit()) {
+                    return Err(LexError::MisplacedDigitSeparator { byte: p });
+                }
+            } else {
                 int_digits.push(c);
             }
         }
@@ -83,7 +93,11 @@ pub(super) fn scan_number<'src>(
             {
                 let (p, c) = chars.next().unwrap();
                 end = p + 1;
-                if c != '_' {
+                if c == '_' {
+                    if !chars.peek().is_some_and(|&(_, nc)| nc.is_ascii_digit()) {
+                        return Err(LexError::MisplacedDigitSeparator { byte: p });
+                    }
+                } else {
                     frac_digits.push(c);
                 }
             }
