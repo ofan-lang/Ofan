@@ -1,4 +1,6 @@
+pub mod error;
 pub mod token;
+pub use error::LexError;
 pub use token::{Span, Token};
 
 pub struct Lexer<'src> {
@@ -10,12 +12,1001 @@ impl<'src> Lexer<'src> {
         Self { source }
     }
 
-    /// Tokenize the source. Returns an empty program ending with `Eof`.
-    pub fn lex(&self) -> Vec<(Token, Span)> {
-        // TODO: implement tokenization
-        vec![(
-            Token::Eof,
-            Span { start: self.source.len(), end: self.source.len() },
-        )]
+    pub fn lex(&self) -> Result<Vec<(Token<'src>, Span)>, LexError> {
+        let mut tokens: Vec<(Token<'src>, Span)> = Vec::new();
+        let src = self.source;
+        let mut chars = src.char_indices().peekable();
+
+        loop {
+            // Skip whitespace.
+            while chars.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
+                chars.next();
+            }
+
+            let Some(&(pos, ch)) = chars.peek() else {
+                tokens.push((
+                    Token::Eof,
+                    Span {
+                        start: src.len(),
+                        end: src.len(),
+                    },
+                ));
+                break;
+            };
+
+            match ch {
+                '#' => {
+                    chars.next();
+                    let is_second_hash = chars.peek().is_some_and(|&(_, c)| c == '#');
+                    if is_second_hash {
+                        chars.next(); // consume second hash
+                        let is_third_hash = chars.peek().is_some_and(|&(_, c)| c == '#');
+                        if is_third_hash {
+                            chars.next(); // consume third hash
+                                          // Doc comment: scan until closing triple hash.
+                            let content_start = chars.peek().map_or(src.len(), |&(p, _)| p);
+                            let mut content_end = content_start;
+                            loop {
+                                match chars.next() {
+                                    None => {
+                                        return Err(LexError::UnterminatedDocComment {
+                                            start: pos,
+                                        })
+                                    }
+                                    Some((p, '#')) => {
+                                        if chars.peek().is_some_and(|&(_, c)| c == '#') {
+                                            chars.next();
+                                            if chars.peek().is_some_and(|&(_, c)| c == '#') {
+                                                chars.next();
+                                                break;
+                                            }
+                                        }
+                                        content_end = p + 1;
+                                    }
+                                    Some((p, c)) => {
+                                        content_end = p + c.len_utf8();
+                                    }
+                                }
+                            }
+                            let raw = &src[content_start..content_end];
+                            tokens.push((
+                                Token::DocComment(raw),
+                                Span {
+                                    start: pos,
+                                    end: content_end,
+                                },
+                            ));
+                        } else {
+                            // Block comment: scan until closing double hash.
+                            loop {
+                                match chars.next() {
+                                    None => {
+                                        return Err(LexError::UnterminatedBlockComment {
+                                            start: pos,
+                                        })
+                                    }
+                                    Some((_, '#'))
+                                        if chars.peek().is_some_and(|&(_, c)| c == '#') =>
+                                    {
+                                        chars.next();
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    } else {
+                        // Line comment: scan to end of line.
+                        while chars.peek().is_some_and(|&(_, c)| c != '\n') {
+                            chars.next();
+                        }
+                    }
+                }
+
+                '/' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::SlashEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Slash,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+
+                // String literals: validate escape sequences; return raw source slice.
+                // Escape decoding is a later compiler phase.
+                '"' => {
+                    chars.next(); // consume opening quote
+                    let content_start = chars.peek().map_or(pos + 1, |&(p, _)| p);
+                    loop {
+                        match chars.next() {
+                            None => return Err(LexError::UnterminatedString { start: pos }),
+                            Some((close_pos, '"')) => {
+                                let raw = &src[content_start..close_pos];
+                                tokens.push((
+                                    Token::Str(raw),
+                                    Span {
+                                        start: pos,
+                                        end: close_pos + 1,
+                                    },
+                                ));
+                                break;
+                            }
+                            Some((escape_pos, '\\')) => match chars.next() {
+                                Some((_, 'n' | 't' | 'r' | '\\' | '"' | '0')) => {}
+                                Some((_, ch)) => {
+                                    return Err(LexError::InvalidEscape {
+                                        byte: escape_pos,
+                                        ch,
+                                    })
+                                }
+                                None => return Err(LexError::UnterminatedString { start: pos }),
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+
+                '0'..='9' => {
+                    chars.next(); // consume first digit
+                    let start = pos;
+                    let mut end = pos + 1;
+
+                    let prefix_ch = if ch == '0' {
+                        chars.peek().and_then(|&(_, c)| {
+                            if c == 'x' || c == 'b' || c == 'o' {
+                                Some(c)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
+
+                    if let Some(prefix_ch) = prefix_ch {
+                        chars.next(); // consume base marker
+                        end = start + 2;
+
+                        let (is_valid_digit, radix): (fn(char) -> bool, u32) = match prefix_ch {
+                            'x' => (|c: char| c.is_ascii_hexdigit(), 16),
+                            'b' => (|c: char| c == '0' || c == '1', 2),
+                            'o' => (|c: char| matches!(c, '0'..='7'), 8),
+                            _ => unreachable!(),
+                        };
+
+                        let mut digits = String::new();
+                        while chars
+                            .peek()
+                            .is_some_and(|&(_, c)| is_valid_digit(c) || c == '_')
+                        {
+                            let (p, c) = chars.next().unwrap();
+                            end = p + 1;
+                            if c != '_' {
+                                digits.push(c);
+                            }
+                        }
+
+                        if digits.is_empty() {
+                            return Err(LexError::MissingDigitsAfterBase {
+                                start,
+                                marker: prefix_ch,
+                            });
+                        }
+                        let value = i64::from_str_radix(&digits, radix)
+                            .map_err(|_| LexError::IntegerOverflow { start })?;
+                        tokens.push((Token::Integer(value), Span { start, end }));
+                    } else {
+                        let mut int_digits = String::new();
+                        int_digits.push(ch);
+                        while chars
+                            .peek()
+                            .is_some_and(|&(_, c)| c.is_ascii_digit() || c == '_')
+                        {
+                            let (p, c) = chars.next().unwrap();
+                            end = p + 1;
+                            if c != '_' {
+                                int_digits.push(c);
+                            }
+                        }
+
+                        let is_float = chars.peek().is_some_and(|&(_, c)| c == '.') && {
+                            let mut tmp = chars.clone();
+                            tmp.next();
+                            tmp.peek().is_some_and(|&(_, c)| c.is_ascii_digit())
+                        };
+
+                        if is_float {
+                            chars.next(); // consume dot
+                            let mut frac_digits = String::new();
+                            while chars
+                                .peek()
+                                .is_some_and(|&(_, c)| c.is_ascii_digit() || c == '_')
+                            {
+                                let (p, c) = chars.next().unwrap();
+                                end = p + 1;
+                                if c != '_' {
+                                    frac_digits.push(c);
+                                }
+                            }
+                            let float_str = format!("{}.{}", int_digits, frac_digits);
+                            let value: f64 = float_str
+                                .parse()
+                                .map_err(|_| LexError::MalformedFloat { start })?;
+                            tokens.push((Token::Float(value), Span { start, end }));
+                        } else {
+                            let value: i64 = int_digits
+                                .parse()
+                                .map_err(|_| LexError::IntegerOverflow { start })?;
+                            tokens.push((Token::Integer(value), Span { start, end }));
+                        }
+                    }
+                }
+
+                'a'..='z' | 'A'..='Z' | '_' => {
+                    let start = pos;
+                    let mut end = pos;
+                    while chars
+                        .peek()
+                        .is_some_and(|&(_, c)| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        let (p, c) = chars.next().unwrap();
+                        end = p + c.len_utf8();
+                    }
+                    let text = &src[start..end];
+                    let tok = match text {
+                        "fn" => Token::Fn,
+                        "let" => Token::Let,
+                        "mut" => Token::Mut,
+                        "const" => Token::Const,
+                        "if" => Token::If,
+                        "else" => Token::Else,
+                        "while" => Token::While,
+                        "for" => Token::For,
+                        "in" => Token::In,
+                        "return" => Token::Return,
+                        "break" => Token::Break,
+                        "continue" => Token::Continue,
+                        "true" => Token::True,
+                        "false" => Token::False,
+                        "struct" => Token::Struct,
+                        "enum" => Token::Enum,
+                        "pub" => Token::Pub,
+                        "use" => Token::Use,
+                        "as" => Token::As,
+                        "using" => Token::Using,
+                        "static" => Token::Static,
+                        "unsafe" => Token::Unsafe,
+                        _ => Token::Ident(text),
+                    };
+                    tokens.push((tok, Span { start, end }));
+                }
+
+                '\'' => {
+                    chars.next(); // consume opening quote
+                    let decoded: char = match chars.next() {
+                        None => return Err(LexError::UnterminatedChar { start: pos }),
+                        Some((_, '\'')) => return Err(LexError::EmptyCharLiteral { start: pos }),
+                        Some((escape_pos, '\\')) => match chars.next() {
+                            Some((_, 'n')) => '\n',
+                            Some((_, 't')) => '\t',
+                            Some((_, 'r')) => '\r',
+                            Some((_, '\\')) => '\\',
+                            Some((_, '\'')) => '\'',
+                            Some((_, '0')) => '\0',
+                            Some((_, ch)) => {
+                                return Err(LexError::InvalidEscape {
+                                    byte: escape_pos,
+                                    ch,
+                                })
+                            }
+                            None => return Err(LexError::UnterminatedChar { start: pos }),
+                        },
+                        Some((_, c)) => c,
+                    };
+                    match chars.next() {
+                        Some((close_pos, '\'')) => {
+                            tokens.push((
+                                Token::Char(decoded),
+                                Span {
+                                    start: pos,
+                                    end: close_pos + 1,
+                                },
+                            ));
+                        }
+                        Some(_) => return Err(LexError::MultiCharLiteral { start: pos }),
+                        None => return Err(LexError::UnterminatedChar { start: pos }),
+                    }
+                }
+
+                '=' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::EqEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Equals,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '!' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::BangEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Bang,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '<' => {
+                    chars.next();
+                    match chars.peek() {
+                        Some(&(end_pos, '<')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::Shl,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        Some(&(end_pos, '=')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::LtEq,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        _ => tokens.push((
+                            Token::Lt,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        )),
+                    }
+                }
+                '>' => {
+                    chars.next();
+                    match chars.peek() {
+                        Some(&(end_pos, '>')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::Shr,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        Some(&(end_pos, '=')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::GtEq,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        _ => tokens.push((
+                            Token::Gt,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        )),
+                    }
+                }
+                '&' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '&') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::AmpAmp,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Amp,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '|' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '|') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::PipePipe,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Pipe,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '-' => {
+                    chars.next();
+                    match chars.peek() {
+                        Some(&(end_pos, '>')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::Arrow,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        Some(&(end_pos, '=')) => {
+                            chars.next();
+                            tokens.push((
+                                Token::MinusEq,
+                                Span {
+                                    start: pos,
+                                    end: end_pos + 1,
+                                },
+                            ));
+                        }
+                        _ => tokens.push((
+                            Token::Minus,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        )),
+                    }
+                }
+                '+' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::PlusEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Plus,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '*' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::StarEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Star,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '%' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::PercentEq,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Percent,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '?' => {
+                    chars.next();
+                    if chars.peek().is_some_and(|&(_, c)| c == ':') {
+                        let (end_pos, _) = chars.next().unwrap();
+                        tokens.push((
+                            Token::QuestionColon,
+                            Span {
+                                start: pos,
+                                end: end_pos + 1,
+                            },
+                        ));
+                    } else {
+                        tokens.push((
+                            Token::Question,
+                            Span {
+                                start: pos,
+                                end: pos + 1,
+                            },
+                        ));
+                    }
+                }
+                '^' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Caret,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '~' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Tilde,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '(' => {
+                    chars.next();
+                    tokens.push((
+                        Token::LParen,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                ')' => {
+                    chars.next();
+                    tokens.push((
+                        Token::RParen,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '{' => {
+                    chars.next();
+                    tokens.push((
+                        Token::LBrace,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '}' => {
+                    chars.next();
+                    tokens.push((
+                        Token::RBrace,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '[' => {
+                    chars.next();
+                    tokens.push((
+                        Token::LBracket,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                ']' => {
+                    chars.next();
+                    tokens.push((
+                        Token::RBracket,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                ';' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Semicolon,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                ':' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Colon,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                ',' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Comma,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+                '.' => {
+                    chars.next();
+                    tokens.push((
+                        Token::Dot,
+                        Span {
+                            start: pos,
+                            end: pos + 1,
+                        },
+                    ));
+                }
+
+                _ => {
+                    return Err(LexError::UnrecognizedCharacter { byte: pos, ch });
+                }
+            }
+        }
+
+        Ok(tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(src: &str) -> Result<Vec<Token<'_>>, LexError> {
+        Lexer::new(src)
+            .lex()
+            .map(|ts| ts.into_iter().map(|(t, _)| t).collect())
+    }
+
+    #[test]
+    fn lex_empty() {
+        assert_eq!(lex("").unwrap(), vec![Token::Eof]);
+    }
+
+    #[test]
+    fn lex_simple_tokens() {
+        assert_eq!(
+            lex("fn main() {}").unwrap(),
+            vec![
+                Token::Fn,
+                Token::Ident("main"),
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_ident_vs_keyword() {
+        assert_eq!(
+            lex("fn fni").unwrap(),
+            vec![Token::Fn, Token::Ident("fni"), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_integer() {
+        assert_eq!(lex("42").unwrap(), vec![Token::Integer(42), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_float() {
+        assert_eq!(lex("3.14").unwrap(), vec![Token::Float(3.14), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_string() {
+        assert_eq!(
+            lex(r#""hello""#).unwrap(),
+            vec![Token::Str("hello"), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_string_valid_escape_returns_raw_slice() {
+        assert_eq!(
+            lex(r#""a\nb""#).unwrap(),
+            vec![Token::Str(r"a\nb"), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_string_null_escape() {
+        // \0 is a valid escape sequence (C-interop / FFI boundary use).
+        assert!(lex("\"\\0\"").is_ok());
+    }
+
+    #[test]
+    fn lex_string_invalid_escape() {
+        assert!(matches!(
+            lex(r#""\q""#),
+            Err(LexError::InvalidEscape { ch: 'q', .. })
+        ));
+    }
+
+    #[test]
+    fn lex_operators() {
+        assert_eq!(
+            lex("== != <= >= && ||").unwrap(),
+            vec![
+                Token::EqEq,
+                Token::BangEq,
+                Token::LtEq,
+                Token::GtEq,
+                Token::AmpAmp,
+                Token::PipePipe,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_arrow() {
+        assert_eq!(lex("->").unwrap(), vec![Token::Arrow, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_compound_assignment() {
+        assert_eq!(
+            lex("+= -= *= /= %=").unwrap(),
+            vec![
+                Token::PlusEq,
+                Token::MinusEq,
+                Token::StarEq,
+                Token::SlashEq,
+                Token::PercentEq,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_bitwise() {
+        assert_eq!(
+            lex("& | ^ ~ << >>").unwrap(),
+            vec![
+                Token::Amp,
+                Token::Pipe,
+                Token::Caret,
+                Token::Tilde,
+                Token::Shl,
+                Token::Shr,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_question() {
+        assert_eq!(
+            lex("? ?:").unwrap(),
+            vec![Token::Question, Token::QuestionColon, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_keywords_as_using_static() {
+        assert_eq!(
+            lex("as using static").unwrap(),
+            vec![Token::As, Token::Using, Token::Static, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_line_comment_skipped() {
+        assert_eq!(
+            lex("# comment\n42").unwrap(),
+            vec![Token::Integer(42), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_block_comment_skipped() {
+        assert_eq!(
+            lex("## block\ncomment ##42").unwrap(),
+            vec![Token::Integer(42), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_doc_comment_preserved() {
+        let tokens = lex("### doc text ###").unwrap();
+        assert!(matches!(&tokens[0], Token::DocComment(s) if s.trim() == "doc text"));
+        assert_eq!(tokens[1], Token::Eof);
+    }
+
+    #[test]
+    fn lex_unsafe_keyword() {
+        assert_eq!(lex("unsafe").unwrap(), vec![Token::Unsafe, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_hex_literal() {
+        assert_eq!(lex("0xFF").unwrap(), vec![Token::Integer(255), Token::Eof]);
+        assert_eq!(
+            lex("0x4002_0014").unwrap(),
+            vec![Token::Integer(0x4002_0014), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_binary_literal() {
+        assert_eq!(lex("0b1010").unwrap(), vec![Token::Integer(10), Token::Eof]);
+        assert_eq!(
+            lex("0b1010_1100").unwrap(),
+            vec![Token::Integer(0b1010_1100), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_octal_literal() {
+        assert_eq!(lex("0o17").unwrap(), vec![Token::Integer(15), Token::Eof]);
+        assert_eq!(
+            lex("0o755").unwrap(),
+            vec![Token::Integer(0o755), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_digit_separator() {
+        assert_eq!(
+            lex("1_000_000").unwrap(),
+            vec![Token::Integer(1_000_000), Token::Eof]
+        );
+        assert_eq!(lex("3.14").unwrap(), vec![Token::Float(3.14), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_char_literal() {
+        assert_eq!(lex("'a'").unwrap(), vec![Token::Char('a'), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_char_escape() {
+        assert_eq!(lex(r"'\n'").unwrap(), vec![Token::Char('\n'), Token::Eof]);
+        assert_eq!(lex(r"'\''").unwrap(), vec![Token::Char('\''), Token::Eof]);
+        assert_eq!(lex(r"'\0'").unwrap(), vec![Token::Char('\0'), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_char_empty_error() {
+        assert!(matches!(lex("''"), Err(LexError::EmptyCharLiteral { .. })));
+    }
+
+    #[test]
+    fn lex_char_multi_error() {
+        assert!(matches!(
+            lex("'ab'"),
+            Err(LexError::MultiCharLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_unterminated_string() {
+        assert!(matches!(
+            Lexer::new(r#""abc"#).lex(),
+            Err(LexError::UnterminatedString { start: 0 })
+        ));
+    }
+
+    #[test]
+    fn lex_err_unrecognized_char() {
+        assert!(matches!(
+            Lexer::new("@").lex(),
+            Err(LexError::UnrecognizedCharacter { byte: 0, ch: '@' })
+        ));
+    }
+
+    #[test]
+    fn lex_err_unterminated_block_comment() {
+        assert!(matches!(
+            lex("## never closed"),
+            Err(LexError::UnterminatedBlockComment { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_unterminated_doc_comment() {
+        assert!(matches!(
+            lex("### never closed"),
+            Err(LexError::UnterminatedDocComment { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_missing_digits_after_base() {
+        assert!(matches!(
+            lex("0x"),
+            Err(LexError::MissingDigitsAfterBase { marker: 'x', .. })
+        ));
+        assert!(matches!(
+            lex("0b"),
+            Err(LexError::MissingDigitsAfterBase { marker: 'b', .. })
+        ));
+        assert!(matches!(
+            lex("0o"),
+            Err(LexError::MissingDigitsAfterBase { marker: 'o', .. })
+        ));
     }
 }

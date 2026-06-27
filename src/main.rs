@@ -27,7 +27,13 @@ fn main() {
         }
     };
 
-    let tokens = lexer::Lexer::new(&source).lex();
+    let tokens = match lexer::Lexer::new(&source).lex() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ofan: lex error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let ast = match parser::Parser::new(tokens).parse() {
         Ok(ast) => ast,

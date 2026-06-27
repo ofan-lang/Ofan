@@ -4,12 +4,12 @@ pub use error::ParseError;
 use crate::ast::Ast;
 use crate::lexer::token::{Span, Token};
 
-pub struct Parser {
-    tokens: Vec<(Token, Span)>,
+pub struct Parser<'src> {
+    tokens: Vec<(Token<'src>, Span)>,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<(Token, Span)>) -> Self {
+impl<'src> Parser<'src> {
+    pub fn new(tokens: Vec<(Token<'src>, Span)>) -> Self {
         Self { tokens }
     }
 
