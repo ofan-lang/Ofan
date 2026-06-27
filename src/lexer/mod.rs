@@ -3,6 +3,15 @@ pub mod token;
 pub use error::LexError;
 pub use token::{Span, Token};
 
+mod chars;
+mod comments;
+mod keywords;
+mod numbers;
+mod strings;
+
+use std::iter::Peekable;
+use std::str::CharIndices;
+
 pub struct Lexer<'src> {
     source: &'src str,
 }
@@ -15,15 +24,15 @@ impl<'src> Lexer<'src> {
     pub fn lex(&self) -> Result<Vec<(Token<'src>, Span)>, LexError> {
         let mut tokens: Vec<(Token<'src>, Span)> = Vec::new();
         let src = self.source;
-        let mut chars = src.char_indices().peekable();
+        let mut iter = src.char_indices().peekable();
 
         loop {
             // Skip whitespace.
-            while chars.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
-                chars.next();
+            while iter.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
+                iter.next();
             }
 
-            let Some(&(pos, ch)) = chars.peek() else {
+            let Some(&(pos, ch)) = iter.peek() else {
                 tokens.push((
                     Token::Eof,
                     Span {
@@ -36,77 +45,16 @@ impl<'src> Lexer<'src> {
 
             match ch {
                 '#' => {
-                    chars.next();
-                    let is_second_hash = chars.peek().is_some_and(|&(_, c)| c == '#');
-                    if is_second_hash {
-                        chars.next(); // consume second hash
-                        let is_third_hash = chars.peek().is_some_and(|&(_, c)| c == '#');
-                        if is_third_hash {
-                            chars.next(); // consume third hash
-                                          // Doc comment: scan until closing triple hash.
-                            let content_start = chars.peek().map_or(src.len(), |&(p, _)| p);
-                            let mut content_end = content_start;
-                            loop {
-                                match chars.next() {
-                                    None => {
-                                        return Err(LexError::UnterminatedDocComment {
-                                            start: pos,
-                                        })
-                                    }
-                                    Some((p, '#')) => {
-                                        if chars.peek().is_some_and(|&(_, c)| c == '#') {
-                                            chars.next();
-                                            if chars.peek().is_some_and(|&(_, c)| c == '#') {
-                                                chars.next();
-                                                break;
-                                            }
-                                        }
-                                        content_end = p + 1;
-                                    }
-                                    Some((p, c)) => {
-                                        content_end = p + c.len_utf8();
-                                    }
-                                }
-                            }
-                            let raw = &src[content_start..content_end];
-                            tokens.push((
-                                Token::DocComment(raw),
-                                Span {
-                                    start: pos,
-                                    end: content_end,
-                                },
-                            ));
-                        } else {
-                            // Block comment: scan until closing double hash.
-                            loop {
-                                match chars.next() {
-                                    None => {
-                                        return Err(LexError::UnterminatedBlockComment {
-                                            start: pos,
-                                        })
-                                    }
-                                    Some((_, '#'))
-                                        if chars.peek().is_some_and(|&(_, c)| c == '#') =>
-                                    {
-                                        chars.next();
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    } else {
-                        // Line comment: scan to end of line.
-                        while chars.peek().is_some_and(|&(_, c)| c != '\n') {
-                            chars.next();
-                        }
+                    iter.next();
+                    if let Some(tok) = comments::scan_comment(src, &mut iter, pos)? {
+                        tokens.push(tok);
                     }
                 }
 
                 '/' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::SlashEq,
                             Span {
@@ -128,213 +76,39 @@ impl<'src> Lexer<'src> {
                 // String literals: validate escape sequences; return raw source slice.
                 // Escape decoding is a later compiler phase.
                 '"' => {
-                    chars.next(); // consume opening quote
-                    let content_start = chars.peek().map_or(pos + 1, |&(p, _)| p);
-                    loop {
-                        match chars.next() {
-                            None => return Err(LexError::UnterminatedString { start: pos }),
-                            Some((close_pos, '"')) => {
-                                let raw = &src[content_start..close_pos];
-                                tokens.push((
-                                    Token::Str(raw),
-                                    Span {
-                                        start: pos,
-                                        end: close_pos + 1,
-                                    },
-                                ));
-                                break;
-                            }
-                            Some((escape_pos, '\\')) => match chars.next() {
-                                Some((_, 'n' | 't' | 'r' | '\\' | '"' | '0')) => {}
-                                Some((_, ch)) => {
-                                    return Err(LexError::InvalidEscape {
-                                        byte: escape_pos,
-                                        ch,
-                                    })
-                                }
-                                None => return Err(LexError::UnterminatedString { start: pos }),
-                            },
-                            _ => {}
-                        }
-                    }
+                    iter.next();
+                    tokens.push(strings::scan_string(src, &mut iter, pos)?);
                 }
 
                 '0'..='9' => {
-                    chars.next(); // consume first digit
-                    let start = pos;
-                    let mut end = pos + 1;
-
-                    let prefix_ch = if ch == '0' {
-                        chars.peek().and_then(|&(_, c)| {
-                            if c == 'x' || c == 'b' || c == 'o' {
-                                Some(c)
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    };
-
-                    if let Some(prefix_ch) = prefix_ch {
-                        chars.next(); // consume base marker
-                        end = start + 2;
-
-                        let (is_valid_digit, radix): (fn(char) -> bool, u32) = match prefix_ch {
-                            'x' => (|c: char| c.is_ascii_hexdigit(), 16),
-                            'b' => (|c: char| c == '0' || c == '1', 2),
-                            'o' => (|c: char| matches!(c, '0'..='7'), 8),
-                            _ => unreachable!(),
-                        };
-
-                        let mut digits = String::new();
-                        while chars
-                            .peek()
-                            .is_some_and(|&(_, c)| is_valid_digit(c) || c == '_')
-                        {
-                            let (p, c) = chars.next().unwrap();
-                            end = p + 1;
-                            if c != '_' {
-                                digits.push(c);
-                            }
-                        }
-
-                        if digits.is_empty() {
-                            return Err(LexError::MissingDigitsAfterBase {
-                                start,
-                                marker: prefix_ch,
-                            });
-                        }
-                        let value = i64::from_str_radix(&digits, radix)
-                            .map_err(|_| LexError::IntegerOverflow { start })?;
-                        tokens.push((Token::Integer(value), Span { start, end }));
-                    } else {
-                        let mut int_digits = String::new();
-                        int_digits.push(ch);
-                        while chars
-                            .peek()
-                            .is_some_and(|&(_, c)| c.is_ascii_digit() || c == '_')
-                        {
-                            let (p, c) = chars.next().unwrap();
-                            end = p + 1;
-                            if c != '_' {
-                                int_digits.push(c);
-                            }
-                        }
-
-                        let is_float = chars.peek().is_some_and(|&(_, c)| c == '.') && {
-                            let mut tmp = chars.clone();
-                            tmp.next();
-                            tmp.peek().is_some_and(|&(_, c)| c.is_ascii_digit())
-                        };
-
-                        if is_float {
-                            chars.next(); // consume dot
-                            let mut frac_digits = String::new();
-                            while chars
-                                .peek()
-                                .is_some_and(|&(_, c)| c.is_ascii_digit() || c == '_')
-                            {
-                                let (p, c) = chars.next().unwrap();
-                                end = p + 1;
-                                if c != '_' {
-                                    frac_digits.push(c);
-                                }
-                            }
-                            let float_str = format!("{}.{}", int_digits, frac_digits);
-                            let value: f64 = float_str
-                                .parse()
-                                .map_err(|_| LexError::MalformedFloat { start })?;
-                            tokens.push((Token::Float(value), Span { start, end }));
-                        } else {
-                            let value: i64 = int_digits
-                                .parse()
-                                .map_err(|_| LexError::IntegerOverflow { start })?;
-                            tokens.push((Token::Integer(value), Span { start, end }));
-                        }
-                    }
+                    iter.next();
+                    tokens.push(numbers::scan_number(&mut iter, pos, ch)?);
                 }
 
                 'a'..='z' | 'A'..='Z' | '_' => {
                     let start = pos;
                     let mut end = pos;
-                    while chars
+                    while iter
                         .peek()
                         .is_some_and(|&(_, c)| c.is_ascii_alphanumeric() || c == '_')
                     {
-                        let (p, c) = chars.next().unwrap();
+                        let (p, c) = iter.next().unwrap();
                         end = p + c.len_utf8();
                     }
                     let text = &src[start..end];
-                    let tok = match text {
-                        "fn" => Token::Fn,
-                        "let" => Token::Let,
-                        "mut" => Token::Mut,
-                        "const" => Token::Const,
-                        "if" => Token::If,
-                        "else" => Token::Else,
-                        "while" => Token::While,
-                        "for" => Token::For,
-                        "in" => Token::In,
-                        "return" => Token::Return,
-                        "break" => Token::Break,
-                        "continue" => Token::Continue,
-                        "true" => Token::True,
-                        "false" => Token::False,
-                        "struct" => Token::Struct,
-                        "enum" => Token::Enum,
-                        "pub" => Token::Pub,
-                        "use" => Token::Use,
-                        "as" => Token::As,
-                        "using" => Token::Using,
-                        "static" => Token::Static,
-                        "unsafe" => Token::Unsafe,
-                        _ => Token::Ident(text),
-                    };
+                    let tok = keywords::lookup(text).unwrap_or(Token::Ident(text));
                     tokens.push((tok, Span { start, end }));
                 }
 
                 '\'' => {
-                    chars.next(); // consume opening quote
-                    let decoded: char = match chars.next() {
-                        None => return Err(LexError::UnterminatedChar { start: pos }),
-                        Some((_, '\'')) => return Err(LexError::EmptyCharLiteral { start: pos }),
-                        Some((escape_pos, '\\')) => match chars.next() {
-                            Some((_, 'n')) => '\n',
-                            Some((_, 't')) => '\t',
-                            Some((_, 'r')) => '\r',
-                            Some((_, '\\')) => '\\',
-                            Some((_, '\'')) => '\'',
-                            Some((_, '0')) => '\0',
-                            Some((_, ch)) => {
-                                return Err(LexError::InvalidEscape {
-                                    byte: escape_pos,
-                                    ch,
-                                })
-                            }
-                            None => return Err(LexError::UnterminatedChar { start: pos }),
-                        },
-                        Some((_, c)) => c,
-                    };
-                    match chars.next() {
-                        Some((close_pos, '\'')) => {
-                            tokens.push((
-                                Token::Char(decoded),
-                                Span {
-                                    start: pos,
-                                    end: close_pos + 1,
-                                },
-                            ));
-                        }
-                        Some(_) => return Err(LexError::MultiCharLiteral { start: pos }),
-                        None => return Err(LexError::UnterminatedChar { start: pos }),
-                    }
+                    iter.next();
+                    tokens.push(chars::scan_char(&mut iter, pos)?);
                 }
 
                 '=' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::EqEq,
                             Span {
@@ -353,9 +127,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '!' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::BangEq,
                             Span {
@@ -374,10 +148,10 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '<' => {
-                    chars.next();
-                    match chars.peek() {
+                    iter.next();
+                    match iter.peek() {
                         Some(&(end_pos, '<')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::Shl,
                                 Span {
@@ -387,7 +161,7 @@ impl<'src> Lexer<'src> {
                             ));
                         }
                         Some(&(end_pos, '=')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::LtEq,
                                 Span {
@@ -406,10 +180,10 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '>' => {
-                    chars.next();
-                    match chars.peek() {
+                    iter.next();
+                    match iter.peek() {
                         Some(&(end_pos, '>')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::Shr,
                                 Span {
@@ -419,7 +193,7 @@ impl<'src> Lexer<'src> {
                             ));
                         }
                         Some(&(end_pos, '=')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::GtEq,
                                 Span {
@@ -438,9 +212,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '&' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '&') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '&') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::AmpAmp,
                             Span {
@@ -459,9 +233,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '|' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '|') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '|') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::PipePipe,
                             Span {
@@ -480,10 +254,10 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '-' => {
-                    chars.next();
-                    match chars.peek() {
+                    iter.next();
+                    match iter.peek() {
                         Some(&(end_pos, '>')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::Arrow,
                                 Span {
@@ -493,7 +267,7 @@ impl<'src> Lexer<'src> {
                             ));
                         }
                         Some(&(end_pos, '=')) => {
-                            chars.next();
+                            iter.next();
                             tokens.push((
                                 Token::MinusEq,
                                 Span {
@@ -512,9 +286,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '+' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::PlusEq,
                             Span {
@@ -533,9 +307,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '*' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::StarEq,
                             Span {
@@ -554,9 +328,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '%' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::PercentEq,
                             Span {
@@ -575,9 +349,9 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '?' => {
-                    chars.next();
-                    if chars.peek().is_some_and(|&(_, c)| c == ':') {
-                        let (end_pos, _) = chars.next().unwrap();
+                    iter.next();
+                    if iter.peek().is_some_and(|&(_, c)| c == ':') {
+                        let (end_pos, _) = iter.next().unwrap();
                         tokens.push((
                             Token::QuestionColon,
                             Span {
@@ -596,7 +370,7 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 '^' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Caret,
                         Span {
@@ -606,7 +380,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '~' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Tilde,
                         Span {
@@ -616,7 +390,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '(' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::LParen,
                         Span {
@@ -626,7 +400,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 ')' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::RParen,
                         Span {
@@ -636,7 +410,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '{' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::LBrace,
                         Span {
@@ -646,7 +420,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '}' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::RBrace,
                         Span {
@@ -656,7 +430,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '[' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::LBracket,
                         Span {
@@ -666,7 +440,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 ']' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::RBracket,
                         Span {
@@ -676,7 +450,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 ';' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Semicolon,
                         Span {
@@ -686,7 +460,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 ':' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Colon,
                         Span {
@@ -696,7 +470,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 ',' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Comma,
                         Span {
@@ -706,7 +480,7 @@ impl<'src> Lexer<'src> {
                     ));
                 }
                 '.' => {
-                    chars.next();
+                    iter.next();
                     tokens.push((
                         Token::Dot,
                         Span {
@@ -723,6 +497,26 @@ impl<'src> Lexer<'src> {
         }
 
         Ok(tokens)
+    }
+}
+
+// Shared escape-sequence validator used by strings.rs and chars.rs.
+// Returns the decoded char so chars.rs can use it; strings.rs discards the value.
+fn decode_escape(
+    chars: &mut Peekable<CharIndices<'_>>,
+    escape_pos: usize,
+    delimiter: char,
+    eof_err: LexError,
+) -> Result<char, LexError> {
+    match chars.next() {
+        Some((_, 'n'))  => Ok('\n'),
+        Some((_, 't'))  => Ok('\t'),
+        Some((_, 'r'))  => Ok('\r'),
+        Some((_, '\\')) => Ok('\\'),
+        Some((_, '0'))  => Ok('\0'),
+        Some((_, c)) if c == delimiter => Ok(c),
+        Some((_, ch))   => Err(LexError::InvalidEscape { byte: escape_pos, ch }),
+        None            => Err(eof_err),
     }
 }
 
@@ -991,6 +785,24 @@ mod tests {
         assert!(matches!(
             lex("### never closed"),
             Err(LexError::UnterminatedDocComment { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_string_reject_single_quote_escape() {
+        // \' is not a valid string escape; only \" is the delimiter escape in strings.
+        assert!(matches!(
+            lex("\"\\'\""),
+            Err(LexError::InvalidEscape { ch: '\'', .. })
+        ));
+    }
+
+    #[test]
+    fn lex_char_reject_double_quote_escape() {
+        // \" is not a valid char escape; only \' is the delimiter escape in chars.
+        assert!(matches!(
+            lex(r#"'\"'"#),
+            Err(LexError::InvalidEscape { ch: '"', .. })
         ));
     }
 

@@ -3,6 +3,43 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-26 (part 3 — lexer module split)
+
+**What was implemented:**
+- Structural refactor of `src/lexer/mod.rs` (~1013 lines) into per-construct submodules:
+  - `comments.rs` — line/block/doc comment scanning
+  - `numbers.rs` — decimal/hex/binary/octal + float scanning
+  - `strings.rs` — string literal scanning with escape validation
+  - `chars.rs` — character literal scanning with escape decoding
+  - `keywords.rs` — keyword lookup table
+- Shared `decode_escape` helper extracted to `mod.rs` (private). Both `strings.rs` and
+  `chars.rs` call `super::decode_escape(delimiter, eof_err)` — the delimiter parameter
+  keeps the escape sets correctly asymmetric (`"` vs `'`).
+- Local variable `chars` renamed to `iter` in `lex()` to avoid shadowing the new `chars`
+  submodule.
+- Two additional tests added: `lex_string_reject_single_quote_escape` and
+  `lex_char_reject_double_quote_escape` — lock in that the delimiter asymmetry is tested.
+- `keywords::lookup` lifetime annotation simplified from named `'src` to elided `'_`.
+- All 34 tests pass; `cargo clippy -D warnings` clean.
+
+**Design decisions made (and why):**
+- `decode_escape` placed in `mod.rs` (not a separate file) because it is a private helper
+  shared only by two sibling submodules. Child modules can access private parent items via
+  `super::`. Creating a sixth file for a 10-line helper would be over-decomposition.
+- `chars.rs::scan_char` takes no `src: &'src str` parameter — char literal scanning
+  decodes to a `char` value and does not need to slice the source.
+- `pub(super)` on all submodule functions — they are not part of the crate's public API.
+
+**Pending / next step:**
+- Ident Unicode start/continuation inconsistency (flagged by pillars-reviewer pass 1) —
+  separate task, separate branch.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first).
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## Last session: 2026-06-26 (part 2 — lexer implementation)
 
 **What was implemented:**
