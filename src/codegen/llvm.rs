@@ -7,7 +7,9 @@ pub struct LlvmContext {
 
 impl LlvmContext {
     pub fn new() -> Self {
-        Self { inner: Context::create() }
+        Self {
+            inner: Context::create(),
+        }
     }
 }
 

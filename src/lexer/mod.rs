@@ -55,21 +55,9 @@ impl<'src> Lexer<'src> {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::SlashEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::SlashEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Slash,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Slash, pos);
                     }
                 }
 
@@ -109,42 +97,18 @@ impl<'src> Lexer<'src> {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::EqEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::EqEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Equals,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Equals, pos);
                     }
                 }
                 '!' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::BangEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::BangEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Bang,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Bang, pos);
                     }
                 }
                 '<' => {
@@ -152,31 +116,13 @@ impl<'src> Lexer<'src> {
                     match iter.peek() {
                         Some(&(end_pos, '<')) => {
                             iter.next();
-                            tokens.push((
-                                Token::Shl,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::Shl, pos, end_pos);
                         }
                         Some(&(end_pos, '=')) => {
                             iter.next();
-                            tokens.push((
-                                Token::LtEq,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::LtEq, pos, end_pos);
                         }
-                        _ => tokens.push((
-                            Token::Lt,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        )),
+                        _ => push1(&mut tokens, Token::Lt, pos),
                     }
                 }
                 '>' => {
@@ -184,73 +130,31 @@ impl<'src> Lexer<'src> {
                     match iter.peek() {
                         Some(&(end_pos, '>')) => {
                             iter.next();
-                            tokens.push((
-                                Token::Shr,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::Shr, pos, end_pos);
                         }
                         Some(&(end_pos, '=')) => {
                             iter.next();
-                            tokens.push((
-                                Token::GtEq,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::GtEq, pos, end_pos);
                         }
-                        _ => tokens.push((
-                            Token::Gt,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        )),
+                        _ => push1(&mut tokens, Token::Gt, pos),
                     }
                 }
                 '&' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '&') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::AmpAmp,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::AmpAmp, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Amp,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Amp, pos);
                     }
                 }
                 '|' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '|') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::PipePipe,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::PipePipe, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Pipe,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Pipe, pos);
                     }
                 }
                 '-' => {
@@ -258,236 +162,98 @@ impl<'src> Lexer<'src> {
                     match iter.peek() {
                         Some(&(end_pos, '>')) => {
                             iter.next();
-                            tokens.push((
-                                Token::Arrow,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::Arrow, pos, end_pos);
                         }
                         Some(&(end_pos, '=')) => {
                             iter.next();
-                            tokens.push((
-                                Token::MinusEq,
-                                Span {
-                                    start: pos,
-                                    end: end_pos + 1,
-                                },
-                            ));
+                            push2(&mut tokens, Token::MinusEq, pos, end_pos);
                         }
-                        _ => tokens.push((
-                            Token::Minus,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        )),
+                        _ => push1(&mut tokens, Token::Minus, pos),
                     }
                 }
                 '+' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::PlusEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::PlusEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Plus,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Plus, pos);
                     }
                 }
                 '*' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::StarEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::StarEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Star,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Star, pos);
                     }
                 }
                 '%' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == '=') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::PercentEq,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::PercentEq, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Percent,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Percent, pos);
                     }
                 }
                 '?' => {
                     iter.next();
                     if iter.peek().is_some_and(|&(_, c)| c == ':') {
                         let (end_pos, _) = iter.next().unwrap();
-                        tokens.push((
-                            Token::QuestionColon,
-                            Span {
-                                start: pos,
-                                end: end_pos + 1,
-                            },
-                        ));
+                        push2(&mut tokens, Token::QuestionColon, pos, end_pos);
                     } else {
-                        tokens.push((
-                            Token::Question,
-                            Span {
-                                start: pos,
-                                end: pos + 1,
-                            },
-                        ));
+                        push1(&mut tokens, Token::Question, pos);
                     }
                 }
                 '^' => {
                     iter.next();
-                    tokens.push((
-                        Token::Caret,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Caret, pos);
                 }
                 '~' => {
                     iter.next();
-                    tokens.push((
-                        Token::Tilde,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Tilde, pos);
                 }
                 '(' => {
                     iter.next();
-                    tokens.push((
-                        Token::LParen,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::LParen, pos);
                 }
                 ')' => {
                     iter.next();
-                    tokens.push((
-                        Token::RParen,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::RParen, pos);
                 }
                 '{' => {
                     iter.next();
-                    tokens.push((
-                        Token::LBrace,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::LBrace, pos);
                 }
                 '}' => {
                     iter.next();
-                    tokens.push((
-                        Token::RBrace,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::RBrace, pos);
                 }
                 '[' => {
                     iter.next();
-                    tokens.push((
-                        Token::LBracket,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::LBracket, pos);
                 }
                 ']' => {
                     iter.next();
-                    tokens.push((
-                        Token::RBracket,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::RBracket, pos);
                 }
                 ';' => {
                     iter.next();
-                    tokens.push((
-                        Token::Semicolon,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Semicolon, pos);
                 }
                 ':' => {
                     iter.next();
-                    tokens.push((
-                        Token::Colon,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Colon, pos);
                 }
                 ',' => {
                     iter.next();
-                    tokens.push((
-                        Token::Comma,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Comma, pos);
                 }
                 '.' => {
                     iter.next();
-                    tokens.push((
-                        Token::Dot,
-                        Span {
-                            start: pos,
-                            end: pos + 1,
-                        },
-                    ));
+                    push1(&mut tokens, Token::Dot, pos);
                 }
 
                 _ => {
@@ -500,6 +266,31 @@ impl<'src> Lexer<'src> {
     }
 }
 
+fn push1<'src>(tokens: &mut Vec<(Token<'src>, Span)>, tok: Token<'src>, pos: usize) {
+    tokens.push((
+        tok,
+        Span {
+            start: pos,
+            end: pos + 1,
+        },
+    ));
+}
+
+fn push2<'src>(
+    tokens: &mut Vec<(Token<'src>, Span)>,
+    tok: Token<'src>,
+    pos: usize,
+    end_pos: usize,
+) {
+    tokens.push((
+        tok,
+        Span {
+            start: pos,
+            end: end_pos + 1,
+        },
+    ));
+}
+
 // Shared escape-sequence validator used by strings.rs and chars.rs.
 // Returns the decoded char so chars.rs can use it; strings.rs discards the value.
 fn decode_escape(
@@ -509,14 +300,17 @@ fn decode_escape(
     eof_err: LexError,
 ) -> Result<char, LexError> {
     match chars.next() {
-        Some((_, 'n'))  => Ok('\n'),
-        Some((_, 't'))  => Ok('\t'),
-        Some((_, 'r'))  => Ok('\r'),
+        Some((_, 'n')) => Ok('\n'),
+        Some((_, 't')) => Ok('\t'),
+        Some((_, 'r')) => Ok('\r'),
         Some((_, '\\')) => Ok('\\'),
-        Some((_, '0'))  => Ok('\0'),
+        Some((_, '0')) => Ok('\0'),
         Some((_, c)) if c == delimiter => Ok(c),
-        Some((_, ch))   => Err(LexError::InvalidEscape { byte: escape_pos, ch }),
-        None            => Err(eof_err),
+        Some((_, ch)) => Err(LexError::InvalidEscape {
+            byte: escape_pos,
+            ch,
+        }),
+        None => Err(eof_err),
     }
 }
 

@@ -1,6 +1,6 @@
+use super::{LexError, Span, Token};
 use std::iter::Peekable;
 use std::str::CharIndices;
-use super::{LexError, Span, Token};
 
 // Opening '"' is consumed by the caller before this is called.
 pub(super) fn scan_string<'src>(

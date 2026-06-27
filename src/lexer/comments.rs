@@ -1,6 +1,6 @@
+use super::{LexError, Span, Token};
 use std::iter::Peekable;
 use std::str::CharIndices;
-use super::{LexError, Span, Token};
 
 // First '#' is consumed by the caller before this is called.
 pub(super) fn scan_comment<'src>(
@@ -14,7 +14,7 @@ pub(super) fn scan_comment<'src>(
         let is_third_hash = chars.peek().is_some_and(|&(_, c)| c == '#');
         if is_third_hash {
             chars.next(); // consume third '#'
-            // Doc comment: scan until closing triple '#'.
+                          // Doc comment: scan until closing triple '#'.
             let content_start = chars.peek().map_or(src.len(), |&(p, _)| p);
             let mut content_end = content_start;
             loop {
@@ -38,16 +38,17 @@ pub(super) fn scan_comment<'src>(
             let raw = &src[content_start..content_end];
             Ok(Some((
                 Token::DocComment(raw),
-                Span { start, end: content_end },
+                Span {
+                    start,
+                    end: content_end,
+                },
             )))
         } else {
             // Block comment: scan until closing '##'.
             loop {
                 match chars.next() {
                     None => return Err(LexError::UnterminatedBlockComment { start }),
-                    Some((_, '#'))
-                        if chars.peek().is_some_and(|&(_, c)| c == '#') =>
-                    {
+                    Some((_, '#')) if chars.peek().is_some_and(|&(_, c)| c == '#') => {
                         chars.next();
                         break;
                     }
