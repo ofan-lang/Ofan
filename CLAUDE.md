@@ -1,9 +1,9 @@
 # Ofan — Project instructions for Claude Code
 
 A systems language with strong memory safety and a low learning curve.
-See `/docs/PHILOSOPHY.md` for the full thesis — read it before any design decision about the
-language itself (syntax, semantics, types). No need to re-read it for purely mechanical tasks
-(formatting, tooling, CI).
+- Syntax decisions (keywords, operators, literal forms, token rules): see `/docs/SYNTAX_SPEC.md`
+- Design thesis, pillars, semantics, type-system decisions: see `/docs/PHILOSOPHY.md`
+No need to read either for purely mechanical tasks (formatting, tooling, CI).
 
 ## The 5 non-negotiable pillars
 1. Explicit erroneous behavior, never silent UB (compile error if detectable; documented
@@ -25,8 +25,10 @@ even if nobody asked.
 - Lint: `cargo clippy -- -D warnings`
 
 ## Conventions
-- Every language design decision (not implementation detail) gets documented in
-  `/docs/PHILOSOPHY.md` along with its reasoning, not just the outcome.
+- Syntax decisions (token shapes, keywords, operators, literal forms) belong in
+  `/docs/SYNTAX_SPEC.md` with their rationale.
+- All other language design decisions (semantics, type system, memory model) belong in
+  `/docs/PHILOSOPHY.md` with their reasoning.
 - Commits: imperative mood, explain the *why* of the change, not just the what.
 - Never mark a task complete without showing evidence (real test output).
 
