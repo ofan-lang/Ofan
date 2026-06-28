@@ -3,6 +3,34 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-28 — PR #6 merge verification + branch cleanup
+
+**What was done:**
+- Pulled PR #6 (`refactor/split-lexer-modules`) into `main` — fast-forward merge.
+- Verified all structural expectations from the PR:
+  - `src/lexer/` contains `chars.rs`, `comments.rs`, `keywords.rs`, `numbers.rs`,
+    `strings.rs` alongside `mod.rs`, `token.rs`, `error.rs`.
+  - `mod.rs` has `push1`/`push2` helpers (no inline `tokens.push(...)` repetition).
+  - `error.rs` has `MisplacedDigitSeparator { byte: usize }`.
+  - `docs/SYNTAX_SPEC.md` §14 has correct placement-enforcement wording; old "ignored
+    wherever they appear" text is gone.
+- `cargo build`, `cargo clippy -- -D warnings`, `cargo test`: all clean.
+- Test count: **38/38** (34 pre-existing + 4 digit-separator cases). Matches PR description.
+- Deleted `refactor/split-lexer-modules` locally and on remote.
+
+**Design decisions made (and why):**
+- None. Sync-and-verify session only.
+
+**Pending / next step:**
+- Ident Unicode start/continuation inconsistency (flagged by pillars-reviewer pass 1) —
+  separate task, separate branch.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first).
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## Last session: 2026-06-26 (part 3 — lexer module split)
 
 **What was implemented:**
