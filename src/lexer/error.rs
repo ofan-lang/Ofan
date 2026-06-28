@@ -36,4 +36,7 @@ pub enum LexError {
 
     #[error("missing digits after `0{marker}` prefix at byte {start} — add at least one valid digit (e.g. `0{marker}1`)")]
     MissingDigitsAfterBase { start: usize, marker: char },
+
+    #[error("misplaced `_` in numeric literal at byte {byte} — digit separators are valid only between two digits (e.g. `1_000`), not at the start, end, or doubled")]
+    MisplacedDigitSeparator { byte: usize },
 }

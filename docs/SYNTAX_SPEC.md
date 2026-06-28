@@ -508,7 +508,7 @@ provide. A block exactly as large as the actual risk keeps the marker meaningful
 **Decided.**
 
 ```ofn
-let big: i32 = 1_000_000;     // digit separators, ignored by the lexer
+let big: i32 = 1_000_000;     // digit separators, stripped by lexer
 let hex: u32 = 0x4002_0014;   // hex — load-bearing for microcontroller/register code
 let bin: u8 = 0b1010_1100;    // binary — register flags, bit manipulation
 let oct: u32 = 0o755;         // octal — kept for completeness, no extra lexer cost
@@ -518,10 +518,22 @@ let pi = 3.14;                 // defaults to f64 if nothing else constrains it
 let typed: u8 = 5;              // type comes from the annotation, not a literal suffix
 ```
 
-*Digit separators (`_`):* ignored by the lexer wherever they appear inside a numeric
-literal. Unambiguous — an identifier can never start with a digit, so `1_000` cannot be
-confused with `1` followed by an identifier. Adopted for readability at zero cost
-(pillar 2), with no viable alternative reading to rule out.
+*Digit separators (`_`):* a single `_` may appear between any two digits within a
+numeric literal, in any base. Unambiguous — an identifier can never start with a digit,
+so `1_000` cannot be confused with `1` followed by an identifier. Adopted for
+readability at zero cost (pillar 2).
+
+Placement is enforced: `_` is not valid at the start of the digit sequence (e.g.
+`0x_FF`), at the end (`1000_`), or doubled (`1__000`). Violations are a hard lexer
+error per pillar 1, with the message:
+"misplaced `_` in numeric literal at byte {byte} — digit separators are valid only
+between two digits (e.g. `1_000`), not at the start, end, or doubled"
+
+Valid: `1_000`, `0xFF_00`, `0b1010_0101`, `0o17_77`, `3.141_592`
+Invalid: `1000_`, `1__000`, `0x_FF`, `0xFF_`, `0x1__2`, `1.5_`, `1.5__3`
+
+Note: a leading `_` on the whole literal (e.g. `_1000`) is not a malformed number —
+`_` triggers the identifier arm and lexes as `Ident("_1000")`. No special case needed.
 
 *Alternate bases (`0x`, `0b`, `0o`):* `0x` (hex) and `0b` (binary) are not optional
 polish — they are directly load-bearing for the microcontroller/register-manipulation
