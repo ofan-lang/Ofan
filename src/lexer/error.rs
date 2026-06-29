@@ -39,4 +39,7 @@ pub enum LexError {
 
     #[error("misplaced `_` in numeric literal at byte {byte} — digit separators are valid only between two digits (e.g. `1_000`), not at the start, end, or doubled")]
     MisplacedDigitSeparator { byte: usize },
+
+    #[error("numeric literal `{literal}` at byte {start} is immediately followed by `{ch}` — Ofan has no literal suffixes (§14); if these are separate tokens, add whitespace between them")]
+    IdentAfterNumericLiteral { start: usize, literal: String, ch: char },
 }
