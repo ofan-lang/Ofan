@@ -577,6 +577,33 @@ defaults Rust uses in the equivalent situation, adopted specifically because the
 no learning-curve cost for anyone arriving with prior systems-language experience
 (pillar 2), and deviating would only create friction without a corresponding benefit.
 
+*Numeric literal immediately followed by an identifier-start character:* a hard lexer
+error. After a numeric literal scan completes successfully, if the next character is an
+ASCII letter or `_` (an identifier-start character in Ofan — see §2), the lexer emits:
+
+```
+numeric literal `{literal}` at byte {start} is immediately followed by `{ch}`
+— Ofan has no literal suffixes (§14); if these are separate tokens, add whitespace
+between them
+```
+
+*Why at the lexer and not the parser:* since §14 already disallows literal type suffixes,
+a number immediately abutting an identifier character can never be valid Ofan. Catching
+it at the lexer produces a message that names both the literal and the offending
+character; letting it fall through to the parser would produce a generic "unexpected
+identifier" message with no memory of the preceding numeric literal. `0x1fg` is the
+motivating case: `f` is a valid hex digit and is silently consumed into the literal,
+leaving `g` as a stray identifier with no explanation at the parser level — a silent
+value corruption the programmer may not notice (`0x1fg` was likely intended as a unit,
+a typo, or a note that is not a hex digit at all).
+
+*Precedence relative to `MisplacedDigitSeparator`:* first-problem-encountered, scanning
+left to right — not a priority ranking between the two checks. The new check runs only
+after the number scan completes successfully. Inputs like `1_abc` already error on
+`MisplacedDigitSeparator` (the `_` is consumed by the scan loop, which checks the
+next character as a digit lookahead and fails) before the success exit is reached.
+The two checks are sequenced by control flow, not ranked by design.
+
 ---
 
 ## §15 String and character literals
@@ -845,16 +872,6 @@ syntax is settled for these.
 **Lexer-relevant (deferred deliberately, not overlooked):**
 - **Unicode escapes** (`\u{...}`-style) — see §15
 - **Raw strings** (no escape processing) — see §15
-- **Numeric literal immediately followed by an identifier** — `1abc` currently lexes as
-  `Integer(1)` + `Ident("abc")` (two tokens, no error). Surfaced during the §2
-  spec-gap investigation (2026-06-28). Whether this should instead be a hard lexer error
-  (e.g. "numeric literal must be followed by whitespace, operator, or end of input —
-  did you mean `1` and `abc` as separate tokens?") has not been decided. Options are
-  (a) keep current behavior: valid tokenization, let the parser reject `1 abc` as a
-  syntax error if appropriate; (b) make it a hard lexer error (pillar 5: better
-  diagnostic, catches likely typos like `0x1fg` or `42px` before they reach the parser).
-  Needs a deliberate decision — not urgent for Phase 1 but worth resolving before a
-  parser is written that assumes either behavior.
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
 - **Loop syntax** — `for`/`while`/`loop` used informally; exact forms and semantics undecided

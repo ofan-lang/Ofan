@@ -2,8 +2,30 @@ use super::{LexError, Span, Token};
 use std::iter::Peekable;
 use std::str::CharIndices;
 
+fn check_no_ident_follows(
+    src: &str,
+    chars: &mut Peekable<CharIndices<'_>>,
+    start: usize,
+    end: usize,
+) -> Result<(), LexError> {
+    if let Some(&(_, ch)) = chars.peek() {
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            return Err(LexError::IdentAfterNumericLiteral {
+                start,
+                literal: src[start..end].to_string(),
+                ch,
+            });
+        }
+    }
+    Ok(())
+}
+
 // First digit is consumed by the caller (passed as `first_digit`).
+// `src` is needed only for the IdentAfterNumericLiteral error: the accumulated digit
+// strings strip separators and drop the base prefix, so `src[start..end]` is the only
+// way to reproduce the literal exactly as written.
 pub(super) fn scan_number<'src>(
+    src: &'src str,
     chars: &mut Peekable<CharIndices<'src>>,
     start: usize,
     first_digit: char,
@@ -59,6 +81,7 @@ pub(super) fn scan_number<'src>(
         }
         let value =
             i64::from_str_radix(&digits, radix).map_err(|_| LexError::IntegerOverflow { start })?;
+        check_no_ident_follows(src, chars, start, end)?;
         Ok((Token::Integer(value), Span { start, end }))
     } else {
         let mut int_digits = String::new();
@@ -105,11 +128,13 @@ pub(super) fn scan_number<'src>(
             let value: f64 = float_str
                 .parse()
                 .map_err(|_| LexError::MalformedFloat { start })?;
+            check_no_ident_follows(src, chars, start, end)?;
             Ok((Token::Float(value), Span { start, end }))
         } else {
             let value: i64 = int_digits
                 .parse()
                 .map_err(|_| LexError::IntegerOverflow { start })?;
+            check_no_ident_follows(src, chars, start, end)?;
             Ok((Token::Integer(value), Span { start, end }))
         }
     }

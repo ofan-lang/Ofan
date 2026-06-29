@@ -3,6 +3,49 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-28 — `IdentAfterNumericLiteral` lexer error (src/lexer/)
+
+**What was done:**
+- Investigated `1abc` behavior surfaced during §2 audit. Confirmed: ALL bases (decimal,
+  float, hex, binary, octal) silently split on non-scannable characters, producing two
+  tokens with no error.
+- `0x1fg` identified as the sharpest case: `f` is a valid hex digit and silently consumed,
+  leaving `g` as stray `Ident` — silent value corruption.
+- `1_abc` inconsistency confirmed: already errors via `MisplacedDigitSeparator`; `1abc`
+  did not. Both are "literal immediately abutting an identifier."
+- Implemented `LexError::IdentAfterNumericLiteral { start, literal: String, ch }` in
+  `error.rs`. Added helper `check_no_ident_follows` in `numbers.rs`; wired at all 3
+  success return paths (hex/bin/oct integer, decimal float, decimal integer).
+- 7 new tests (all 6 investigation-table cases + precedence test + operator/whitespace
+  regression). All 45 tests pass.
+- Updated `SYNTAX_SPEC.md` §14 with the rule, motivating case, and precedence note.
+  Removed the item from §19 deferred list.
+
+**Design decisions made (and why):**
+- **Hard lexer error, not a parser-level error.** Since §14 already disallows literal
+  suffixes, the input can never be valid. Lexer catches it with a message naming both
+  the literal and the offending character; parser would produce generic "unexpected
+  identifier" with no memory of the number. `0x1fg` value-corruption case is pillar 1.
+- **First-problem-encountered precedence with `MisplacedDigitSeparator`.** The new check
+  runs only after the number scan succeeds. `1_abc` still errors on `MisplacedDigitSeparator`
+  (scan loop fails on `_` lookahead before reaching the success exit). Sequenced by
+  control flow, not ranked by priority — stated explicitly in §14.
+
+**Pending / next step:**
+- Rust-idiom reviewer noted: if non-ASCII ident start ever added (§2 deferred), the
+  `check_no_ident_follows` predicate (`is_ascii_alphabetic() || '_'`) would be a
+  second source of truth. Route through the same classifier as the main lex dispatch
+  arm at that point — no action needed now.
+- Pillars reviewer noted: `0b102` / `0o19` (out-of-radix digit followed by more digits)
+  still silently produces two `Integer` tokens. Same class of issue, different trigger.
+  Worth a follow-up when the number scanner is next touched.
+- Trait/interface syntax, parser grammar — §19, separate sessions.
+
+**Something the agent proposed and was rejected (and why):**
+- N/A.
+
+---
+
 ## Last session: 2026-06-28 — §2 identifier character-set spec-gap closure (docs/SYNTAX_SPEC.md)
 
 **What was done:**

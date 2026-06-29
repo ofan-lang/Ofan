@@ -70,7 +70,7 @@ impl<'src> Lexer<'src> {
 
                 '0'..='9' => {
                     iter.next();
-                    tokens.push(numbers::scan_number(&mut iter, pos, ch)?);
+                    tokens.push(numbers::scan_number(src, &mut iter, pos, ch)?);
                 }
 
                 'a'..='z' | 'A'..='Z' | '_' => {
@@ -671,5 +671,88 @@ mod tests {
         assert!(matches!(lex("0b1010_0101"), Ok(_)));
         assert!(matches!(lex("0o17_77"), Ok(_)));
         assert!(matches!(lex("3.141_592"), Ok(_)));
+    }
+
+    // ── IdentAfterNumericLiteral ──────────────────────────────────────────────
+
+    #[test]
+    fn lex_err_ident_after_decimal_integer() {
+        assert!(matches!(
+            lex("1abc"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'a' })
+                if literal == "1"
+        ));
+        assert!(matches!(
+            lex("42px"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'p' })
+                if literal == "42"
+        ));
+        assert!(matches!(
+            lex("1_000abc"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'a' })
+                if literal == "1_000"
+        ));
+    }
+
+    #[test]
+    fn lex_err_ident_after_float() {
+        assert!(matches!(
+            lex("1.5abc"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'a' })
+                if literal == "1.5"
+        ));
+    }
+
+    #[test]
+    fn lex_err_ident_after_hex() {
+        assert!(matches!(
+            lex("0x1fg"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'g' })
+                if literal == "0x1f"
+        ));
+        assert!(matches!(
+            lex("0xFEEDgabe"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'g' })
+                if literal == "0xFEED"
+        ));
+    }
+
+    #[test]
+    fn lex_err_ident_after_binary() {
+        assert!(matches!(
+            lex("0b101z"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'z' })
+                if literal == "0b101"
+        ));
+    }
+
+    #[test]
+    fn lex_err_ident_after_octal() {
+        assert!(matches!(
+            lex("0o71abc"),
+            Err(LexError::IdentAfterNumericLiteral { start: 0, ref literal, ch: 'a' })
+                if literal == "0o71"
+        ));
+    }
+
+    #[test]
+    fn lex_misplaced_separator_takes_precedence_over_ident_after_literal() {
+        // 1_abc: the scan loop consumes '_', checks next char ('a') as digit lookahead,
+        // fails, and returns MisplacedDigitSeparator before reaching the success exit
+        // where IdentAfterNumericLiteral would be checked. First-problem-encountered,
+        // not a priority ranking.
+        assert!(matches!(
+            lex("1_abc"),
+            Err(LexError::MisplacedDigitSeparator { byte: 1 })
+        ));
+    }
+
+    #[test]
+    fn lex_numeric_followed_by_operator_or_whitespace_still_ok() {
+        // Operator or whitespace after a literal must not trigger IdentAfterNumericLiteral.
+        assert!(matches!(lex("42+1"), Ok(_)));
+        assert!(matches!(lex("42 abc"), Ok(_)));
+        assert!(matches!(lex("0xFF;"), Ok(_)));
+        assert!(matches!(lex("1.5,"), Ok(_)));
     }
 }
