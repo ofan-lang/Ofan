@@ -3,6 +3,40 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-28 — §18 method receiver syntax (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Added §18 Method receiver syntax to `docs/SYNTAX_SPEC.md` (PR #8, merged).
+- Renumbered old §18 deferred list → §19. Updated Contents table, Status summary
+  (16 of 17 → 17 of 18), §17 "See also" cross-reference (now points to resolved §18),
+  and trait/interface syntax entry in §19 to reference §18.
+- Removed "Method receiver syntax" from §19 deferred list — now resolved.
+
+**Design decisions made (and why):**
+- **Three receiver forms: `&self`, `&mut self`, `self` — no new syntax, all reuse
+  existing mechanisms.**
+  - `&self`: immutable borrow; caller's binding unchanged after call.
+  - `&mut self`: mutable borrow; mutates receiver in place, caller's binding survives.
+  - `self` (consuming): governed entirely by §17 Copy/Move rule — Move struct invalidates
+    caller's binding; Copy struct leaves it untouched. No special-casing at method
+    boundaries; same rule as ordinary function parameters.
+  - Explicit `mut self` vs. `&mut self` disambiguation note added (pillar 5): one-char
+    difference (`&`) is the entire signal of whether the caller keeps the binding.
+  - `&mut self` as a distinct form is pillar 1: without it, mutation would require either
+    consuming `self` (wrong semantics) or implicit unmarked mutation (forbidden).
+  - §17 validation confirmed: Copy/Move rule generalizes to `self` with zero exceptions.
+
+**Pending / next step:**
+- Trait/interface syntax — how `impl` blocks interact with named traits; stays in §19.
+- Ident Unicode start/continuation inconsistency (flagged by pillars-reviewer pass 1) —
+  separate task, separate branch.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first).
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## Last session: 2026-06-28 — §17 Copy/Move semantics (docs/SYNTAX_SPEC.md)
 
 **What was done:**
