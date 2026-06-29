@@ -105,13 +105,23 @@ no fourth tier is currently needed, so this is not a live constraint.
 
 ## §2 Identifiers & casing
 
-**Decided: no compiler-enforced casing rule. Structural identifier grammar only.**
+**Decided: no compiler-enforced casing rule. Structural identifier grammar only.
+Character set: ASCII-only.**
 
-An identifier is a contiguous run of letters, digits, and underscores; it must not start
-with a digit; it cannot contain whitespace or any reserved operator/punctuation character.
-This is the same near-universal structural constraint every lexer requires (the reason
-`My variable`, `var&&var`, `var#var`, and `Hello/world` are invalid is that each would
-either split into multiple tokens or collide with an operator — not a casing issue at all).
+An identifier is a contiguous run of **ASCII letters (`a`–`z`, `A`–`Z`), ASCII digits
+(`0`–`9`), and underscores (`_`)**; it must not start with a digit; it cannot contain
+whitespace or any reserved operator/punctuation character. This is the same
+near-universal structural constraint every lexer requires (the reason `My variable`,
+`var&&var`, `var#var`, and `Hello/world` are invalid is that each would either split into
+multiple tokens or collide with an operator — not a casing issue at all).
+
+*Spec-gap closure (2026-06-28):* the previous text said "letters, digits, and underscores"
+without specifying whether "letters" meant ASCII-only or Unicode-permitting. The
+implementation (`src/lexer/mod.rs`) had already chosen ASCII-only — via literal char
+ranges `'a'..='z' | 'A'..='Z' | '_'` at the start position and
+`c.is_ascii_alphanumeric() || c == '_'` in the continuation loop — but that choice was
+implicit, not derived from a spec decision. This section makes it explicit. No code
+changes required; the implementation matches this decision exactly.
 
 Beyond that structural minimum, **casing style is unconstrained.** `my_var1`, `MyVar1`, and
 `extremely_long_variable_name` are all equally valid identifiers for any kind of binding
@@ -130,6 +140,18 @@ learning-curve budget where it doesn't earn its keep.
 variables/functions, `PascalCase` for types) belongs in a project style guide or formatter
 default, not in the compiler or this spec's lexer-facing rules. It carries no compiler
 warning and is not a lexer concern — out of scope for this document.
+
+**Deferred — explicitly not decided in this pass:**
+- **Unicode-permitting identifiers** (accepting Unicode letters per `XID_Start`/
+  `XID_Continue` categories, as Rust, Python 3, and Java do): considered and deferred for
+  Phase 1. The launch niche (microcontroller/no-std/speedcoding) is overwhelmingly ASCII
+  source, so the complexity cost has no near-term payoff — and that cost is real:
+  Unicode-permitting identifiers require resolving two non-trivial sub-questions (which
+  Unicode normalization form is canonical for identifier comparison? how are visually
+  confusable codepoints, e.g. Cyrillic `а` vs Latin `a`, handled to satisfy pillar 1's
+  "never silent erroneous behavior" guarantee?) that together deserve a dedicated design
+  pass rather than being decided as a rider on this spec-gap closure. If
+  Unicode-permitting identifiers are revisited later, this section is the entry point.
 
 ---
 
@@ -823,6 +845,16 @@ syntax is settled for these.
 **Lexer-relevant (deferred deliberately, not overlooked):**
 - **Unicode escapes** (`\u{...}`-style) — see §15
 - **Raw strings** (no escape processing) — see §15
+- **Numeric literal immediately followed by an identifier** — `1abc` currently lexes as
+  `Integer(1)` + `Ident("abc")` (two tokens, no error). Surfaced during the §2
+  spec-gap investigation (2026-06-28). Whether this should instead be a hard lexer error
+  (e.g. "numeric literal must be followed by whitespace, operator, or end of input —
+  did you mean `1` and `abc` as separate tokens?") has not been decided. Options are
+  (a) keep current behavior: valid tokenization, let the parser reject `1 abc` as a
+  syntax error if appropriate; (b) make it a hard lexer error (pillar 5: better
+  diagnostic, catches likely typos like `0x1fg` or `42px` before they reach the parser).
+  Needs a deliberate decision — not urgent for Phase 1 but worth resolving before a
+  parser is written that assumes either behavior.
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
 - **Loop syntax** — `for`/`while`/`loop` used informally; exact forms and semantics undecided

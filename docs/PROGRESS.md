@@ -3,6 +3,49 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-28 — §2 identifier character-set spec-gap closure (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Investigated pillars-reviewer flag: identifier start vs. continuation character checks
+  potentially inconsistent on Unicode.
+- Read `src/lexer/mod.rs`: start check is `'a'..='z' | 'A'..='Z' | '_'` (char ranges,
+  definitionally ASCII); continuation check is `c.is_ascii_alphanumeric() || c == '_'`
+  (explicit ASCII method). Both consistently ASCII-only — no implementation bug.
+- Confirmed via live lex output: `my_var` → `Ok`, `café` → `Err(UnrecognizedCharacter
+  { byte: 3, ch: 'é' })`, `a_é` → `Err(UnrecognizedCharacter { byte: 2, ch: 'é' })`,
+  `1abc` → `Ok([Integer(1), Ident("abc"), Eof])`.
+- Determined root cause: §2's prior text said "letters, digits, and underscores" without
+  defining "letters" as ASCII-only or Unicode-permitting — a spec gap, not an
+  implementation bug.
+- Amended §2 to state explicitly: ASCII-only (`a`–`z`, `A`–`Z`, `0`–`9`, `_`), with
+  spec-gap-closure note naming the implicit implementation choice and confirming no code
+  changes needed.
+- Added deferred note to §2 (matching §15's pattern) for Unicode-permitting identifiers.
+
+**Design decisions made (and why):**
+- **ASCII-only identifiers — explicit, not just implicit.**
+  - Phase 1 niche (microcontroller/no-std/speedcoding) is overwhelmingly ASCII source.
+    Unicode complexity has no near-term payoff.
+  - Unicode-permitting identifiers require two non-trivial sub-decisions — normalization
+    form and confusable-codepoint handling (pillar 1) — that deserve their own pass.
+  - Single-binary / no heavy toolchain (pillar 4) conflicts with embedding Unicode
+    category tables.
+  - Decision deferred, not rejected: §2's new deferred note is the entry point if
+    Unicode-permitting identifiers are revisited.
+
+**Pending / next step:**
+- **`1abc` lexes as `Integer(1)` + `Ident("abc")` (two tokens, no error)** — logged in
+  §19 (lexer-relevant deferred items) as a tracked open question. Decision needed before
+  the parser is written; see §19 entry for the two options (keep as valid tokenization vs.
+  hard lexer error).
+- Trait/interface syntax — §19, separate session.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first).
+
+**Something the agent proposed and was rejected (and why):**
+- N/A — this was a pure spec-gap closure with no contested proposal.
+
+---
+
 ## Last session: 2026-06-28 — §18 method receiver syntax (docs/SYNTAX_SPEC.md)
 
 **What was done:**
