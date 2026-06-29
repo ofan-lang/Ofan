@@ -34,9 +34,10 @@
     Unicode-permitting identifiers are revisited.
 
 **Pending / next step:**
-- Side observation: `1abc` lexes as `Integer(1)` + `Ident("abc")` rather than erroring.
-  Whether this should be a hard lexer error (number-immediately-followed-by-ident)
-  warrants a follow-up investigation — not addressed here.
+- **`1abc` lexes as `Integer(1)` + `Ident("abc")` (two tokens, no error)** — logged in
+  §19 (lexer-relevant deferred items) as a tracked open question. Decision needed before
+  the parser is written; see §19 entry for the two options (keep as valid tokenization vs.
+  hard lexer error).
 - Trait/interface syntax — §19, separate session.
 - Parser: expression grammar, statement grammar, function definitions (plan mode first).
 

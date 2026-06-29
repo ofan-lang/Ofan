@@ -845,6 +845,16 @@ syntax is settled for these.
 **Lexer-relevant (deferred deliberately, not overlooked):**
 - **Unicode escapes** (`\u{...}`-style) — see §15
 - **Raw strings** (no escape processing) — see §15
+- **Numeric literal immediately followed by an identifier** — `1abc` currently lexes as
+  `Integer(1)` + `Ident("abc")` (two tokens, no error). Surfaced during the §2
+  spec-gap investigation (2026-06-28). Whether this should instead be a hard lexer error
+  (e.g. "numeric literal must be followed by whitespace, operator, or end of input —
+  did you mean `1` and `abc` as separate tokens?") has not been decided. Options are
+  (a) keep current behavior: valid tokenization, let the parser reject `1 abc` as a
+  syntax error if appropriate; (b) make it a hard lexer error (pillar 5: better
+  diagnostic, catches likely typos like `0x1fg` or `42px` before they reach the parser).
+  Needs a deliberate decision — not urgent for Phase 1 but worth resolving before a
+  parser is written that assumes either behavior.
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
 - **Loop syntax** — `for`/`while`/`loop` used informally; exact forms and semantics undecided
