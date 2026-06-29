@@ -32,19 +32,20 @@
 | [13](#13-pointers-and-raw-memory) | Pointers and raw memory | Decided |
 | [14](#14-numeric-literals) | Numeric literals | Decided |
 | [15](#15-string-and-character-literals) | String and character literals | Decided (core) — 2 items deferred |
-| [16](#16-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
+| [18](#18-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **15 of 15 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **16 of 17 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §16 — constructs that have never been formally
-designed at all (loops, `match`, method receivers, Copy/Move, traits, modules, enums,
-attributes, array literals, generic call syntax, void/unit type) — which were always
-out of scope for the lexer's first pass and do not block it.
+covered. The remaining open ground is §18 — constructs that have never been formally
+designed at all (loops, `match`, method receivers, traits, modules, enums, attributes,
+array literals, generic call syntax, void/unit type) — which were always out of scope
+for the lexer's first pass and do not block it.
 
 ---
 
@@ -604,7 +605,121 @@ Ofan's launch niche.
 
 ---
 
-## §16 Not yet decided — deferred
+## §17 Copy/Move semantics
+
+**Decided: Move-by-default, with compiler-inferred Copy for structurally provably-safe
+structs, and explicit `copy`/`move` keywords that override inference in either direction.**
+
+```ofn
+struct Point { x: f64, y: f64 }
+// automatically Copy — every field is a primitive, nothing here could hide a resource
+
+struct Entity { x: f32, y: f32, velocity_x: f32, velocity_y: f32 }
+// also automatically Copy — same reasoning
+
+move struct FileHandle { fd: i32 }
+// fd is structurally just an i32 (would auto-infer Copy), but the programmer knows it
+// represents a resource handle and overrides inference explicitly
+
+struct Cache<r1, T> { source: &r1 str, value: T }
+// NOT automatically Copy — contains a borrow and a generic, neither provably safe to
+// duplicate without more information. Defaults to Move.
+
+copy struct SafeCache<r1, T> { source: &r1 str, value: T }
+// programmer can override to Copy if they know it's safe in their case
+```
+
+**The rule** — three parts, applied in priority order:
+
+1. If the struct declaration is prefixed with `copy` or `move`, that declaration always
+   wins — no inference is performed. The programmer's intent overrides the structural
+   analysis.
+2. Otherwise, if every field's type is itself provably `Copy` — primitives (`i32`, `f64`,
+   `bool`, `char`, and the other fixed-width scalar types) or another struct already proven
+   `Copy` by this same rule, recursively — the struct is automatically treated as `Copy`.
+3. Otherwise, the struct is `Move`.
+
+A `Copy` binding duplicates freely: both the original and any copy remain valid after an
+assignment or function call. A `Move` binding transfers ownership: the original binding
+becomes invalid after it is assigned or passed to a function, and any subsequent use is a
+compile error.
+
+**Heuristic warning for residual risk:** when a struct is auto-inferred as `Copy` and
+contains a field named `fd`, `handle`, or any name beginning with `ptr`, the compiler
+emits a warning (not an error — this is a heuristic, not a semantic guarantee) suggesting
+an explicit `move` override:
+
+```
+warning: struct 'FileHandle' was inferred as Copy because all fields are primitive
+types, but field 'fd' looks like it may represent a resource handle — if duplicating
+this value should transfer ownership instead, mark it explicitly:
+'move struct FileHandle { ... }'
+```
+
+Fields named `id` are deliberately excluded from this heuristic. Plain-data structs with
+an `id` field (entity IDs in game-dev code, index types in microcontroller code) are common
+enough in Ofan's launch niche that including `id` would produce a high false-positive rate
+and erode trust in the warning. The heuristic targets only names structurally associated
+with OS-level resource handles — `fd` (file descriptor), `handle` (Windows resource handle
+pattern), and `ptr`-prefixed names — not integer IDs.
+
+*Rationale — six alternatives were considered and rejected:*
+
+**Always-copy (C/C++ default):** rejected because it silently duplicates ownership for any
+resource-owning struct. A `FileHandle` copied and used twice means two copies both try to
+close the same descriptor at cleanup — a classic double-close bug, undefined behavior in C,
+silent and undetectable. This directly undermines pillar 1's guarantee that erroneous
+behavior is never silent.
+
+**Always-move (strict, no Copy at all):** rejected because it forces ceremony — a manual
+clone-equivalent call — even for trivially-safe data like `Point { x: 0.0, y: 0.0 }`,
+which is the dominant case in Ofan's Phase 1 launch niche (microcontroller register structs,
+game-dev entity data). Applying the same restriction to plain data provides no safety
+benefit and adds friction on every common-case use. Maximally safe, but it optimizes for
+the rare, dangerous case at the expense of the common, safe case.
+
+**Move-by-default, `copy` as the only override (no inference):** safe, and was the
+fallback position if a smarter option couldn't be found. Rejected because requiring a
+`copy` prefix on every plain-data struct makes the common case pay ceremony for no safety
+gain. Structural inference removes that ceremony for the common case without opening any
+new risk, since its safety criterion (all fields provably `Copy`) is mechanically
+verifiable.
+
+**Copy-by-default, `uncopy`/`move` as the override:** rejected because forgetting the
+override on a resource-owning struct silently grants Copy, which is exactly the silent
+unsafe duplication pillar 1 forbids. This alternative inverts which case pays the ceremony
+cost — the rare case (resource-owning structs) instead of the common case (plain data),
+which is ergonomically appealing — but the failure modes are not symmetric: Move-by-
+default's analogous failure (forgetting `copy` on a plain-data struct) costs only an
+annoying but safe compile error, whereas Copy-by-default's failure is a silent correctness
+bug. Pillar 1 forbids the first class of failure and can tolerate the second.
+
+**Pure structural inference with no override at all:** rejected because it removes the
+programmer's authority over semantic cases the type system cannot see. `FileHandle { fd: i32 }`
+is the direct example: `fd` is structurally an `i32`, provably `Copy`, but semantically a
+resource the compiler cannot recognize as such. Inference without override would silently
+grant Copy to `FileHandle` with no recourse, violating the requirement that the programmer
+always has final authority over a struct's Copy/Move status.
+
+**"Always explicit, no default at all" (`copy struct`/`move struct` required, bare `struct`
+not valid):** rejected because it imposes mathematically identical typing cost to
+Move-by-default (every struct pays the annotation), while removing the ergonomic comfort of
+a default for the common case. Strictly worse learnability for no safety gain relative to
+the adopted model.
+
+The adopted model — inferred-Copy when provably safe, Move by default, explicit override in
+either direction, heuristic warning for the narrow residual risk — is the only option that
+gives the dominant real-world case zero ceremony while confining the residual pillar 1 risk
+to a narrow, named, partially-mitigated case rather than accepting it silently across all
+structs.
+
+> **See also:** [§18](#18-not-yet-decided--deferred) — Method receiver syntax
+> (`self`/`&self`/`mut self`) is directly informed by this semantic model but remains open.
+> The receiver syntax question stays in §18 until a follow-up session.
+
+---
+
+## §18 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -620,8 +735,8 @@ syntax is settled for these.
 - **`Option<T>` / `Checked<T, E>` variant names** — `Some`/`None`, `Ok`/`Err` equivalents
   not finalized; `Checked` as a pillar-1-flavored rename of `Result` was discussed, not
   finalized
-- **Method receiver syntax** — `self` vs `&self` vs `mut self` raised, not resolved
-- **Copy vs. Move semantics** — raised, not resolved; directly affects receiver syntax
+- **Method receiver syntax** — `self` vs `&self` vs `mut self` raised, not resolved;
+  directly informed by §17 Copy/Move semantics, but the syntax itself is undecided
 - **Trait / interface syntax** — not started
 - **Module / import syntax and path separator** — `::` used informally in examples only
 - **Enum declaration syntax** — not decided
