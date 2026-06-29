@@ -33,19 +33,20 @@
 | [14](#14-numeric-literals) | Numeric literals | Decided |
 | [15](#15-string-and-character-literals) | String and character literals | Decided (core) — 2 items deferred |
 | [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
-| [18](#18-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
+| [19](#19-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **16 of 17 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **17 of 18 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §18 — constructs that have never been formally
-designed at all (loops, `match`, method receivers, traits, modules, enums, attributes,
-array literals, generic call syntax, void/unit type) — which were always out of scope
-for the lexer's first pass and do not block it.
+covered. The remaining open ground is §19 — constructs that have never been formally
+designed at all (loops, `match`, traits, modules, enums, attributes, array literals,
+generic call syntax, void/unit type) — which were always out of scope for the lexer's
+first pass and do not block it.
 
 ---
 
@@ -713,13 +714,107 @@ gives the dominant real-world case zero ceremony while confining the residual pi
 to a narrow, named, partially-mitigated case rather than accepting it silently across all
 structs.
 
-> **See also:** [§18](#18-not-yet-decided--deferred) — Method receiver syntax
-> (`self`/`&self`/`mut self`) is directly informed by this semantic model but remains open.
-> The receiver syntax question stays in §18 until a follow-up session.
+> **See also:** [§18](#18-method-receiver-syntax) — Method receiver syntax
+> (`&self`/`&mut self`/`self`) builds directly on this section's Copy/Move rule for its
+> consuming-receiver case; see §18 for the full decision.
 
 ---
 
-## §18 Not yet decided — deferred
+## §18 Method receiver syntax
+
+**Decided: three receiver forms — `&self` (immutable borrow), `&mut self` (mutable borrow),
+and `self` (consuming) — reusing the borrow and mutability mechanisms already locked in §5
+and §7, with no new syntax concepts introduced at the receiver position.**
+
+```ofn
+impl Entity {
+    fn distance_to(&self, other: &Entity) -> f32 {
+        // read-only — does not mutate self, self remains usable by the caller
+        // after this call
+    }
+
+    fn update(&mut self, dt: f32) {
+        self.x = self.x + self.velocity_x * dt;
+        // mutates self in place — self remains the SAME binding, still usable
+        // by the caller after this call (this is the form that makes the
+        // call-update-every-frame-in-a-loop pattern from the game-dev example
+        // actually work)
+    }
+
+    fn into_id(self) -> u32 {
+        self.id
+        // consumes self — behavior depends on whether Entity is Copy or Move
+        // per the §17 rule: if Move, the caller's original binding becomes
+        // invalid after this call; if Copy, the caller's original is
+        // untouched (a duplicate was handed to the method)
+    }
+}
+```
+
+**The three forms:**
+
+`&self` — immutable borrow of the receiver. The method may read fields but may not mutate
+them. The caller's binding is fully usable and unchanged after the call. This is the form
+for any operation that only inspects state — queries, computations, serialization,
+comparisons.
+
+`&mut self` — mutable borrow of the receiver. The method may read and mutate fields in
+place. The caller's binding is the same binding, still usable after the call — only its
+contents may have changed. This is the form for in-place state updates: `update`, `push`,
+`set_*`, any operation that modifies the receiver and leaves it intact for continued use.
+
+`self` (bare, consuming) — the receiver is passed by value. Whether the caller's original
+binding survives is fully determined by §17's Copy/Move rule: for a `Move` struct, the
+caller's binding becomes invalid after the call (ownership transferred into the method);
+for a `Copy` struct, the caller's binding is untouched (a duplicate was handed to the
+method, consistent with Copy semantics everywhere else in the language). Use this form for
+transforming a value into something else — `into_*` conversions, destructuring, consuming
+builders.
+
+> **Note — `mut self` vs. `&mut self` (these are not the same thing):** a receiver written
+> as `mut self` (no `&`) is a *consuming* receiver in the same category as bare `self`,
+> where the locally-owned copy happens to be declared mutable within the method body. It
+> does **not** mean "mutate the caller's original in place" — that is `&mut self`. The
+> one-character difference (`&`) carries real semantic weight, the same weight that
+> separates `let x` from `let mut x` in §5. A reader skimming a method signature reaches
+> the crucial information at the `&` character: `&` present means the caller keeps the
+> binding; `&` absent means the call consumes it. Per pillar 5, this distinction must be
+> explicit and scannable at the signature, not something a reader has to infer from the
+> method body.
+
+*Rationale (pillars 1 and 2, and §17 validation):*
+
+**Pillar 2:** all three forms reuse syntax already locked in this spec. `&` and `&mut` are
+the borrow mechanisms from §7; `mut` as a modifier is from §5; the consuming case applies
+the Copy/Move rule from §17 with no additional mechanism. A method receiver is, in terms of
+the language's type system, simply a parameter named `self` — it follows the same rules as
+any other parameter at a function boundary. Nothing new is introduced at the receiver
+position; all of the relevant behavior is already specified elsewhere and generalizes to
+this case without special-casing.
+
+**Pillar 1:** `&mut self` existing as its own explicit form closes a real silent-danger gap.
+Without it, a mutating method would have to be expressed either as a consuming `self`
+receiver (wrong semantics: needlessly invalidates or needlessly duplicates the caller's
+binding depending on Copy/Move status) or as some form of implicit mutation with no marker
+at the signature level, which would be exactly the kind of unmarked dangerous behavior
+pillar 1 forbids. The three-way split is not convention-following for its own sake — it is
+the minimum needed to make the dangerous case (mutation of the caller's state) visible at
+the signature without forcing the common case (read-only inspection) to pay ceremony.
+
+**§17 validation:** the consuming-receiver case (`self`) is a direct confirmation that
+§17's design generalizes correctly. The same Copy/Move rule that governs ordinary function
+parameters governs `self` — no "method exception" to the ownership model, no separate
+concept to learn for method calls vs. free function calls. This is the clean generalization
+that §17's design was expected to produce.
+
+> **See also:** [§17](#17-copymove-semantics) — Copy/Move semantics determine the
+> consuming-receiver behavior for `self` parameters. [§19](#19-not-yet-decided--deferred) —
+> trait/interface syntax (how `impl` blocks interact with named traits) remains unresolved
+> and does not block the method-receiver decision here.
+
+---
+
+## §19 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -735,9 +830,8 @@ syntax is settled for these.
 - **`Option<T>` / `Checked<T, E>` variant names** — `Some`/`None`, `Ok`/`Err` equivalents
   not finalized; `Checked` as a pillar-1-flavored rename of `Result` was discussed, not
   finalized
-- **Method receiver syntax** — `self` vs `&self` vs `mut self` raised, not resolved;
-  directly informed by §17 Copy/Move semantics, but the syntax itself is undecided
-- **Trait / interface syntax** — not started
+- **Trait / interface syntax** — not started; how `impl` blocks interact with named
+  traits has not been decided, though the receiver forms themselves are now settled in §18
 - **Module / import syntax and path separator** — `::` used informally in examples only
 - **Enum declaration syntax** — not decided
 - **`#[no_runtime]`-style attributes** — appeared in one exploratory example only
