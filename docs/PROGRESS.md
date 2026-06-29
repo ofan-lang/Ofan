@@ -3,6 +3,39 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-28 — §17 Copy/Move semantics (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Added §17 Copy/Move semantics to `docs/SYNTAX_SPEC.md` (PR #7, merged).
+- Renumbered old §16 deferred list → §18. Updated Contents table, Status summary
+  (15 of 15 → 16 of 17), and method receiver entry in §18 to cross-reference §17.
+- Removed "Copy vs. Move semantics" from §18 deferred list — now resolved.
+
+**Design decisions made (and why):**
+- **Move-by-default, compiler-inferred Copy, explicit `copy`/`move` override.**
+  - Struct auto-infers Copy iff every field is recursively provably Copy (primitives or
+    another auto-Copy struct). Otherwise Move.
+  - `copy struct` / `move struct` prefix always overrides inference in either direction.
+  - Heuristic warning (not error) when auto-inferred-Copy struct has a field named `fd`,
+    `handle`, or `ptr`-prefixed. Fields named `id` explicitly excluded — too many false
+    positives in game-dev / microcontroller plain-data structs.
+  - Six alternatives rejected (see §17 rationale). Key asymmetry driving the decision:
+    Copy-by-default's failure mode (forgot override on resource struct) → silent
+    correctness bug; Move-by-default's failure mode (forgot `copy` on plain-data struct)
+    → compile error. Pillar 1 forbids the first, tolerates the second.
+
+**Pending / next step:**
+- Method receiver syntax (`self`/`&self`/`mut self`) — stays in §18, informed by §17
+  but not yet decided. Needs its own session.
+- Ident Unicode start/continuation inconsistency (flagged by pillars-reviewer pass 1) —
+  separate task, separate branch.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first).
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## Last session: 2026-06-28 — PR #6 merge verification + branch cleanup
 
 **What was done:**
