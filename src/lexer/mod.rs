@@ -755,4 +755,42 @@ mod tests {
         assert!(matches!(lex("0xFF;"), Ok(_)));
         assert!(matches!(lex("1.5,"), Ok(_)));
     }
+
+    // --- Newly-reserved keywords (feat/reserve-future-keywords) ---
+
+    #[test]
+    fn lex_newly_reserved_keywords_decided_syntax() {
+        // §17: copy and move are decided modifiers, must not lex as Ident.
+        assert_eq!(lex("copy").unwrap(), vec![Token::Copy, Token::Eof]);
+        assert_eq!(lex("move").unwrap(), vec![Token::Move, Token::Eof]);
+        // §18: self and impl are decided syntax, must not lex as Ident.
+        assert_eq!(lex("self").unwrap(), vec![Token::SelfKw, Token::Eof]);
+        assert_eq!(lex("impl").unwrap(), vec![Token::Impl, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_newly_reserved_keywords_future_syntax() {
+        // §19 reservations: grammar undecided, words reserved so they cannot be
+        // used as identifiers before a syntax decision is made.
+        assert_eq!(lex("loop").unwrap(), vec![Token::Loop, Token::Eof]);
+        assert_eq!(lex("match").unwrap(), vec![Token::Match, Token::Eof]);
+        assert_eq!(lex("trait").unwrap(), vec![Token::Trait, Token::Eof]);
+        assert_eq!(lex("mod").unwrap(), vec![Token::Mod, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_already_reserved_keywords_unchanged() {
+        // Spot-check that previously-reserved words were not accidentally
+        // removed or changed by this pass.
+        assert_eq!(lex("while").unwrap(), vec![Token::While, Token::Eof]);
+        assert_eq!(lex("for").unwrap(), vec![Token::For, Token::Eof]);
+        assert_eq!(lex("in").unwrap(), vec![Token::In, Token::Eof]);
+        assert_eq!(lex("enum").unwrap(), vec![Token::Enum, Token::Eof]);
+        assert_eq!(lex("use").unwrap(), vec![Token::Use, Token::Eof]);
+        assert_eq!(lex("if").unwrap(), vec![Token::If, Token::Eof]);
+        assert_eq!(lex("else").unwrap(), vec![Token::Else, Token::Eof]);
+        assert_eq!(lex("return").unwrap(), vec![Token::Return, Token::Eof]);
+        assert_eq!(lex("true").unwrap(), vec![Token::True, Token::Eof]);
+        assert_eq!(lex("false").unwrap(), vec![Token::False, Token::Eof]);
+    }
 }

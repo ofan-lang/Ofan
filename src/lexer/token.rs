@@ -17,7 +17,7 @@ pub enum Token<'src> {
     // Doc comments (preserved for future tooling / doc-gen)
     DocComment(&'src str),
 
-    // Keywords
+    // Keywords — decided syntax
     Fn,
     Let,
     Mut,
@@ -40,6 +40,20 @@ pub enum Token<'src> {
     Using,
     Static,
     Unsafe,
+    // §17 Copy/Move semantics (SYNTAX_SPEC.md §17)
+    Copy,
+    Move,
+    // §18 method receivers and impl blocks (SYNTAX_SPEC.md §18)
+    SelfKw,
+    Impl,
+
+    // Keywords — reserved ahead of syntax decisions (SYNTAX_SPEC.md §19)
+    // Grammar for these constructs is not yet decided; words are reserved now
+    // so they cannot be used as identifiers before that decision is made.
+    Loop,
+    Match,
+    Trait,
+    Mod,
 
     // Operators — arithmetic
     Plus,

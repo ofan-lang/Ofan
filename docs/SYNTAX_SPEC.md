@@ -895,11 +895,34 @@ syntax is settled for these.
   whether a first-class "no value" type exists (for use as a generic parameter, for
   example) has not been decided
 
-**Process note, not a syntax item:** there is currently no master list tracking which
-identifiers are *reserved* as future keywords before their syntax is finalized (e.g. is
-`loop` already implicitly spoken-for on `feat/lexer-implementation` even though loop
-syntax itself is undecided here?). Worth resolving as a coordination step between this
-spec and the in-flight lexer branch, not as a syntax decision in its own right.
+**Reserved words — master list (resolved 2026-06-29):** the following words are reserved
+in the lexer (`src/lexer/keywords.rs`) ahead of their syntax being decided. Reservation
+means they cannot be used as identifiers; it does **not** imply any grammar or semantics
+has been decided for them.
+
+Words reserved from **decided syntax** (§17, §18) that were not yet in the keyword table:
+
+| Word | Token | Source |
+|------|-------|--------|
+| `copy` | `Token::Copy` | §17 Copy/Move modifier |
+| `move` | `Token::Move` | §17 Copy/Move modifier |
+| `self` | `Token::SelfKw` | §18 method receiver value |
+| `impl` | `Token::Impl` | §18 impl blocks |
+
+Words reserved **ahead of syntax decisions** (constructs in this §19 list):
+
+| Word | Token | Future construct |
+|------|-------|-----------------|
+| `loop` | `Token::Loop` | loop syntax (this section) |
+| `match` | `Token::Match` | pattern matching (this section) |
+| `trait` | `Token::Trait` | trait / interface syntax (this section) |
+| `mod` | `Token::Mod` | module / import syntax (this section) |
+
+`Self` (capital) is **not** reserved — whether Ofan needs a distinct `Self` type alias
+inside `impl` blocks has not been decided and is a §19-adjacent open question.
+
+**Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
+word list) is now resolved by the table above.
 
 These do not block lexer work on the tokens that *are* decided in §1–§15, but the token
 set will need a follow-up pass once the parser/typechecker-relevant items above are
