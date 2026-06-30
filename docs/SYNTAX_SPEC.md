@@ -37,19 +37,20 @@
 | [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
 | [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
 | [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
-| [21](#21-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [21](#21-match--pattern-matching) | Match / pattern matching | Decided |
+| [22](#22-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **20 of 21 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **21 of 22 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §21 — constructs that have never been formally
-designed at all (`match`, traits, modules, attributes, array literals,
-generic call syntax, void/unit type) — which were always out of scope for the lexer's
-first pass and do not block it.
+covered. The remaining open ground is §22 — constructs that have never been formally
+designed at all (traits, modules, attributes, array literals, generic call syntax,
+void/unit type) — which were always out of scope for the lexer's first pass and do not
+block it.
 
 ---
 
@@ -986,7 +987,7 @@ concept to learn for method calls vs. free function calls. This is the clean gen
 that §17's design was expected to produce.
 
 > **See also:** [§17](#17-copymove-semantics) — Copy/Move semantics determine the
-> consuming-receiver behavior for `self` parameters. [§21](#21-not-yet-decided--deferred) —
+> consuming-receiver behavior for `self` parameters. [§22](#22-not-yet-decided--deferred) —
 > trait/interface syntax (how `impl` blocks interact with named traits) remains unresolved
 > and does not block the method-receiver decision here.
 
@@ -1203,10 +1204,257 @@ structs — no new syntax or special-casing at the enum position.
 > extended to enums here. [§18](#18-method-receiver-syntax) — `impl` blocks and method
 > receivers apply to enums unchanged. [§19](#19-option-and-checked-types-and-variant-names)
 > — `Option<T>` and `Checked<T, E>` are the canonical generic enum examples.
+> [§21](#21-match--pattern-matching) — pattern matching on enum variants.
 
 ---
 
-## §21 Not yet decided — deferred
+## §21 Match / pattern matching
+
+**Decided: `match expr { arms }`. Arms separated by `=>`, terminated by `,` (trailing
+comma permitted). Arm bodies are expressions — braces required only for multi-statement
+arms. Exhaustiveness on statically-enumerable types (enums) is a compile error.
+`match` is itself an expression. Five pattern forms in v1: wildcard, literal, binding,
+unit/tuple variant. Or-patterns and guards included. Range patterns, `@`-binding,
+struct patterns, and slice patterns deferred.**
+
+```ofn
+# Basic Option match — match is an expression
+let label = match opt {
+    Some(x) => format_value(x),
+    None    => "absent",
+};
+
+# Checked error handling — the only way to supply a fallback for Checked<T, E>
+let val = match read_config("app.ofn") {
+    Ok(cfg)  => cfg.timeout,
+    Err(msg) => {
+        log_error(msg);
+        DEFAULT_TIMEOUT
+    },
+};
+
+# Guard: extra boolean condition after the pattern
+match score {
+    Some(n) if n >= 90 => grade_a(n),
+    Some(n) if n >= 70 => grade_b(n),
+    Some(n)            => grade_c(n),
+    None               => no_grade(),
+};
+
+# Or-pattern: one arm covers multiple variants
+match direction {
+    North | South => adjust_vertical(),
+    East  | West  => adjust_horizontal(),
+};
+```
+
+**Match form:**
+
+`match subject { arms }` — no parentheses around the subject (consistent with
+`if`/`while`/`for`). Outer braces are mandatory per §4. `match` is itself an expression:
+the whole construct evaluates to the value produced by the matching arm. In statement
+position, the expression statement ends with `;` per §3.
+
+**Arm separator — `=>` (new token `Token::FatArrow`):**
+
+All other separator tokens are allocated: `:` is type annotation (§9), `->` is return
+type (§6), `=` is binding/assignment (§5, §10). `=>` is unallocated in Ofan and carries
+no existing meaning. Added to the lexer as `Token::FatArrow`; scanned by peeking for `>`
+after `=` (before the `==` path). Does not disturb `=`, `==`, or `>=`.
+
+**Arm body — braceless expression canonical; braces for multi-statement:**
+
+Single-expression body: no braces — this is the canonical persisted form. Multi-statement
+body: braces required. `=>` and the trailing `,` make arm boundaries unambiguous regardless;
+the `goto fail` class of bug (the rationale for §4's mandatory braces on control-flow
+bodies) does not apply when a dedicated separator + terminator already mark the boundary.
+
+```ofn
+Some(x) => x + 1,          # single expression — no braces (canonical)
+None    => {                # multi-statement — braces required
+    log("absent");
+    0
+},
+```
+
+§4's "braces mandatory" rule applies to control-flow block bodies (`if`/`while`/`for`/
+`loop`). Match arms are expression positions with explicit `=>` / `,` boundaries — a
+categorically different syntactic position. No exception to §4; this is a different rule.
+
+**Pillar-3 canonicalization (arm body braces):** the compiler accepts `pattern => { expr },`
+where the block contains a single expression without a `;`. The formatter normalizes this
+to `pattern => expr,`, removing the redundant braces. Persisted shared-source files
+therefore always have braceless single-expression arms — only one form appears in checked-in
+code. Writers may type either form; the formatter enforces one.
+
+**Arm terminator — comma, trailing permitted:**
+
+Every arm body is followed by `,`, including multi-statement block arms (`{ ... },`).
+Trailing comma after the last arm is permitted (same policy as enum variants §20 and
+struct fields §10 — consistent, reduces diff noise).
+
+**Pattern forms:**
+
+*Wildcard* — `_`. Matches anything, binds nothing. `_` lexes as `Token::Ident("_")`;
+the parser special-cases the bare underscore. Any identifier starting with `_` followed
+by further characters (e.g. `_unused`) is a normal binding pattern, not a wildcard.
+
+*Literal* — integer, float, bool, char, or string literal. Exact-value match:
+
+```ofn
+match code {
+    0    => "ok",
+    404  => "not found",
+    _    => "other",
+}
+match flag {
+    true  => on(),
+    false => off(),
+}
+```
+
+*Binding* — a bare identifier in pattern position that the type-checker does not resolve
+as a variant name. Binds the matched value to that name in the arm body scope.
+
+*Unit variant* — a bare identifier that the type-checker resolves as a known unit variant
+of the match subject's enum type. Matching is exhaustiveness-tracked.
+
+*Tuple variant* — variant name followed by `(` comma-separated sub-patterns `)`.
+Sub-patterns are themselves full patterns; nesting (`Some(Some(x))`) works without
+depth limit.
+
+```ofn
+match opt_pair {
+    Some(Some(x)) => x,
+    Some(None)    => default(),
+    None          => fallback(),
+}
+```
+
+**Binding vs. variant disambiguation — type-resolved (consequence of §2):**
+
+§2 decided no compiler-enforced casing rule. The standard ML/Rust heuristic
+(uppercase-first = variant, lowercase = binding) is therefore unavailable. Instead:
+
+1. Parser emits all bare identifiers in pattern position as ambiguous name nodes.
+2. Type-checker resolves: if the identifier names a variant of the match subject's enum
+   type → variant match; otherwise → binding.
+3. Pillar-5 warning when a bare identifier in pattern position does not match any variant
+   of the subject type *and* an enum in scope has a variant spelled identically (wrong
+   type, same spelling): "identifier `X` does not match any variant of `TypeName` — this
+   arm binds the entire value to `X`. Did you mean a different match subject type?"
+
+Tuple variant patterns (`Some(x)`, `Ok(val)`) are unambiguous at parse time — the
+parenthesized sub-pattern list can only belong to a constructor application, never a
+binding. The disambiguation issue affects only bare identifiers (unit variant vs. binding).
+
+**Unreachable arms — compile error (pillar 1):** a binding arm (bare identifier or `_`)
+that makes all subsequent arms unreachable is a compile error:
+
+```
+error: unreachable arm — the binding `val` matches every value of `Option<i32>`
+  arm at line 4 can never be reached
+suggestion: move the binding arm after the more-specific variant arms, or remove it
+```
+
+This closes the silent-logic-bug surface created by the type-resolved disambiguation:
+a programmer who mistypes a variant name gets a binding that catches everything — the
+unreachable-arm error on the arms below it makes the mistake visible rather than silent.
+
+**Or-pattern:**
+
+`|` separates alternatives inside a single arm:
+
+```ofn
+match dir {
+    North | South => vertical(),
+    East  | West  => horizontal(),
+}
+```
+
+`Token::Pipe` is already in the lexer. In match arm pattern position the parser context
+makes pattern-`|` vs. bitwise-OR unambiguous (patterns cannot contain arbitrary
+expressions). Both sides of an or-pattern must bind the same set of names with the same
+types — a compile error otherwise:
+
+```
+error: or-pattern arms bind different names
+  left arm binds: x: i32
+  right arm binds: y: i32
+suggestion: use the same binding name on both sides, or use `_` to discard the payload
+```
+
+**Pillar-3 note — leading `|`:** a leading `|` before the first alternative (`| North | South`)
+is accepted by the parser as a write-time convenience (alignment aid). The formatter removes
+it; it never persists in shared-source files. Canonical form has no leading `|`.
+
+**Guard:**
+
+`if condition` between the pattern and `=>`. Evaluated only after the pattern matches.
+A guarded arm does **not** count as covering its pattern for exhaustiveness — the
+compiler treats a guarded arm as a partial cover requiring other arms to complete
+coverage of the matched variants:
+
+```ofn
+match opt {
+    Some(x) if x > 0 => positive(x),
+    Some(x)          => non_positive(x),  # required: guard above is partial cover of Some
+    None             => absent(),
+}
+```
+
+**Exhaustiveness — compile error (pillar 1):**
+
+Non-exhaustive match on any enum is a **compile error** (not a warning, not runtime
+panic). Enum variants are always statically enumerable; there is no execution path in
+which a missed variant is acceptable. Error message quality (pillar 5):
+
+```
+error: non-exhaustive match — missing variants for `Direction`:
+  · South
+  · East
+  · West
+suggestion: add arms for the missing variants, or add `_ => ...` to catch all remaining
+```
+
+For non-enumerable types (integers, strings, floats), a `_` wildcard arm or a set of
+guard-free literals that provably covers all values is required — omitting it is also
+a compile error:
+
+```
+error: non-exhaustive match on `i32` — open-ended type requires a catch-all arm
+suggestion: add `_ => ...` as the final arm
+```
+
+**`match` on `Checked<T, E>` — the only fallback path (§12, §19):**
+
+`?:` is deliberately invalid on `Checked<T, E>` (§12). `match` is the only mechanism
+for branching on the failure arm and supplying a fallback value. The exhaustiveness rule
+means both `Ok` and `Err` arms must always be present — no silent discard of errors.
+
+**Deferred:**
+
+- **Range patterns** (`0..10 =>`) — range literal/expression syntax not yet decided (§22).
+- **`@`-binding** (`x @ Some(y) =>`) — binds the whole matched value and destructures;
+  useful for logging/re-wrapping but not essential for `Option`/`Checked` use cases.
+- **Struct patterns** (`Rect { width, height } =>`) — struct variants are deferred in
+  §20; struct patterns follow when struct variants are decided.
+- **Slice/array patterns** — array/slice literal syntax is §22 deferred.
+- **Or-pattern exhaustiveness with guards** — the rule for when `A | B` in a guarded
+  arm counts toward exhaustiveness is subtle; defer to type-checker design session.
+
+> **See also:** [§3](#3-statement-termination) — `;` after a `match` expression in
+> statement position. [§4](#4-block-delimiters) — outer braces mandatory; arm-body
+> braces required only for multi-statement arms (different rule, see rationale above).
+> [§12](#12-operators) — `?` and `?:` operators; `?:` is explicitly invalid on
+> `Checked<T, E>`, making `match` the sole fallback mechanism. [§19](#19-option-and-checked-types-and-variant-names)
+> — `Option<T>` and `Checked<T, E>` variant names; `match` is the mandated inspection
+> mechanism for `Checked`. [§20](#20-enum-declaration-syntax) — enum variant forms
+> (unit and tuple) that patterns destructure.
+
+---
+
+## §22 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -1217,7 +1465,6 @@ syntax is settled for these.
 - **Raw strings** (no escape processing) — see §15
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
-- **`match` / pattern matching** — used informally in examples; syntax undecided
 - **Trait / interface syntax** — not started; how `impl` blocks interact with named
   traits has not been decided, though the receiver forms themselves are now settled in §18
 - **Module / import syntax and path separator** — `::` used informally in examples only
@@ -1233,12 +1480,12 @@ syntax is settled for these.
   whether a first-class "no value" type exists (for use as a generic parameter, for
   example) has not been decided
 
-**Reserved words — master list (resolved 2026-06-29):** the following words are reserved
+**Reserved words — master list (updated 2026-06-29):** the following words are reserved
 in the lexer (`src/lexer/keywords.rs`) ahead of their syntax being decided. Reservation
 means they cannot be used as identifiers; it does **not** imply any grammar or semantics
 has been decided for them.
 
-Words reserved from **decided syntax** (§16, §17, §18) that were not yet in the keyword table:
+Words reserved from **decided syntax** (§16, §17, §18, §21) that were not yet in the keyword table:
 
 | Word | Token | Source |
 |------|-------|--------|
@@ -1247,24 +1494,23 @@ Words reserved from **decided syntax** (§16, §17, §18) that were not yet in t
 | `move` | `Token::Move` | §17 Copy/Move modifier |
 | `self` | `Token::SelfKw` | §18 method receiver value |
 | `impl` | `Token::Impl` | §18 impl blocks |
+| `match` | `Token::Match` | §21 match / pattern matching |
 
-Words reserved **ahead of syntax decisions** (constructs in this §21 list):
+Words reserved **ahead of syntax decisions** (constructs in this §22 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `match` | `Token::Match` | pattern matching (§21) |
-| `trait` | `Token::Trait` | trait / interface syntax (§21) |
-| `mod` | `Token::Mod` | module / import syntax (§21) |
+| `trait` | `Token::Trait` | trait / interface syntax (§22) |
+| `mod` | `Token::Mod` | module / import syntax (§22) |
 
 `Self` (capital) is **not** reserved — whether Ofan needs a distinct `Self` type alias
-inside `impl` blocks has not been decided and is a §21-adjacent open question.
+inside `impl` blocks has not been decided and is a §22-adjacent open question.
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
 
-These do not block lexer work on the tokens that *are* decided in §1–§15, but the token
-set will need a follow-up pass once the parser/typechecker-relevant items above are
-resolved.
+These do not block lexer work on the tokens decided in §1–§21, but the token set will
+need a follow-up pass once the parser/typechecker-relevant items above are resolved.
 
 ---
 

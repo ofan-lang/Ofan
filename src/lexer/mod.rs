@@ -95,11 +95,16 @@ impl<'src> Lexer<'src> {
 
                 '=' => {
                     iter.next();
-                    if iter.peek().is_some_and(|&(_, c)| c == '=') {
-                        let (end_pos, _) = iter.next().unwrap();
-                        push2(&mut tokens, Token::EqEq, pos, end_pos);
-                    } else {
-                        push1(&mut tokens, Token::Equals, pos);
+                    match iter.peek() {
+                        Some(&(end_pos, '=')) => {
+                            iter.next();
+                            push2(&mut tokens, Token::EqEq, pos, end_pos);
+                        }
+                        Some(&(end_pos, '>')) => {
+                            iter.next();
+                            push2(&mut tokens, Token::FatArrow, pos, end_pos);
+                        }
+                        _ => push1(&mut tokens, Token::Equals, pos),
                     }
                 }
                 '!' => {
@@ -412,6 +417,25 @@ mod tests {
     #[test]
     fn lex_arrow() {
         assert_eq!(lex("->").unwrap(), vec![Token::Arrow, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_fat_arrow() {
+        // §21 match arm separator
+        assert_eq!(lex("=>").unwrap(), vec![Token::FatArrow, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_fat_arrow_does_not_disturb_adjacent_tokens() {
+        // `=` alone, `==`, and `>=` must be unaffected by the `=>` scanning path.
+        assert_eq!(lex("=").unwrap(), vec![Token::Equals, Token::Eof]);
+        assert_eq!(lex("==").unwrap(), vec![Token::EqEq, Token::Eof]);
+        assert_eq!(lex(">=").unwrap(), vec![Token::GtEq, Token::Eof]);
+        // sequence: `= >` (with space) must produce two separate tokens
+        assert_eq!(
+            lex("= >").unwrap(),
+            vec![Token::Equals, Token::Gt, Token::Eof]
+        );
     }
 
     #[test]
@@ -760,20 +784,22 @@ mod tests {
 
     #[test]
     fn lex_newly_reserved_keywords_decided_syntax() {
+        // §16: loop syntax decided.
+        assert_eq!(lex("loop").unwrap(), vec![Token::Loop, Token::Eof]);
         // §17: copy and move are decided modifiers, must not lex as Ident.
         assert_eq!(lex("copy").unwrap(), vec![Token::Copy, Token::Eof]);
         assert_eq!(lex("move").unwrap(), vec![Token::Move, Token::Eof]);
         // §18: self and impl are decided syntax, must not lex as Ident.
         assert_eq!(lex("self").unwrap(), vec![Token::SelfKw, Token::Eof]);
         assert_eq!(lex("impl").unwrap(), vec![Token::Impl, Token::Eof]);
+        // §21: match syntax decided.
+        assert_eq!(lex("match").unwrap(), vec![Token::Match, Token::Eof]);
     }
 
     #[test]
     fn lex_newly_reserved_keywords_future_syntax() {
-        // §19 reservations: grammar undecided, words reserved so they cannot be
+        // §22 reservations: grammar undecided, words reserved so they cannot be
         // used as identifiers before a syntax decision is made.
-        assert_eq!(lex("loop").unwrap(), vec![Token::Loop, Token::Eof]);
-        assert_eq!(lex("match").unwrap(), vec![Token::Match, Token::Eof]);
         assert_eq!(lex("trait").unwrap(), vec![Token::Trait, Token::Eof]);
         assert_eq!(lex("mod").unwrap(), vec![Token::Mod, Token::Eof]);
     }
