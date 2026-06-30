@@ -3,6 +3,39 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-29 — §19 Option/Checked types and variant names (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Added §19 to SYNTAX_SPEC.md; renumbered former §19 deferred list → §20.
+- Removed Option/Checked entry from deferred list.
+- Updated §18 See also (§19 → §20), reserved-word table references, Self note.
+- PR #13 merged (fast-forward). 48/48 tests pass (no code changes).
+
+**Design decisions made (and why):**
+- **`Option<T>` / `Some(T)` / `None`:** near-universal naming (Rust, Swift,
+  OCaml, Scala). No deviation — pillar 2. `Maybe`/`Just`/`Nothing` rejected
+  (Haskell-style, less intuitive for systems programmers); `Present`/`Absent`
+  rejected (more verbose, no precision gain).
+- **`Checked<T, E>` / `Ok(T)` / `Err(E)`:** type renamed from `Result` for
+  pillar 1 — "Result" is semantically neutral; "Checked" signals programmer
+  obligation to inspect the value. Variant names `Ok`/`Err` kept unchanged
+  (pillar 2: near-universal). `Either<L,R>`/`Left`/`Right` rejected (no
+  success/failure semantics in the variant names).
+- **`Ok`, `Err`, `Some`, `None` are prelude constructors, not keywords.** No
+  lexer changes. They lex as `Token::Ident`; type-checker gives them meaning.
+
+**Pending / next step:**
+- Enum declaration syntax — needed before `match` is fully useful; smaller
+  session than `match` itself.
+- `match` / pattern matching — plan-mode session; larger design decision.
+- Parser: still waiting on at least `match` + enum before expression grammar
+  can be implemented meaningfully.
+
+**Something the agent proposed and was rejected (and why):**
+- N/A.
+
+---
+
 ## Last session: 2026-06-29 — §16 loop syntax spec (docs/SYNTAX_SPEC.md)
 
 **What was done:**
