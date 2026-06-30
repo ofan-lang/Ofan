@@ -47,11 +47,14 @@ pub enum Token<'src> {
     SelfKw,
     Impl,
 
-    // Keywords — reserved ahead of syntax decisions (SYNTAX_SPEC.md §19)
+    // §16 loop syntax (SYNTAX_SPEC.md §16)
+    Loop,
+    // §21 match / pattern matching (SYNTAX_SPEC.md §21)
+    Match,
+
+    // Keywords — reserved ahead of syntax decisions (SYNTAX_SPEC.md §22)
     // Grammar for these constructs is not yet decided; words are reserved now
     // so they cannot be used as identifiers before that decision is made.
-    Loop,
-    Match,
     Trait,
     Mod,
 
@@ -93,6 +96,8 @@ pub enum Token<'src> {
     Arrow,
     Question,
     QuestionColon,
+    // §21 match arm separator `=>`
+    FatArrow,
 
     // Punctuation
     LParen,

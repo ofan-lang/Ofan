@@ -32,10 +32,11 @@ pub(super) fn lookup(text: &str) -> Option<Token<'_>> {
         "impl" => Some(Token::Impl),
         // §16 loop syntax — decided syntax
         "loop" => Some(Token::Loop),
-        // Reserved ahead of syntax decisions (SYNTAX_SPEC.md §19).
+        // §21 match / pattern matching — decided syntax
+        "match" => Some(Token::Match),
+        // Reserved ahead of syntax decisions (SYNTAX_SPEC.md §22).
         // Grammar for these constructs is undecided; words reserved so they
         // cannot be used as identifiers before that decision is made.
-        "match" => Some(Token::Match),
         "trait" => Some(Token::Trait),
         "mod" => Some(Token::Mod),
         _ => None,
