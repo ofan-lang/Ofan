@@ -35,16 +35,17 @@
 | [16](#16-loop-syntax) | Loop syntax | Decided |
 | [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
 | [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
-| [19](#19-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
+| [20](#20-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **18 of 19 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **19 of 20 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §19 — constructs that have never been formally
+covered. The remaining open ground is §20 — constructs that have never been formally
 designed at all (`match`, traits, modules, enums, attributes, array literals,
 generic call syntax, void/unit type) — which were always out of scope for the lexer's
 first pass and do not block it.
@@ -984,13 +985,109 @@ concept to learn for method calls vs. free function calls. This is the clean gen
 that §17's design was expected to produce.
 
 > **See also:** [§17](#17-copymove-semantics) — Copy/Move semantics determine the
-> consuming-receiver behavior for `self` parameters. [§19](#19-not-yet-decided--deferred) —
+> consuming-receiver behavior for `self` parameters. [§20](#20-not-yet-decided--deferred) —
 > trait/interface syntax (how `impl` blocks interact with named traits) remains unresolved
 > and does not block the method-receiver decision here.
 
 ---
 
-## §19 Not yet decided — deferred
+## §19 Option and Checked types and variant names
+
+**Decided: two standard result-handling types — `Option<T>` for values that may be
+absent, and `Checked<T, E>` for operations that may fail — with variant names
+`Some(T)`/`None` and `Ok(T)`/`Err(E)` respectively. Neither type's variants are
+reserved keywords; they are standard-library constructors available via the prelude.**
+
+```ofn
+// Option<T> — a value that may or may not be present
+let nickname: Option<str> = user.nickname;
+let display = nickname ?: user.full_name;   // ?:  fallback operator, §12
+
+// Checked<T, E> — an operation that may succeed or fail
+fn read_config(path: &str) -> Checked<Config, &str> {
+    let raw = read_file(path)?;             // ?   propagate operator, §12
+    let cfg = parse(raw)?;
+    Ok(cfg)
+}
+
+fn caller() -> Checked<(), &str> {
+    let cfg = read_config("app.ofn")?;
+    // match is the only way to branch on Checked — ?:  is deliberately
+    // invalid on Checked<T, E> (see §12 and rationale below)
+    Ok(())
+}
+```
+
+**`Option<T>` — `Some(T)` and `None`:**
+
+`Option<T>` represents a value that is either present (`Some(T)`) or absent (`None`).
+The name and variant names match Rust, Swift, OCaml, and Scala — the same adoption
+logic used for `as` (§8) and `->` (§6): deviating from a near-universal baseline adds
+learning-curve friction (pillar 2) with no benefit.
+
+`Some(value)` — wraps a present value. `None` — bare; no payload.
+
+The `?:` fallback operator (§12) is specifically for `Option<T>`: `a ?: b` evaluates
+to `b` when `a` is `None`, to the unwrapped value when `a` is `Some(x)`. The `?`
+propagate operator (§12) also applies: `expr?` on an `Option<T>` immediately returns
+`None` from the enclosing function when `expr` is `None`, otherwise unwraps to `T`.
+
+*Alternatives rejected:*
+- **`Maybe<T>` / `Just(T)` / `Nothing`** (Haskell): less intuitive for systems
+  programmers and adds no expressiveness. `Option`/`Some`/`None` already carry the
+  meaning clearly.
+- **`Present(T)` / `Absent`**: more verbose, no precision gained over `Some`/`None`.
+
+**`Checked<T, E>` — `Ok(T)` and `Err(E)`:**
+
+`Checked<T, E>` represents an operation that either succeeded (`Ok(T)`) or failed with
+an error (`Err(E)`). `E` may be any type — a string, a dedicated error enum, or a
+struct.
+
+The type is named `Checked`, not `Result`, for a precise pillar 1 reason: `Result` is
+a neutral name for a two-variant type; `Checked` signals that the value represents an
+operation that was checked for correctness and that a programmer receiving this type
+must explicitly inspect it before using the success value. The name carries the intent
+— "this was checked; now you must check it too" — in the same way that `loop` (§16)
+makes the intent "this has no condition, it exits only via break" visible at the
+keyword rather than derivable only from reading the body.
+
+The variant names are `Ok`/`Err`, not renamed: pillar 2 applies here. The pillar 1
+signal is in the type name; deviating from the near-universal `Ok`/`Err` spelling
+would add friction for any programmer arriving from Rust, Go-adjacent idioms, or
+general functional programming without any compensating clarity gain. The variants are
+the obvious spelling of "success" and "error" — changing them would be novelty for
+its own sake.
+
+**`Checked<T, E>` and `?:` (pillar 1 enforcement):** the fallback operator `?:` is
+explicitly **not** valid on `Checked<T, E>` (see §12). Allowing a fallback to silently
+discard an `Err` would violate pillar 1 — silent error discard is the exact failure
+mode `Checked` exists to prevent. `match` is the only way to branch on a `Checked`
+value's failure case and supply an alternative, by deliberate design: match forces the
+programmer to name the error case explicitly before providing a replacement value.
+
+*Alternatives rejected:*
+- **`Result<T, E>` / `Ok` / `Err`**: the variant names are adopted unchanged; only
+  the type name is changed. `Result` was rejected because the name is semantically
+  neutral — it carries no obligation signal and does not distinguish "the result of an
+  operation" from "the result of an operation that must be checked for errors."
+- **`Either<L, R>` / `Left` / `Right`**: functional-programming convention; left/right
+  carries no success/failure semantics and requires additional convention to interpret.
+  Adds learning cost with no precision gain over `Ok`/`Err`.
+
+**Constructors, not keywords:** `Ok`, `Err`, `Some`, `None` are standard-library
+value constructors available in the prelude — they are not reserved keywords and do not
+require changes to the lexer's keyword table. They lex as ordinary identifiers
+(`Token::Ident`). The type-checker, not the lexer, gives them special meaning.
+
+> **See also:** [§12](#12-operators) — `?` (propagate) and `?:` (fallback) operators
+> are defined in terms of `Checked<T, E>` and `Option<T>`; §12's rationale for why
+> `?:` is excluded from `Checked` is the companion to this section's `Checked` naming
+> rationale.
+
+---
+
+## §20 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -1002,9 +1099,6 @@ syntax is settled for these.
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
 - **`match` / pattern matching** — used informally in examples; syntax undecided
-- **`Option<T>` / `Checked<T, E>` variant names** — `Some`/`None`, `Ok`/`Err` equivalents
-  not finalized; `Checked` as a pillar-1-flavored rename of `Result` was discussed, not
-  finalized
 - **Trait / interface syntax** — not started; how `impl` blocks interact with named
   traits has not been decided, though the receiver forms themselves are now settled in §18
 - **Module / import syntax and path separator** — `::` used informally in examples only
@@ -1036,16 +1130,16 @@ Words reserved from **decided syntax** (§16, §17, §18) that were not yet in t
 | `self` | `Token::SelfKw` | §18 method receiver value |
 | `impl` | `Token::Impl` | §18 impl blocks |
 
-Words reserved **ahead of syntax decisions** (constructs in this §19 list):
+Words reserved **ahead of syntax decisions** (constructs in this §20 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `match` | `Token::Match` | pattern matching (this section) |
-| `trait` | `Token::Trait` | trait / interface syntax (this section) |
-| `mod` | `Token::Mod` | module / import syntax (this section) |
+| `match` | `Token::Match` | pattern matching (§20) |
+| `trait` | `Token::Trait` | trait / interface syntax (§20) |
+| `mod` | `Token::Mod` | module / import syntax (§20) |
 
 `Self` (capital) is **not** reserved — whether Ofan needs a distinct `Self` type alias
-inside `impl` blocks has not been decided and is a §19-adjacent open question.
+inside `impl` blocks has not been decided and is a §20-adjacent open question.
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
