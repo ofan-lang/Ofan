@@ -36,17 +36,18 @@
 | [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
 | [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
 | [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
-| [20](#20-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
+| [21](#21-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **19 of 20 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **20 of 21 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §20 — constructs that have never been formally
-designed at all (`match`, traits, modules, enums, attributes, array literals,
+covered. The remaining open ground is §21 — constructs that have never been formally
+designed at all (`match`, traits, modules, attributes, array literals,
 generic call syntax, void/unit type) — which were always out of scope for the lexer's
 first pass and do not block it.
 
@@ -985,7 +986,7 @@ concept to learn for method calls vs. free function calls. This is the clean gen
 that §17's design was expected to produce.
 
 > **See also:** [§17](#17-copymove-semantics) — Copy/Move semantics determine the
-> consuming-receiver behavior for `self` parameters. [§20](#20-not-yet-decided--deferred) —
+> consuming-receiver behavior for `self` parameters. [§21](#21-not-yet-decided--deferred) —
 > trait/interface syntax (how `impl` blocks interact with named traits) remains unresolved
 > and does not block the method-receiver decision here.
 
@@ -1087,7 +1088,125 @@ require changes to the lexer's keyword table. They lex as ordinary identifiers
 
 ---
 
-## §20 Not yet decided — deferred
+## §20 Enum declaration syntax
+
+**Decided: `enum` keyword, braces, comma-separated variants with a trailing comma
+permitted. Two variant forms: unit (no payload) and tuple (positional payload).
+Generic enums use the same `<T>` compile-time parameter syntax as generic structs
+(§7). Copy/Move semantics follow the same rule as structs (§17) — a fourth
+validation of the same model. Struct variants (named fields inside a variant) are
+explicitly deferred, not rejected.**
+
+```ofn
+enum Direction { North, South, East, West }
+
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Point,                    // trailing comma permitted
+}
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Checked<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+move enum Handle {
+    Fd(i32),
+    Null,
+}
+```
+
+**Declaration form:**
+
+`enum Name { ... }` — braces are mandatory per §4. Variants are comma-separated;
+a trailing comma after the last variant is permitted (reduces diff noise when
+variants are added or reordered). The `enum` keyword is already reserved (`Token::Enum`)
+and is consistent with Rust, Swift, Kotlin, TypeScript, and C — near-universal
+baseline, no deviation needed (pillar 2).
+
+**Two variant forms:**
+
+*Unit variant* — no payload; bare name only. `North`, `None`, `Null`. Constructing:
+just the name. A unit variant is a complete value of the enum type on its own.
+
+*Tuple variant* — one or more comma-separated positional payload types in parentheses.
+`Circle(f64)`, `Some(T)`, `Ok(T)`. Constructing: the variant name applied as a
+function — `Circle(3.14)`, `Some(x)`, `Ok(result)`. Positional, not named.
+
+**Struct variants deferred:** a struct variant embeds named fields directly in the
+variant (`Rectangle { width: f64, height: f64 }` instead of `Rectangle(f64, f64)`).
+This is a convenience — it is fully expressible today as a tuple variant wrapping a
+named struct (`Rectangle(RectData)` where `RectData` is a separate `struct`). Adding
+struct variants introduces a third declaration form without new expressiveness.
+Deferred, not rejected: if real Ofan code shows this convenience gap is consistently
+painful, the decision can be reopened.
+
+**Generic enums:**
+
+Generic enums use `<T>` compile-time parameters with the same role-inference
+mechanism as §7. `T` appearing in a value-type position inside a variant body is
+inferred as a type parameter — no syntactic marker required, the same rule already
+used for generic structs.
+
+`Option<T>` and `Checked<T, E>` (§19) are standard-library enums defined using
+exactly this syntax — they are not special compiler types. Any user-defined enum
+can be generic in the same way.
+
+**Copy/Move for enums — fourth validation of the §17 model:**
+
+The §17 rule applies to enums without modification:
+
+1. If the enum is prefixed with `copy` or `move`, that always wins.
+2. Otherwise: `Copy` if and only if every payload type across every variant is
+   provably `Copy`. Unit variants have no payload and are trivially `Copy`.
+   A single `Move` payload in any variant makes the whole enum `Move`.
+3. Otherwise: `Move`.
+
+```ofn
+enum Direction { North, South, East, West }
+// automatically Copy — all variants are unit; no payload at all
+
+enum Shape { Circle(f64), Point }
+// automatically Copy — f64 is Copy; Point is unit
+
+move enum Handle { Fd(i32), Null }
+// i32 is Copy so Handle would auto-infer Copy, but Fd represents a resource
+// handle — override explicitly, same reasoning as §17's move struct FileHandle
+```
+
+The §17 heuristic warning (`fd`, `handle`, `ptr`-prefixed names) cannot fire on
+tuple variants by name — tuple payloads are positional and have no field names. The
+programmer must use `move enum` explicitly when a tuple variant's payload represents
+a resource. This is not a gap in the rule; it is the correct consequence of tuple
+variants being positional. The override mechanism covers it.
+
+This is a **fourth validation** that the §17 model generalizes. §18 was the first
+(method receivers), §16 was the second (for iteration), §19/§20 is a third/fourth
+(Option/Checked and now all enums). The Copy/Move rule has now applied correctly at
+every type-declaration position in the language — struct fields, enum variants, method
+receivers, loop iteration — with zero special cases.
+
+**Methods on enums:**
+
+Enums can have `impl` blocks and methods using exactly the same mechanism decided
+in §18. `&self`, `&mut self`, and `self` receivers work identically for enums and
+structs — no new syntax or special-casing at the enum position.
+
+> **See also:** [§7](#7-lifetime--region-inference-and-escape-hatch) — compile-time
+> parameters `<T>` for generic enums. [§17](#17-copymove-semantics) — Copy/Move rule
+> extended to enums here. [§18](#18-method-receiver-syntax) — `impl` blocks and method
+> receivers apply to enums unchanged. [§19](#19-option-and-checked-types-and-variant-names)
+> — `Option<T>` and `Checked<T, E>` are the canonical generic enum examples.
+
+---
+
+## §21 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -1102,7 +1221,6 @@ syntax is settled for these.
 - **Trait / interface syntax** — not started; how `impl` blocks interact with named
   traits has not been decided, though the receiver forms themselves are now settled in §18
 - **Module / import syntax and path separator** — `::` used informally in examples only
-- **Enum declaration syntax** — not decided
 - **`#[no_runtime]`-style attributes** — appeared in one exploratory example only
 - **Array/slice literal syntax** — `[f64]` and `&[f64]` used informally in earlier
   examples; literal construction syntax (`[1, 2, 3]`?) and fixed-size vs. dynamic-size
@@ -1130,16 +1248,16 @@ Words reserved from **decided syntax** (§16, §17, §18) that were not yet in t
 | `self` | `Token::SelfKw` | §18 method receiver value |
 | `impl` | `Token::Impl` | §18 impl blocks |
 
-Words reserved **ahead of syntax decisions** (constructs in this §20 list):
+Words reserved **ahead of syntax decisions** (constructs in this §21 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `match` | `Token::Match` | pattern matching (§20) |
-| `trait` | `Token::Trait` | trait / interface syntax (§20) |
-| `mod` | `Token::Mod` | module / import syntax (§20) |
+| `match` | `Token::Match` | pattern matching (§21) |
+| `trait` | `Token::Trait` | trait / interface syntax (§21) |
+| `mod` | `Token::Mod` | module / import syntax (§21) |
 
 `Self` (capital) is **not** reserved — whether Ofan needs a distinct `Self` type alias
-inside `impl` blocks has not been decided and is a §20-adjacent open question.
+inside `impl` blocks has not been decided and is a §21-adjacent open question.
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
