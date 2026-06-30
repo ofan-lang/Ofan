@@ -32,6 +32,7 @@
 | [13](#13-pointers-and-raw-memory) | Pointers and raw memory | Decided |
 | [14](#14-numeric-literals) | Numeric literals | Decided |
 | [15](#15-string-and-character-literals) | String and character literals | Decided (core) — 2 items deferred |
+| [16](#16-loop-syntax) | Loop syntax | Decided |
 | [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
 | [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
 | [19](#19-not-yet-decided--deferred) | Not yet decided — deferred | — |
@@ -40,11 +41,11 @@
 
 ## Status summary
 
-At a glance: **17 of 18 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **18 of 19 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
 covered. The remaining open ground is §19 — constructs that have never been formally
-designed at all (loops, `match`, traits, modules, enums, attributes, array literals,
+designed at all (`match`, traits, modules, enums, attributes, array literals,
 generic call syntax, void/unit type) — which were always out of scope for the lexer's
 first pass and do not block it.
 
@@ -655,6 +656,132 @@ Ofan's launch niche.
 
 ---
 
+## §16 Loop syntax
+
+**Decided: three loop forms (`while`, `loop`, `for`), standard `break`/`continue`,
+`break value` permitted only inside `loop`, and `for`'s iteration binding directly
+inherits the borrow and Copy/Move model locked in §7 and §17 — no new mechanism
+introduced.**
+
+```ofn
+while count < 10 {
+    count = count + 1;
+}
+
+loop {
+    if should_stop() { break; }
+}
+
+// loop as an expression — break can carry a value, ONLY inside loop
+let result = loop {
+    count = count + 1;
+    if count == 10 { break count * 2; }
+};
+// result == 20
+
+for item in items {
+    // consumes items's elements per §17's Copy/Move rule applied to each element
+}
+
+for item in &items {
+    // borrows each element — items remains usable by the caller after the loop
+}
+
+for item in &mut items {
+    // mutably borrows each element — may modify elements in place;
+    // items remains the same binding after the loop, only its contents may have changed
+}
+```
+
+**The three forms:**
+
+`while` — repeats while a boolean condition holds. No parentheses around the condition,
+consistent with `if`'s established form throughout the language. Braces are mandatory
+per §4.
+
+`loop` — unconditional repetition; exits only via `break`. This form exists as its own
+keyword rather than `while true { ... }` because the intent — "this loop deliberately
+has no condition; it runs until explicitly broken" — is carried by the keyword itself,
+not derivable only after reading and evaluating a condition. A reader scanning a function
+body reaches `loop` and immediately knows the loop's exit structure must be a `break`
+somewhere in the body; `while true` requires reading the condition before that same
+conclusion is reachable. Per pillar 1 (explicit, never silent erroneous behavior), making
+structural intent visible at the first token rather than reconstructible only from context
+is the same principle that distinguishes `&mut self` from an unmarked mutation in §18 —
+the safety-relevant information should be at the point a reader first encounters the
+construct, not inferred after the fact.
+
+`for` — iterates over a collection, binding each element (or each borrow of an element)
+to a name per iteration. `in` is the separator between the binding name and the
+collection expression.
+
+**`break` and `continue`:** standard semantics, valid across all three forms. `break`
+exits the innermost enclosing loop immediately. `continue` skips to the next iteration
+of the innermost enclosing loop. Both `break` and `continue` are already reserved
+keywords in the lexer.
+
+**`break value` — `loop`-only:**
+
+A `loop` is itself an expression. `break expr` causes the entire `loop` expression to
+evaluate to the value of `expr`. This is **not** valid for `while` or `for`.
+
+The asymmetry is not arbitrary. A `while` or `for` loop has two exit paths: an explicit
+`break` and a natural exit (condition becomes false, or the iterator is exhausted). A
+natural exit produces no value by definition — there is nothing to return when the loop
+simply ran out of items or its condition failed. Allowing `break value` on `while` or
+`for` would require deciding what the expression evaluates to on a natural exit (unit?
+`Option<T>`? an error?), a distinct design question not resolved here, which different
+languages handle differently. `loop` has exactly one exit path — `break` — so `break
+value` is unambiguous: every exit is an explicit break, and that break always carries
+the value. Restricting `break value` to `loop` is not a limitation but a precision: it
+is the only form where the expression-with-value semantics are clean without introducing
+an implicit second return path that would require a separate decision.
+
+**`for` iteration forms and the §7/§17/§18 model — second validation:**
+
+`for item in items` — each element is transferred or duplicated from the collection per
+§17's Copy/Move rule, applied element by element. For a collection whose element type is
+`Move`, each element is moved out of the collection; the collection cannot be used after
+the loop (its elements have been consumed, ownership transferred to the loop body on each
+iteration). For a collection whose element type is `Copy`, each element is duplicated;
+the collection itself remains usable after the loop.
+
+`for item in &items` — each element is borrowed immutably per §7's borrow rules.
+`item` inside the loop body is a reference to an element (`&T`). `items` remains fully
+usable by the caller after the loop completes, because the loop held only a borrow, not
+ownership.
+
+`for item in &mut items` — each element is borrowed mutably. The loop body may modify
+elements in place. `items` remains the same binding after the loop; only its contents
+may have changed. The collection is not consumed — this is a mutable borrow, not a move,
+applying the same mechanism as `&mut self` in §18 at the iteration position rather than
+the method-receiver position.
+
+**No new mechanism introduced.** The three `for` forms apply `&`/`&mut`/bare-value at
+the iteration position — the exact same pattern already locked in §7 (borrow syntax),
+§17 (Copy/Move semantics), and §18 (method receiver forms). Nothing new is required to
+specify `for`'s ownership behavior; the existing model covers it completely.
+
+This is a **second validation** that the ownership model generalizes cleanly across
+syntactically different positions. §18 was the first: method receivers applied
+`&`/`&mut`/bare-value at the method boundary with no special-casing required. `for`
+applies the same pattern at the iteration boundary — a syntactically different position,
+semantically identical treatment. The model has now generalized across four distinct
+syntactic positions (struct field types in §17, function parameters in §7, method
+receivers in §18, loop iteration here) with zero exceptions or special cases at any of
+them. This is the expected signature of a well-designed ownership model, and is worth
+naming explicitly rather than leaving it as a pattern a reader must discover
+independently.
+
+> **See also:** [§7](#7-lifetime--region-inference-and-escape-hatch) — borrow rules
+> govern `for item in &items` and `for item in &mut items`. [§17](#17-copymove-semantics)
+> — Copy/Move rule determines element ownership in `for item in items`.
+> [§18](#18-method-receiver-syntax) — the same `&`/`&mut`/bare-value pattern applied at
+> the method-receiver position; §18 is the first prior validation of the model's
+> generalization to a new syntactic position.
+
+---
+
 ## §17 Copy/Move semantics
 
 **Decided: Move-by-default, with compiler-inferred Copy for structurally provably-safe
@@ -874,7 +1001,6 @@ syntax is settled for these.
 - **Raw strings** (no escape processing) — see §15
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
-- **Loop syntax** — `for`/`while`/`loop` used informally; exact forms and semantics undecided
 - **`match` / pattern matching** — used informally in examples; syntax undecided
 - **`Option<T>` / `Checked<T, E>` variant names** — `Some`/`None`, `Ok`/`Err` equivalents
   not finalized; `Checked` as a pillar-1-flavored rename of `Result` was discussed, not
@@ -900,10 +1026,11 @@ in the lexer (`src/lexer/keywords.rs`) ahead of their syntax being decided. Rese
 means they cannot be used as identifiers; it does **not** imply any grammar or semantics
 has been decided for them.
 
-Words reserved from **decided syntax** (§17, §18) that were not yet in the keyword table:
+Words reserved from **decided syntax** (§16, §17, §18) that were not yet in the keyword table:
 
 | Word | Token | Source |
 |------|-------|--------|
+| `loop` | `Token::Loop` | §16 loop syntax |
 | `copy` | `Token::Copy` | §17 Copy/Move modifier |
 | `move` | `Token::Move` | §17 Copy/Move modifier |
 | `self` | `Token::SelfKw` | §18 method receiver value |
@@ -913,7 +1040,6 @@ Words reserved **ahead of syntax decisions** (constructs in this §19 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `loop` | `Token::Loop` | loop syntax (this section) |
 | `match` | `Token::Match` | pattern matching (this section) |
 | `trait` | `Token::Trait` | trait / interface syntax (this section) |
 | `mod` | `Token::Mod` | module / import syntax (this section) |
