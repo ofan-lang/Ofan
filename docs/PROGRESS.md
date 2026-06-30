@@ -3,6 +3,44 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-29 — §20 enum declaration syntax (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Added §20 Enum declaration syntax to `SYNTAX_SPEC.md`; renumbered deferred list §20 → §21.
+- Removed "Enum declaration syntax" from deferred list.
+- Updated §18 See also (§20 → §21), reserved-word table references, Self note (§20 → §21).
+- PR #14 merged (fast-forward). 48/48 tests pass (no code changes).
+
+**Design decisions made (and why):**
+- **Two variant forms: unit (bare name) and tuple (positional types in parens).** Unit
+  variants cover boolean-style enums (`Direction::North`) and sentinel values. Tuple
+  variants cover all payload cases for `Option<T>`/`Checked<T, E>` and user enums.
+- **Struct variants deferred.** A tuple variant wrapping a named struct covers the
+  use-case today with no expressiveness gap, only convenience. Revisit if real Ofan
+  code shows the pain is consistently worth the surface-area cost.
+- **`Ok`, `Err`, `Some`, `None` are prelude constructors, not keywords.** Lex as
+  `Token::Ident`; no lexer changes. `Token::Enum` already reserved.
+- **Copy/Move follows §17 rule unchanged — fourth validation.** Copy iff all variant
+  payloads are provably Copy. `copy enum`/`move enum` prefix overrides inference.
+  Heuristic warning cannot fire on positional tuple payloads (no field names);
+  `move enum` required to override in that case. Named explicitly as the fourth
+  validation that §17 generalizes across positions without special-casing.
+- **Generic enums via `<T>` syntax (§7), no new mechanism.** `Option<T>` and
+  `Checked<T, E>` are standard-library enums, not special compiler types.
+- **`impl` blocks per §18, unchanged.** No new method syntax for enums.
+
+**Pending / next step:**
+- `match` / pattern matching — plan-mode session; larger design decision, now that
+  enums are decided. This is the next logical step.
+- Parser: expression grammar, statement grammar, function definitions (plan mode
+  first, per CLAUDE.md). Blocked on at least `match` + enum (now unblocked for
+  enum side).
+
+**Something the agent proposed and was rejected (and why):**
+- N/A.
+
+---
+
 ## Last session: 2026-06-29 — §19 Option/Checked types and variant names (docs/SYNTAX_SPEC.md)
 
 **What was done:**
