@@ -3,6 +3,50 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-29 — §21 match / pattern matching syntax
+
+**What was done:**
+- Added `Token::FatArrow` (`=>`) to lexer (token.rs, mod.rs scanning, keywords.rs comment cleanup).
+- Added §21 Match / pattern matching to `SYNTAX_SPEC.md`; renumbered deferred §21 → §22.
+- Pillars reviewer found 5 issues; all resolved before commit.
+- 50/50 tests pass. PR #15 merged (fast-forward).
+
+**Design decisions made (and why):**
+- **`match expr { arms }` — expression form.** No parens around subject (consistent with
+  if/while/for). Evaluates to the matching arm's value, like `loop { break val }` (§16).
+- **Arm separator `=>`** (`Token::FatArrow`) — only unallocated separator token (`:` is
+  §9, `->` is §6, `=` is §5/§10).
+- **Arm body: braceless single-expression canonical; braces for multi-statement.** §4's
+  "mandatory braces" applies to control-flow block bodies; match arms are expression
+  positions with `=>` + `,` as unambiguous boundaries. Formatter removes redundant
+  braces on single-expression arms → one form in shared source (pillar 3).
+- **Leading `|` on or-patterns: write-time alias.** Formatter removes it; no leading `|`
+  in persisted source (pillar 3).
+- **Binding vs. variant disambiguation: type-resolved** (§2 forbids casing enforcement;
+  standard ML/Rust uppercase heuristic unavailable). Parser emits "ambiguous name" nodes;
+  type-checker resolves. Unreachable-arm compile error closes the silent-logic-bug surface
+  (if a mistyped variant becomes a catch-all binding, the arms below it are unreachable →
+  compile error with suggestion).
+- **Exhaustiveness: compile error** on enums (variants statically enumerable); compile error
+  on open types (`i32`, `str`) without a `_` wildcard arm. Error messages name missing
+  variants and suggest fixes (pillar 5).
+- **`match` is the sole fallback for `Checked<T, E>`.** Consistent with §12/§19 — `?:`
+  deliberately invalid on `Checked`; `match` forces naming the error case explicitly.
+- **Deferred:** range patterns, `@`-binding, struct patterns (§20 struct variants deferred),
+  slice patterns, or-pattern exhaustiveness with guards.
+
+**Something the agent proposed and was rejected (and why):**
+- Pillars reviewer (pass 1): found 5 issues, all fixed before commit. No user rejections.
+
+**Pending / next step:**
+- Parser: expression grammar, statement grammar, function definitions. Now unblocked on
+  `match` + enums. Plan-mode session required (per CLAUDE.md). Recommend starting with
+  expression grammar since that's the foundation everything else builds on.
+- §22 remaining deferred: traits, modules, attributes, array/slice literals, generic call
+  syntax, void/unit type.
+
+---
+
 ## Last session: 2026-06-29 — §20 enum declaration syntax (docs/SYNTAX_SPEC.md)
 
 **What was done:**
