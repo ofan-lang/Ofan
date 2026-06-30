@@ -30,10 +30,11 @@ pub(super) fn lookup(text: &str) -> Option<Token<'_>> {
         // §18 method receivers and impl blocks — decided syntax, not yet in keyword table
         "self" => Some(Token::SelfKw),
         "impl" => Some(Token::Impl),
+        // §16 loop syntax — decided syntax
+        "loop" => Some(Token::Loop),
         // Reserved ahead of syntax decisions (SYNTAX_SPEC.md §19).
         // Grammar for these constructs is undecided; words reserved so they
         // cannot be used as identifiers before that decision is made.
-        "loop" => Some(Token::Loop),
         "match" => Some(Token::Match),
         "trait" => Some(Token::Trait),
         "mod" => Some(Token::Mod),
