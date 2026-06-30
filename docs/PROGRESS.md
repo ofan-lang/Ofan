@@ -3,6 +3,85 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-06-29 — §16 loop syntax spec (docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Confirmed deferred list is §19; §16 was an open gap between §15 and §17.
+- Confirmed `break`/`continue` already reserved — no keyword gap found.
+- Added §16 Loop syntax to SYNTAX_SPEC.md, filling the §15→§17 gap.
+- Removed "Loop syntax" from §19 deferred list.
+- Moved `loop`/`Token::Loop` in §19's reserved-words table from "ahead of
+  syntax decisions" to "decided syntax (§16)"; updated keywords.rs comment
+  to reference §16.
+- Updated Contents table (§16 row), Status summary (18 of 19), anchor-link
+  scan clean.
+- PR #12 merged (fast-forward). 48/48 tests pass.
+
+**Design decisions made (and why):**
+- **`loop` as a distinct keyword from `while true { }`:** intent visible at
+  the keyword itself (pillar 1 — explicit, not derivable only from reading
+  the condition). Same principle as `&mut self` vs. unmarked mutation.
+- **`break value` restricted to `loop` only:** `while`/`for` have two exit
+  paths (explicit break + natural exit); `loop` has exactly one. Restricting
+  `break value` to the form with a single exit path keeps the semantics
+  unambiguous without requiring a decision about what the loop expression
+  evaluates to on a natural exit.
+- **`for` iteration forms inherit §7/§17/§18 model with no new mechanism:**
+  `&`/`&mut`/bare-value at the iteration position — same pattern already
+  locked for function parameters (§7), struct fields (§17), method receivers
+  (§18). Named explicitly as the second validation that the ownership model
+  generalizes cleanly across syntactically distinct positions.
+
+**Pending / next step:**
+- `Option`/`Checked` variant names — small design session; needed before
+  parser can recognize success/error/absent patterns.
+- `match` / pattern matching syntax — larger session, plan mode first.
+- Parser: expression grammar, statement grammar, function definitions
+  (plan mode first, per CLAUDE.md). Blocked on at least `Option`/`Checked`
+  variant names.
+
+**Something the agent proposed and was rejected (and why):**
+- N/A.
+
+---
+
+## Last session: 2026-06-29 — keyword reservation pass (src/lexer/, docs/SYNTAX_SPEC.md)
+
+**What was done:**
+- Audited all §19 candidate words against actual `keywords.rs`; confirmed `while`, `for`,
+  `in`, `enum`, `use`, `if`, `else`, `return`, `true`, `false` already reserved — not touched.
+- Identified 4 decided-syntax gaps (§17/§18 words absent from keyword table): `copy`,
+  `move`, `self`, `impl`.
+- Identified 4 §19 future reservations: `loop`, `match`, `trait`, `mod`.
+- Added 8 `Token` variants to `token.rs`, 8 entries to `keywords.rs`.
+- Added 3 tests: decided-gap keywords, §19 reservation keywords, regression guard on
+  pre-existing keywords. 48/48 pass.
+- Updated `SYNTAX_SPEC.md` §19: replaced the "process note" about missing master
+  reserved-word list with the actual master table.
+- PR #11 merged (fast-forward).
+
+**Design decisions made (and why):**
+- Individual named token variants (`Token::Loop`, `Token::Match`, etc.) — not a generic
+  `Token::Reserved`. A catch-all would push disambiguation into the parser; named variants
+  let the parser pattern-match directly once grammar is decided.
+- `Token::SelfKw` (not `Token::Self`) — avoids collision with Rust's own `self` keyword
+  in the compiler source.
+- `Self` (capital) intentionally not reserved — whether Ofan needs a `Self` type alias
+  inside `impl` blocks is an open §19-adjacent question; flagged in SYNTAX_SPEC.md.
+
+**Pending / next step:**
+- §19 syntax decisions needed before parser work can start: loop forms (`loop`/`while`/
+  `for`/`in` syntax and semantics), `match`/pattern matching, `Option`/`Checked` variant
+  names. Recommend plan-mode sessions for each.
+- `Self` (capital) reservation question — decide during the trait/impl design session.
+- Parser: expression grammar, statement grammar, function definitions (plan mode first,
+  per CLAUDE.md).
+
+**Something the agent proposed and was rejected (and why):**
+- N/A.
+
+---
+
 ## Last session: 2026-06-28 — `IdentAfterNumericLiteral` lexer error (src/lexer/)
 
 **What was done:**
