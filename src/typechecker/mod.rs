@@ -10,7 +10,7 @@ pub enum TypeError {
 }
 
 /// Run type and lifetime inference over a parsed AST.
-pub fn infer(_ast: &Ast) -> Result<(), TypeError> {
+pub fn infer(_ast: &Ast<'_>) -> Result<(), TypeError> {
     // TODO: implement type inference and lifetime inference engine
     Ok(())
 }
