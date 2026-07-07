@@ -3,6 +3,73 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-07 — lexer + parser modularization shipped (PR #16, PR #19)
+
+**What was done:**
+
+Pre-commit work (audit + reviewer passes, required by GIT_WORKFLOW.md before any `src/` PR):
+- Pre-commit audit surfaced `Token::SelfKw` inconsistency in `try_parse_region_tag` —
+  logged to PROGRESS.md as an out-of-scope open item (see "Known open items" below).
+- `pillars-reviewer` and `rust-idiom-reviewer` ran against both commit diffs.
+- Four Pillar 5 violations found — bare `error_expected(..., None)` at `item.rs:9`,
+  `expr.rs:221`, `pattern.rs:97`, `pattern.rs:144` — all fixed before committing.
+- One rust-idiom finding: `impl<'src> fmt::Display for Token<'src>` in `token.rs` —
+  elided to `impl fmt::Display for Token<'_>`.
+- `parse_function` visibility narrowed from `pub(crate)` to `pub(super)` — only external
+  caller is parent `mod.rs`; no crate-wide reach needed.
+- Both reviewers re-ran on the final amended diffs: zero findings on either commit.
+
+Commits landed on `main`:
+- `3336734` — `refactor(lexer): modularize src/lexer/mod.rs into submodules`
+- `fe82c05` — `feat(parser): implement parser, AST, and expression grammar across modular submodules`
+
+PRs merged:
+- **PR #16** (`feat/lexer-modularize` → `main`, merge commit `ccf8b00`) — lexer split.
+- **PR #19** (`feat/parser-implement` → `main`, merge commit `32c3371`) — parser split.
+  Supersedes the abandoned PR #17 (see incident note below).
+
+**⚠ PR #17 incident — lesson learned:**
+PR #17 was reviewed, approved, and merged into `feat/lexer-modularize` rather than
+`main`. PR #16 had already merged `feat/lexer-modularize` into `main` before #17's
+merge ran; GitHub's automatic base retarget did not occur. The parser commit (`fe82c05`)
+landed on a branch that was already closed out, leaving `main` without the parser
+changes. Fix: new PR #19 carrying the same reviewed commit directly onto `main`.
+
+**Standing check (from this session forward):** before merging any PR whose base is a
+feature branch, run `gh pr view <N> --json baseRefName` immediately before clicking
+merge and verify the base is correct. Never assume GitHub has already retargeted a
+dependent PR automatically.
+
+**Test and lint state (verified on `main` at `32c3371`):**
+- `cargo test` — 115 passed, 0 failed.
+- `cargo build` / `cargo check` / `cargo clippy -- -D warnings` — all clean.
+
+**Local state:** only `main` exists locally, tracking `origin/main` at `32c3371`.
+Working tree clean. All feature and docs branches deleted (local and remote).
+
+**Known open items (unresolved, not touched this session):**
+1. `try_parse_region_tag` in `src/parser/types.rs` (~line 45–47): `Token::SelfKw` in
+   `is_type_start` lookahead is inconsistent with `parse_type` having no `SelfKw` arm.
+   Harmless in practice (still errors), but gives a misleading diagnostic on `&r1 self`.
+   Belongs to the `self`/`Self`-in-type-position / trait-design session.
+2. Tail-expression bug: `{ foo(); }` and `{ foo() }` produce identical AST —
+   `Stmt::Expr` needs `has_semicolon: bool`. Needs a separate decision session.
+3. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code:
+   `approx_constant` (PI) and `redundant_pattern_matching`. Not in the lint gate.
+
+**Pending / next steps:**
+- **`self`/`Self` trait-design session** — resolves the `SelfKw` lookahead inconsistency
+  and decides how `Self` works in `impl` blocks.
+- **Typechecker implementation** — plan-mode session required (per CLAUDE.md); the next
+  major compiler phase.
+- **`docs/ARCHITECTURE.md`** — high-level map of compiler phases, module boundaries, and
+  data flow; useful before the typechecker grows large.
+- **Anchor CLI tool** — per PHILOSOPHY.md §5.2; a real program to compile before the
+  typechecker is complete, to validate language design against actual usage.
+- **Tail-expression `has_semicolon` fix** — small standalone change, unscheduled.
+
+---
+
 ## Last session: 2026-07-04 — parser modularization + lexer modularization
 
 **What was done (parser split):**
