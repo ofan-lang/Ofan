@@ -65,3 +65,51 @@ pub(super) fn scan_comment<'src>(
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::lexer::{LexError, Lexer, Token};
+
+    fn lex(src: &str) -> Result<Vec<Token<'_>>, LexError> {
+        Lexer::new(src).lex().map(|ts| ts.into_iter().map(|(t, _)| t).collect())
+    }
+
+    #[test]
+    fn lex_line_comment_skipped() {
+        assert_eq!(
+            lex("# comment\n42").unwrap(),
+            vec![Token::Integer(42), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_block_comment_skipped() {
+        assert_eq!(
+            lex("## block\ncomment ##42").unwrap(),
+            vec![Token::Integer(42), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_doc_comment_preserved() {
+        let tokens = lex("### doc text ###").unwrap();
+        assert!(matches!(&tokens[0], Token::DocComment(s) if s.trim() == "doc text"));
+        assert_eq!(tokens[1], Token::Eof);
+    }
+
+    #[test]
+    fn lex_err_unterminated_block_comment() {
+        assert!(matches!(
+            lex("## never closed"),
+            Err(LexError::UnterminatedBlockComment { .. })
+        ));
+    }
+
+    #[test]
+    fn lex_err_unterminated_doc_comment() {
+        assert!(matches!(
+            lex("### never closed"),
+            Err(LexError::UnterminatedDocComment { .. })
+        ));
+    }
+}
