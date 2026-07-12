@@ -34,7 +34,7 @@
 | [15](#15-string-and-character-literals) | String and character literals | Decided (core) — 2 items deferred |
 | [16](#16-loop-syntax) | Loop syntax | Decided |
 | [17](#17-copymove-semantics) | Copy/Move semantics | Decided |
-| [18](#18-method-receiver-syntax) | Method receiver syntax | Decided |
+| [18](#18-method-receiver--self-and-self) | Method receiver — `self` and `Self` | Decided |
 | [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
 | [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
 | [21](#21-match--pattern-matching) | Match / pattern matching | Decided |
@@ -47,10 +47,11 @@
 At a glance: **21 of 22 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. The remaining open ground is §22 — constructs that have never been formally
-designed at all (traits, modules, attributes, array literals, generic call syntax,
-void/unit type) — which were always out of scope for the lexer's first pass and do not
-block it.
+covered. §18 now also covers `Self` (capital) — the impl-block type alias — resolving
+the open question previously listed in §22. The remaining open ground is §22 — constructs
+that have never been formally designed at all (traits, modules, attributes, array literals,
+generic call syntax, void/unit type) — which were always out of scope for the lexer's
+first pass and do not block it.
 
 ---
 
@@ -893,103 +894,138 @@ gives the dominant real-world case zero ceremony while confining the residual pi
 to a narrow, named, partially-mitigated case rather than accepting it silently across all
 structs.
 
-> **See also:** [§18](#18-method-receiver-syntax) — Method receiver syntax
-> (`&self`/`&mut self`/`self`) builds directly on this section's Copy/Move rule for its
-> consuming-receiver case; see §18 for the full decision.
+> **See also:** [§18](#18-method-receiver--self-and-self) — Copy/Move structural inference
+> extends to receiver access mode: `self` as receiver infers its borrow level from body
+> usage; `move self` is the consuming override, parallel to `move struct` here.
 
 ---
 
-## §18 Method receiver syntax
+## §18 Method receiver — `self` and `Self`
 
-**Decided: three receiver forms — `&self` (immutable borrow), `&mut self` (mutable borrow),
-and `self` (consuming) — reusing the borrow and mutability mechanisms already locked in §5
-and §7, with no new syntax concepts introduced at the receiver position.**
+**Decided: `self` receiver access mode is inferred from method body usage — the same
+inference mechanism as §17 Copy/Move — with `move self` as the explicit consuming
+override. `Self` (capital) in type position is a name-resolution alias for the enclosing
+`impl` type, not part of the borrow/ownership mechanism.**
 
 ```ofn
 impl Entity {
-    fn distance_to(&self, other: &Entity) -> f32 {
-        // read-only — does not mutate self, self remains usable by the caller
-        // after this call
+    fn distance_to(self, other: &Entity) -> f32 {
+        # read-only — inference sees no field mutation, no move of self
+        # → inferred as immutable borrow: caller's binding unaffected after this call
+        ...
     }
 
-    fn update(&mut self, dt: f32) {
+    fn update(self, dt: f32) {
         self.x = self.x + self.velocity_x * dt;
-        // mutates self in place — self remains the SAME binding, still usable
-        // by the caller after this call (this is the form that makes the
-        // call-update-every-frame-in-a-loop pattern from the game-dev example
-        // actually work)
+        # self.x assigned — inference sees field mutation
+        # → inferred as mutable borrow: caller's binding same binding, contents changed
     }
 
-    fn into_id(self) -> u32 {
+    fn into_id(move self) -> u32 {
         self.id
-        // consumes self — behavior depends on whether Entity is Copy or Move
-        // per the §17 rule: if Move, the caller's original binding becomes
-        // invalid after this call; if Copy, the caller's original is
-        // untouched (a duplicate was handed to the method)
+        # explicit move: programmer forces full ownership transfer into the method
+        # → caller's binding invalid after this call (if Entity is Move per §17)
+    }
+
+    fn clone(self) -> Self {
+        # Self in return-type position resolves to Entity — name alias, not borrow mechanism
+        Entity { x: self.x, y: self.y, ... }
     }
 }
 ```
 
-**The three forms:**
+**Receiver access mode inference:**
 
-`&self` — immutable borrow of the receiver. The method may read fields but may not mutate
-them. The caller's binding is fully usable and unchanged after the call. This is the form
-for any operation that only inspects state — queries, computations, serialization,
-comparisons.
+`self` as a method parameter has its access mode — immutable borrow, mutable borrow, or
+consuming — inferred by the compiler from how the body uses it. The same structural
+inference mechanism from §17 (Copy/Move) applies here: the compiler determines the minimal
+sufficient access level that makes the body well-typed.
 
-`&mut self` — mutable borrow of the receiver. The method may read and mutate fields in
-place. The caller's binding is the same binding, still usable after the call — only its
-contents may have changed. This is the form for in-place state updates: `update`, `push`,
-`set_*`, any operation that modifies the receiver and leaves it intact for continued use.
+- If the body only reads `self`'s fields and passes `self` to other shared-reference
+  parameters, inference produces an immutable borrow. The caller's binding is fully usable
+  after the call, unchanged.
+- If the body assigns any field of `self` (`self.field = ...`) or passes `self` to a
+  mutable-borrow parameter, inference produces a mutable borrow. The caller's binding is
+  the same binding after the call — only its contents may have changed.
 
-`self` (bare, consuming) — the receiver is passed by value. Whether the caller's original
-binding survives is fully determined by §17's Copy/Move rule: for a `Move` struct, the
-caller's binding becomes invalid after the call (ownership transferred into the method);
-for a `Copy` struct, the caller's binding is untouched (a duplicate was handed to the
-method, consistent with Copy semantics everywhere else in the language). Use this form for
-transforming a value into something else — `into_*` conversions, destructuring, consuming
-builders.
+The programmer does not write `&` or `&mut` at the receiver position. These forms do not
+exist in Ofan source code. The inferred access level is compiler-visible information, not
+source-level syntax. Per pillar 3, there is one way to write a method receiver in shared
+source: bare `self`.
 
-> **Note — `mut self` vs. `&mut self` (these are not the same thing):** a receiver written
-> as `mut self` (no `&`) is a *consuming* receiver in the same category as bare `self`,
-> where the locally-owned copy happens to be declared mutable within the method body. It
-> does **not** mean "mutate the caller's original in place" — that is `&mut self`. The
-> one-character difference (`&`) carries real semantic weight, the same weight that
-> separates `let x` from `let mut x` in §5. A reader skimming a method signature reaches
-> the crucial information at the `&` character: `&` present means the caller keeps the
-> binding; `&` absent means the call consumes it. Per pillar 5, this distinction must be
-> explicit and scannable at the signature, not something a reader has to infer from the
-> method body.
+**Consuming receiver — `move self`:**
 
-*Rationale (pillars 1 and 2, and §17 validation):*
+When the method requires full ownership of the receiver, the programmer writes `move self`
+explicitly — the same override keyword that `move struct` uses in §17. This forces a
+consuming receiver regardless of what body analysis would otherwise infer:
 
-**Pillar 2:** all three forms reuse syntax already locked in this spec. `&` and `&mut` are
-the borrow mechanisms from §7; `mut` as a modifier is from §5; the consuming case applies
-the Copy/Move rule from §17 with no additional mechanism. A method receiver is, in terms of
-the language's type system, simply a parameter named `self` — it follows the same rules as
-any other parameter at a function boundary. Nothing new is introduced at the receiver
-position; all of the relevant behavior is already specified elsewhere and generalizes to
-this case without special-casing.
+- For a Move struct (§17): the caller's binding becomes invalid after the call.
+- For a Copy struct (§17): the caller's binding is untouched — a duplicate was consumed.
 
-**Pillar 1:** `&mut self` existing as its own explicit form closes a real silent-danger gap.
-Without it, a mutating method would have to be expressed either as a consuming `self`
-receiver (wrong semantics: needlessly invalidates or needlessly duplicates the caller's
-binding depending on Copy/Move status) or as some form of implicit mutation with no marker
-at the signature level, which would be exactly the kind of unmarked dangerous behavior
-pillar 1 forbids. The three-way split is not convention-following for its own sake — it is
-the minimum needed to make the dangerous case (mutation of the caller's state) visible at
-the signature without forcing the common case (read-only inspection) to pay ceremony.
+`move self` is the one case that requires explicit annotation. Everything else is inferred.
 
-**§17 validation:** the consuming-receiver case (`self`) is a direct confirmation that
-§17's design generalizes correctly. The same Copy/Move rule that governs ordinary function
-parameters governs `self` — no "method exception" to the ownership model, no separate
-concept to learn for method calls vs. free function calls. This is the clean generalization
-that §17's design was expected to produce.
+**Ambiguity — hard compile error, never silent fallback (pillar 1):**
 
-> **See also:** [§17](#17-copymove-semantics) — Copy/Move semantics determine the
-> consuming-receiver behavior for `self` parameters. [§22](#22-not-yet-decided--deferred) —
-> trait/interface syntax (how `impl` blocks interact with named traits) remains unresolved
-> and does not block the method-receiver decision here.
+If inference cannot determine a single minimal access level — for example, because
+conflicting requirements arise across branches, or because dispatch is unresolved in a
+generic context — this is a **compile error**, never a silent fallback to a "safe" default.
+
+Example error shape (pillar 5 — context + suggestion required):
+
+```
+error: cannot infer access mode for `self` in `Entity::process`
+  → line 14: `self.update(dt)` requires mutable borrow of `self`
+  → line 17: `consume(self)` would move out of `self`
+note: these requirements conflict — the method cannot simultaneously borrow and consume
+suggestion: if consuming ownership is intended, write `move self` and restructure the body
+            so the borrow at line 14 precedes the move at line 17
+```
+
+The error must name the specific conflicting usage sites in the body, not just the `self`
+parameter declaration. Generic "type error at `self`" messages violate pillar 5.
+
+**`Self` type:**
+
+`Self` (capital) inside an `impl` block is a name-resolution alias for the type the block
+implements. It has no borrow, ownership, or inference semantics — it is resolved at
+name-resolution time exactly like any named type, to the enclosing `impl`'s type.
+
+```ofn
+impl Entity {
+    fn clone(self) -> Self { ... }     # Self resolves to Entity
+    fn default() -> Self { ... }       # Self resolves to Entity
+}
+```
+
+`Self` is not valid outside an `impl` block. It is not a keyword token (`self` lowercase
+is a keyword; `Self` uppercase resolves through the type namespace, distinguished by
+convention). `Self` and `self` (lowercase) are unrelated in the type system: `self` is a
+parameter name that triggers receiver inference; `Self` is a type alias. They must not be
+conflated.
+
+*Rationale (pillar alignment):*
+
+**Pillar 3 (single canonical syntax):** inference removes the `&self`/`&mut self`/`self`
+three-way syntactic choice from the programmer. There is one form in shared source — bare
+`self` — and one override form — `move self`. No second valid way to express a read-only
+or mutating receiver exists in persisted source.
+
+**Pillar 1 (explicit erroneous behavior):** inference-with-hard-error-on-ambiguity is
+safer than explicit annotation, not less safe. Under an explicit design, a programmer who
+wrote the wrong form got a compile error pointing at the mismatch — the error message had
+to explain what the access level was. Under inference, the compiler makes the same
+determination without requiring a redundant annotation. Ambiguous cases are promoted to
+hard errors with conflict-site pointing. The pillar 1 guarantee is strictly preserved.
+
+**§17 validation (third position):** `move self` is the third confirmation that §17's
+`copy`/`move` keyword pattern generalizes cleanly — `copy struct`, `move struct` (§17),
+`for &x in collection` (§16 iteration), `move self` (§18). One keyword form, one override
+pattern, three positions validated without special-casing.
+
+> **See also:** [§17](#17-copymove-semantics) — the Copy/Move structural inference
+> mechanism is the same one applied here to receiver access mode; `move self` mirrors
+> `move struct`. [§22](#22-not-yet-decided--deferred) — trait/interface syntax (how `impl`
+> blocks interact with named traits) remains unresolved and does not block this.
 
 ---
 
@@ -1493,6 +1529,7 @@ Words reserved from **decided syntax** (§16, §17, §18, §21) that were not ye
 | `copy` | `Token::Copy` | §17 Copy/Move modifier |
 | `move` | `Token::Move` | §17 Copy/Move modifier |
 | `self` | `Token::SelfKw` | §18 method receiver value |
+| `Self` | (type name, not a token variant) | §18 impl-block type alias; resolves via type namespace |
 | `impl` | `Token::Impl` | §18 impl blocks |
 | `match` | `Token::Match` | §21 match / pattern matching |
 
@@ -1502,9 +1539,6 @@ Words reserved **ahead of syntax decisions** (constructs in this §22 list):
 |------|-------|-----------------|
 | `trait` | `Token::Trait` | trait / interface syntax (§22) |
 | `mod` | `Token::Mod` | module / import syntax (§22) |
-
-`Self` (capital) is **not** reserved — whether Ofan needs a distinct `Self` type alias
-inside `impl` blocks has not been decided and is a §22-adjacent open question.
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
