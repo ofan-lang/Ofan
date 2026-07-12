@@ -5,7 +5,7 @@ use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Region, Ty};
-use crate::typechecker::{InferResult};
+use crate::typechecker::InferResult;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -27,9 +27,12 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     }
 
     if ctx.has_fatal_errors() {
-        Err(ctx.errors)
+        // Return only fatal errors; deferred are secondary noise when the program
+        // has real type errors.
+        Err(ctx.errors.into_iter().filter(TypeError::is_fatal).collect())
     } else {
-        Ok(InferResult { type_map: ctx.type_map })
+        let deferred = ctx.errors; // only Deferred remain when no fatals
+        Ok(InferResult { type_map: ctx.type_map, deferred })
     }
 }
 
@@ -131,6 +134,7 @@ fn infer_block(block: &Block<'_>, return_ty: &Ty, ctx: &mut InferCtx, env: &mut 
         None => Ty::Unit,
     };
 
+    ctx.record(block.span, tail_ty.clone());
     env.pop_scope();
     tail_ty
 }
@@ -191,7 +195,17 @@ fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, env: &mut Env
             }
         }
 
-        Stmt::Assign { target, value, span, .. } => {
+        Stmt::Assign { target, op, value, span } => {
+            // Compound assignments (+=, -=, etc.) require knowing the operator's
+            // typing rule (e.g. += requires numeric); defer to avoid silently
+            // accepting `x += true` as type-correct.
+            // PHASE2: implement compound-assign operator type checking.
+            if op.is_some() {
+                infer_expr(target, ctx, env);
+                infer_expr(value, ctx, env);
+                defer(ctx, "compound assignment operator type checking", *span);
+                return;
+            }
             let target_ty = infer_expr(target, ctx, env);
             let value_ty = infer_expr(value, ctx, env);
             check_types(&target_ty, &value_ty, *span, ctx, || {
@@ -405,9 +419,11 @@ fn infer_unary(
             }
         },
         UnaryOp::Borrow => {
+            if matches!(operand_ty, Ty::Error) { return Ty::Error; }
             Ty::Ref { mutable: false, region: None, inner: Box::new(operand_ty) }
         }
         UnaryOp::BorrowMut => {
+            if matches!(operand_ty, Ty::Error) { return Ty::Error; }
             Ty::Ref { mutable: true, region: None, inner: Box::new(operand_ty) }
         }
     }
@@ -579,13 +595,17 @@ fn infer_call(
             expected: sig.params.len(),
             found: args.len(),
             span,
+            suggestion: Some(format!(
+                "pass exactly {} argument(s), or change the signature of `{name}`",
+                sig.params.len()
+            )),
         });
         return Ty::Error;
     }
 
     // Arg type checks.
     let mut any_error = false;
-    for (arg, expected_ty) in args.iter().zip(&sig.params) {
+    for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
         if !matches!(arg_ty, Ty::Error) && &arg_ty != expected_ty {
             ctx.error(TypeError::Mismatch {
@@ -593,8 +613,8 @@ fn infer_call(
                 found: arg_ty,
                 span: arg.span(),
                 suggestion: Some(format!(
-                    "argument `{}` of `{name}` expects `{expected_ty:?}`",
-                    args.iter().position(|a| std::ptr::eq(a, arg)).unwrap_or(0) + 1,
+                    "argument {} of `{name}` expects `{expected_ty:?}`",
+                    i + 1,
                 )),
             });
             any_error = true;
@@ -623,12 +643,14 @@ pub(crate) fn ast_ty_to_ty(
                     "str" => return Ty::Str,
                     "unit" => return Ty::Unit,
                     n if generic_params.contains(&n) => return Ty::Param(n.to_string()),
-                    n => return Ty::Named(n.to_string()),
+                    // No struct/enum definitions in phase 1 — any unknown type name is
+                    // unresolvable. Defer so it surfaces in InferResult::deferred rather
+                    // than silently reaching codegen as Ty::Named.
+                    n => return defer(ctx, "user-defined type — struct/enum design pending", span),
                 }
             }
             // Generic instantiation (e.g. `Option<i32>`): deferred in phase 1.
-            defer(ctx, "generic type instantiation", span);
-            Ty::Named(name.to_string())
+            return defer(ctx, "generic type instantiation", span);
         }
         Type::Ref { mutable, region, inner, .. } => {
             let inner_ty = ast_ty_to_ty(inner, generic_params, span, ctx);

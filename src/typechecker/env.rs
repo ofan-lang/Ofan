@@ -65,8 +65,21 @@ impl InferCtx {
     }
 
     /// Record the inferred type for a given source span. Called after every
-    /// successful `infer_expr` so codegen can look up types by span.
+    /// `infer_expr` and `infer_block` so codegen can look up types by span.
+    ///
+    /// Idempotent for the same (span, type) pair — `Expr::Block(b)` legitimately
+    /// records `b.span` from both `infer_block` and `infer_expr`. Panics in debug
+    /// builds if the same span is recorded with *different* types, which indicates
+    /// a genuine collision between two semantically distinct nodes.
     pub(crate) fn record(&mut self, span: Span, ty: Ty) {
+        if let Some(prev) = self.type_map.get(&span) {
+            debug_assert!(
+                prev == &ty,
+                "span collision with conflicting types at byte {}: had {prev:?}, inserting {ty:?}",
+                span.start
+            );
+            return;
+        }
         self.type_map.insert(span, ty);
     }
 

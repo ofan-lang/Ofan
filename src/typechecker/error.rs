@@ -38,12 +38,14 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
-    #[error("wrong number of arguments for `{name}` at byte {}: expected {expected}, found {found}", span.start)]
+    #[error("wrong number of arguments for `{name}` at byte {}: expected {expected}, found {found}{}", span.start,
+        suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     ArgCountMismatch {
         name: String,
         expected: usize,
         found: usize,
         span: Span,
+        suggestion: Option<String>,
     },
 
     #[error("condition must be `bool`, found {found:?} at byte {}\
@@ -67,7 +69,12 @@ pub enum TypeError {
     /// Non-fatal: a syntactically valid construct that phase 1 does not yet
     /// type-check. Inference continues with `Ty::Error` for the node.
     /// Does not count as a hard failure in `Result::Err`.
-    #[error("type checking for `{feature}` is not yet implemented (at byte {})", span.start)]
+    /// Surfaced in `InferResult::deferred` so callers (driver, codegen) know
+    /// which constructs were accepted without full verification.
+    #[error("type checking not yet implemented for `{feature}` at byte {} \
+        — this construct is accepted but not fully verified; \
+        avoid lowering it to code until the next compiler phase adds support",
+        span.start)]
     Deferred { feature: &'static str, span: Span },
 
     // ── Phase 2 placeholders ──────────────────────────────────────────────────

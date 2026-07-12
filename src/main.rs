@@ -43,11 +43,18 @@ fn main() {
         }
     };
 
-    if let Err(errors) = typechecker::infer(&ast) {
-        for e in &errors {
-            eprintln!("ofan: type error: {e}");
+    match typechecker::infer(&ast) {
+        Ok(result) => {
+            for w in &result.deferred {
+                eprintln!("ofan: warning: {w}");
+            }
         }
-        std::process::exit(1);
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("ofan: type error: {e}");
+            }
+            std::process::exit(1);
+        }
     }
 
     eprintln!(
