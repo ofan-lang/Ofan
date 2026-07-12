@@ -3,6 +3,67 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-12 — formalize self/Self design in SYNTAX_SPEC.md
+
+**What was done:**
+
+Updated `docs/SYNTAX_SPEC.md` to replace the old three-explicit-form method receiver
+design (`&self`/`&mut self`/`self`) with the inference-based design settled in the
+pillar-alignment session. Docs-only; no parser or typechecker code touched.
+
+**Changes:**
+
+- **§18 retitled** — "Method receiver syntax" → "Method receiver — `self` and `Self`"
+- **§18 status line** — replaced: old decided statement referenced three explicit forms;
+  new statement declares access mode inferred from body, `move self` as consuming override,
+  `Self` as type alias
+- **§18 code example** — replaced: `&self`/`&mut self` forms gone; bare `self` (inferred
+  immutable/mutable) and `move self` (explicit consuming); `fn clone(self) -> Self` shows
+  `Self` in type position
+- **§18 prose** — rewritten around four topics:
+  1. *Receiver access mode inference* — minimal borrow level determined from body usage,
+     same mechanism as §17 Copy/Move; `&`/`&mut` not written in source (pillar 3)
+  2. *`move self`* — explicit consuming override; mirrors `move struct` from §17
+  3. *Ambiguity handling* — hard compile error with conflict-site pointing (pillar 1);
+     error message format documented with example, must name conflicting usage sites (pillar 5)
+  4. *`Self` type* — name-resolution alias for enclosing `impl` type; not a keyword token;
+     unrelated to `self` receiver inference
+- **§18 rationale** — pillars 3, 1, and §17 validation (third `move`/`copy` keyword position)
+- **§17 "See also"** — updated: old reference to `&self`/`&mut self`/`self` three-way split
+  → reference to Copy/Move inference mechanism extending to receiver access mode
+- **§22 decided-syntax table** — `Self` row added (type namespace, not a token variant)
+- **§22 open question** — `Self (capital) is not reserved` paragraph removed (resolved)
+- **Status summary** — one-line note that §18 now also covers `Self`
+- **Contents table** — §18 anchor updated to match new heading slug
+
+**Decisions recorded:**
+
+- `self` receiver annotation (`&self`/`&mut self`) does not exist in Ofan source —
+  removed from spec entirely. Bare `self` is the only receiver form; access level is
+  compiler-inferred.
+- `move self` is the consuming override, completing the three-position validation of §17's
+  `copy`/`move` override pattern.
+- Inference ambiguity (conflicting body requirements) is always a hard compile error;
+  never a silent fallback. Error must cite specific conflict sites, not just `self` param.
+- `Self` resolves through the type namespace (not `Token::SelfKw`); no lexer change needed.
+
+**Commit:** `228233c` (`docs: formalize self receiver inference and Self type alias in §18`,
+direct to main, no PR — docs-only per workflow).
+
+**Test and lint state:** 143 passed, 0 failed (unchanged — docs-only change).
+
+**Pending / next steps:**
+- **`SelfKw` lookahead fix in parser** — `try_parse_region_tag` in `src/parser/types.rs`
+  has a `Token::SelfKw` inconsistency (known open item); now has a spec to implement against.
+- **Typechecker phase 2: method/self resolution** — `impl` block design now spec'd; can
+  begin binding `self` receivers and `Self` type to real types in the typechecker.
+- **Typechecker phase 2: lifetime/region inference + Copy/Move enforcement** — partially
+  blocked until method/self resolution is in place.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-12 — typechecker phase 1 (PR #21)
 
 **What was done:**
