@@ -18,7 +18,7 @@ impl<'src> Parser<'src> {
             let stmt = self.parse_stmt()?;
             match stmt {
                 // Expression immediately before `}` without `;` is the tail value.
-                Stmt::Expr { expr, .. } if matches!(self.peek(), Token::RBrace) => {
+                Stmt::Expr { expr, has_semicolon: false, .. } => {
                     tail = Some(expr);
                     break;
                 }
@@ -126,11 +126,11 @@ impl<'src> Parser<'src> {
         // Tail position: expression immediately before `}` — no `;` needed.
         if matches!(self.peek(), Token::RBrace | Token::Eof) {
             let end = expr.span().end;
-            return Ok(Stmt::Expr { expr: Box::new(expr), span: Span { start, end } });
+            return Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon: false, span: Span { start, end } });
         }
 
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Expr { expr: Box::new(expr), span: Span { start, end } })
+        Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon: true, span: Span { start, end } })
     }
 }
 
@@ -192,7 +192,30 @@ mod tests {
     #[test]
     fn parse_expr_stmt() {
         let stmt = parse_stmt("foo();").unwrap();
-        assert!(matches!(stmt, Stmt::Expr { .. }));
+        assert!(matches!(stmt, Stmt::Expr { has_semicolon: true, .. }));
+    }
+
+    #[test]
+    fn parse_expr_stmt_no_semicolon_at_eof() {
+        // parse_expr_stmt sets has_semicolon: false at Eof (no enclosing block)
+        let stmt = parse_stmt("foo()").unwrap();
+        assert!(matches!(stmt, Stmt::Expr { has_semicolon: false, .. }));
+    }
+
+    #[test]
+    fn block_tail_expr_no_semicolon() {
+        use crate::parser::parse_block;
+        let block = parse_block("{ foo() }").unwrap();
+        assert!(block.tail.is_some());
+        assert!(block.stmts.is_empty());
+    }
+
+    #[test]
+    fn block_expr_stmt_with_semicolon() {
+        use crate::parser::parse_block;
+        let block = parse_block("{ foo(); }").unwrap();
+        assert!(block.tail.is_none());
+        assert!(matches!(block.stmts[0], Stmt::Expr { has_semicolon: true, .. }));
     }
 
     #[test]

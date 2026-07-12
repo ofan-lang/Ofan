@@ -75,8 +75,13 @@ pub enum Stmt<'src> {
         value: Box<Expr<'src>>,
         span: Span,
     },
-    /// Expression statement: `expr;`
-    Expr { expr: Box<Expr<'src>>, span: Span },
+    /// Expression used as a statement.
+    /// `has_semicolon: true`  — expression statement (`expr;`), value discarded.
+    /// `has_semicolon: false` — tail expression (`expr` with no `;`), becomes the
+    ///   block's return value. Invariant: this variant only appears in `Block::stmts`
+    ///   when `has_semicolon` is `true`; a semicolon-less expr is extracted into
+    ///   `Block::tail` by `parse_block` and never left in the `stmts` vec.
+    Expr { expr: Box<Expr<'src>>, has_semicolon: bool, span: Span },
 }
 
 #[derive(Debug, Clone, PartialEq)]
