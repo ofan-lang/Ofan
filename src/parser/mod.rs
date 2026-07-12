@@ -126,6 +126,12 @@ pub fn parse_stmt(src: &str) -> Result<crate::ast::Stmt<'_>, ParseError> {
 }
 
 #[cfg(test)]
+pub fn parse_block(src: &str) -> Result<crate::ast::Block<'_>, ParseError> {
+    let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
+    Parser::new(tokens).parse_block()
+}
+
+#[cfg(test)]
 pub fn parse_fn(src: &str) -> Result<crate::ast::FunctionDef<'_>, ParseError> {
     let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
     Parser::new(tokens).parse_function()
