@@ -1,0 +1,86 @@
+use std::collections::HashMap;
+use crate::lexer::token::Span;
+use crate::typechecker::error::TypeError;
+use crate::typechecker::ty::{FnSig, Ty};
+
+/// Lexical scope stack. Each scope maps a variable name to its inferred type.
+/// `push_scope` / `pop_scope` bracket every block; `lookup` walks inward → outward.
+pub(crate) struct Env {
+    scopes: Vec<HashMap<String, Ty>>,
+}
+
+impl Env {
+    pub(crate) fn new() -> Self {
+        Env { scopes: vec![HashMap::new()] }
+    }
+
+    pub(crate) fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub(crate) fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    pub(crate) fn define(&mut self, name: &str, ty: Ty) {
+        self.scopes.last_mut().expect("scope stack empty").insert(name.to_string(), ty);
+    }
+
+    pub(crate) fn lookup(&self, name: &str) -> Option<&Ty> {
+        self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+}
+
+/// Global inference context threaded through the entire checking pass.
+pub(crate) struct InferCtx {
+    /// Top-level function signatures, populated by the collection pass before
+    /// any body is checked. Enables mutual recursion.
+    pub(crate) fn_sigs: HashMap<String, FnSig>,
+
+    /// Span → inferred type. Codegen queries this to determine LLVM operand types.
+    /// Keyed by the expression span from the AST.
+    pub(crate) type_map: HashMap<Span, Ty>,
+
+    /// Errors accumulated during inference. Non-fatal errors (e.g. `Deferred`)
+    /// are collected here but do not prevent inference from continuing.
+    pub(crate) errors: Vec<TypeError>,
+
+    // ── Phase 2 hooks (not yet implemented) ───────────────────────────────────
+    // Uncomment when Hindley-Milner unification is introduced:
+    // ty_var_count: u32,
+    // ty_var_subst: Vec<Option<Ty>>,
+    //
+    // Uncomment when region/lifetime inference is introduced:
+    // region_var_count: u32,
+    // region_constraints: Vec<RegionConstraint>,
+}
+
+impl InferCtx {
+    pub(crate) fn new() -> Self {
+        InferCtx {
+            fn_sigs: HashMap::new(),
+            type_map: HashMap::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Record the inferred type for a given source span. Called after every
+    /// successful `infer_expr` so codegen can look up types by span.
+    pub(crate) fn record(&mut self, span: Span, ty: Ty) {
+        self.type_map.insert(span, ty);
+    }
+
+    /// Push a non-fatal or fatal type error. Inference continues in both cases;
+    /// the caller checks `InferCtx::has_fatal_errors` at the end.
+    pub(crate) fn error(&mut self, e: TypeError) {
+        self.errors.push(e);
+    }
+
+    pub(crate) fn has_fatal_errors(&self) -> bool {
+        self.errors.iter().any(TypeError::is_fatal)
+    }
+
+    // PHASE2: pub(crate) fn fresh_tyvar(&mut self) -> Ty { ... }
+    // PHASE2: pub(crate) fn fresh_region_var(&mut self) -> Region { ... }
+    // PHASE2: pub(crate) fn unify(&mut self, a: &Ty, b: &Ty, span: Span) { ... }
+}

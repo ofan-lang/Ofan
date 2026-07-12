@@ -43,8 +43,10 @@ fn main() {
         }
     };
 
-    if let Err(e) = typechecker::infer(&ast) {
-        eprintln!("ofan: type error: {e}");
+    if let Err(errors) = typechecker::infer(&ast) {
+        for e in &errors {
+            eprintln!("ofan: type error: {e}");
+        }
         std::process::exit(1);
     }
 
