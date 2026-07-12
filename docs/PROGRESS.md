@@ -3,6 +3,105 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-12 — typechecker phase 1 (PR #21)
+
+**What was done:**
+
+Implemented the phase 1 typechecker: symbol table / scoping, literal typing, expression type
+propagation, and block-tail inference. The pass produces a `HashMap<Span, Ty>` that codegen
+will query. Files under `src/typechecker/`:
+
+- `ty.rs` — `Ty` enum (primitives, `Ref`, `Named`, `Param`, `TyVar`/`Error` sentinels);
+  `Region` (Named, Static); `FnSig`. Phase-2 hooks (`TyVar`, `Region::Var`) present but
+  unreachable — avoids future breaking API change.
+- `error.rs` — `TypeError` via `thiserror`. Phase-2 variants (`LifetimeConflict`,
+  `UseAfterMove`, `BorrowConflict`) present for same reason. All fatal variants carry
+  `suggestion: Option<String>` (pillar 5).
+- `env.rs` — `Env` (scope stack, `push/pop/define/lookup`), `InferCtx` (fn signature
+  table, `type_map: HashMap<Span, Ty>`, error accumulator). Phase-2 hooks for unification
+  variables and region constraints left as commented-out fields.
+- `infer/mod.rs` — two-pass entry: `collect_fn_sig` (pass 1, enables mutual recursion),
+  `infer_fn`, `infer_block`, `defer`, `check_types`, tests.
+- `infer/stmt.rs` — `infer_stmt`: `let`/`const`/`return`/`assign`/expression statements.
+- `infer/expr.rs` — `infer_expr`, `infer_expr_inner`, `infer_literal`, `infer_call`.
+- `infer/ops.rs` — `infer_unary`, `infer_binary` (full operator type tables).
+- `infer/convert.rs` — `ast_ty_to_ty`, `ast_region_to_region`.
+
+**Scope covered (phase 1 — in):**
+- Primitive type resolution: `i32`, `f64`, `bool`, `char`, `str`, `unit`
+- Literal typing; identifier resolution via `Env` scope stack
+- Block-tail inference using `Block::tail` from PR #20 (`has_semicolon: false` → return value)
+- `let`/`const` binding with optional annotation; `return`; simple assignment
+- Unary (`-`, `!`, `~`, `&`, `&mut`) and binary (`+`, `-`, `*`, `/`, `%`, bitwise,
+  comparison, logical) operators
+- `if`/`else` with branch-type checking; `while`; `loop`
+- Free function calls (ident callee, monomorphic): arg count + type checking
+- Two-pass collection for mutual recursion
+
+**Deferred (non-fatal `TypeError::Deferred` + `Ty::Error` sentinel):**
+method calls, field access, cast, `?` operator, `for` loops, `match`, generic call
+instantiation, compound assignments, `Self`/`self` receivers, user-defined types
+
+**Phase-2 stability design:**
+`Ty::Ref.region` is `None` in phase 1; `InferCtx` has commented-out fields for
+`ty_var_count`, `ty_var_subst`, `region_constraints`; `InferResult` is opaque.
+Adding region/unification fields in phase 2 changes only internals, not the public API.
+
+**Method/self contact points — all flagged and deferred:**
+`Expr::MethodCall`, `Expr::Field`, `Type::SelfTy` in `ast_ty_to_ty`, and `self`/`&self`
+params in `bind_param` all emit `Deferred + Ty::Error`. Inference continues past all of
+them without panicking.
+
+**Agent reviews (two rounds each — initial + post-split):**
+
+`pillars-reviewer` — no violations. Two advisories found and fixed before PR merge:
+(1) unknown bare type names silently accepted as `Ty::Named` with no `Deferred` signal
+    → `ast_ty_to_ty` now emits `Deferred + Ty::Error` for unresolvable names;
+(2) generic instantiation arm discarded `defer()`'s return value and returned `Ty::Named`
+    → changed to `return defer(...)`.
+Post-split: confirmed no new pillar issues; no dropped error paths, no visibility leaks.
+
+`rust-idiom-reviewer` — no blocking issues. Four findings addressed across both rounds:
+(1) `InferResult` was dropping `Deferred` diagnostics on success → added `deferred` field;
+(2) `ast_ty_to_ty`: `pub(crate)` → `pub(super)` (only called within `infer` module tree);
+(3) `infer_call`: inline `crate::lexer::token::Span` path → top-level `use` import;
+(4) compound assignments silently accepted → now explicitly deferred.
+Deferred (acceptable for phase 1): `FnSig` clone per call in `infer_call` (borrow-order
+constraint); repeated suggestion-formatting boilerplate in `#[error]` attrs.
+
+**Submodule split (same PR):**
+`infer.rs` (926 lines) split into the five files above, mirroring the parser's layout.
+Pure reorganization — no logic changes, all 143 tests pass unchanged.
+
+**Test and lint state (verified at merge):**
+- `cargo test` — 143 passed, 0 failed.
+- `cargo clippy -- -D warnings` — clean.
+
+PR: **#21** (`feat/typechecker-phase1` → `main`, merged 2026-07-12).
+
+**Phase 2 — deferred, not started:**
+- Lifetime / region inference: `Ty::Ref.region` populated, constraint solving
+- Copy / Move enforcement: move tracking, use-after-move errors
+- Method / self resolution: **blocked on the `self`/`Self` trait-design session** —
+  the impl-block design must be decided before method dispatch tables can be built;
+  `Expr::MethodCall` and `Expr::Field` will remain `Deferred` until that session lands
+
+**Known open items (carried forward):**
+1. `try_parse_region_tag` `Token::SelfKw` lookahead inconsistency — belongs to
+   `self`/`Self` trait-design session (unchanged from 2026-07-07 entry).
+2. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+
+**Pending / next steps:**
+- **`self`/`Self` trait-design session** — unblocks method resolution (phase 2 typechecker)
+  and closes the `SelfKw` lookahead inconsistency in the parser.
+- **Typechecker phase 2** — lifetime/region inference + Copy/Move enforcement; partially
+  blocked until trait-design session resolves method/self.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map; increasingly useful now
+  that three phases (lexer, parser, typechecker) exist.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-11 — `has_semicolon` tail-expression fix (PR #20)
 
 **What was done:**
