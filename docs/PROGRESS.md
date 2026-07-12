@@ -3,6 +3,47 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-11 — `has_semicolon` tail-expression fix (PR #20)
+
+**What was done:**
+
+Added `has_semicolon: bool` to `Stmt::Expr` so `{ foo() }` and `{ foo(); }` produce distinct
+ASTs. Required before typechecker work begins: without it, return-type inference would need
+to re-derive the tail/statement distinction from parser position rather than from the AST.
+
+Changes:
+- `src/ast/mod.rs` — `Stmt::Expr` gains `has_semicolon: bool`; doc comment encodes the
+  invariant (`false` only appears transiently; `parse_block` always extracts it into
+  `Block::tail`, never leaving it in `Block::stmts`).
+- `src/parser/stmt.rs` — 2 construction sites updated; `parse_block` tail guard replaced
+  from `peek() == RBrace` position heuristic to `has_semicolon: false` field match (cleaner:
+  tail detection is now purely semantic, not lookahead-dependent); 4 tests updated/added.
+- `src/parser/mod.rs` — `parse_block` `#[cfg(test)]` helper added.
+
+`pillars-reviewer` — no pillar violations. One clarity note about `has_semicolon: false`
+also firing at EOF (bare `parse_stmt("foo()")`): addressed in doc comment + new test.
+
+`rust-idiom-reviewer` — no blocking issues. Two asks both addressed: (1) document the
+transient-`false` invariant on the variant; (2) add a test for the EOF tail path
+(`parse_expr_stmt_no_semicolon_at_eof`), which is the exact case where old and new
+tail-detection logic diverged.
+
+PR: **#20** (`fix/tail-expr-semicolon-field` → `main`, merged 2026-07-11).
+
+**Test and lint state (verified at merge):**
+- `cargo test` — 118 passed, 0 failed.
+- `cargo clippy -- -D warnings` — clean.
+
+**Resolves:** Known open item #2 from 2026-07-07 session.
+
+**Pending / next steps:**
+- **Typechecker implementation** — plan-mode session required (per CLAUDE.md); next major
+  compiler phase. `has_semicolon` now gives the typechecker the signal it needs for
+  return-type inference from block tail expressions.
+- Remaining open items from 2026-07-07 session — see that entry below.
+
+---
+
 ## Last session: 2026-07-07 — lexer + parser modularization shipped (PR #16, PR #19)
 
 **What was done:**
@@ -52,8 +93,7 @@ Working tree clean. All feature and docs branches deleted (local and remote).
    `is_type_start` lookahead is inconsistent with `parse_type` having no `SelfKw` arm.
    Harmless in practice (still errors), but gives a misleading diagnostic on `&r1 self`.
    Belongs to the `self`/`Self`-in-type-position / trait-design session.
-2. Tail-expression bug: `{ foo(); }` and `{ foo() }` produce identical AST —
-   `Stmt::Expr` needs `has_semicolon: bool`. Needs a separate decision session.
+2. ~~Tail-expression bug: `Stmt::Expr` needs `has_semicolon: bool`.~~ **Resolved — PR #20 (2026-07-11).**
 3. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code:
    `approx_constant` (PI) and `redundant_pattern_matching`. Not in the lint gate.
 
@@ -66,7 +106,7 @@ Working tree clean. All feature and docs branches deleted (local and remote).
   data flow; useful before the typechecker grows large.
 - **Anchor CLI tool** — per PHILOSOPHY.md §5.2; a real program to compile before the
   typechecker is complete, to validate language design against actual usage.
-- **Tail-expression `has_semicolon` fix** — small standalone change, unscheduled.
+- ~~**Tail-expression `has_semicolon` fix**~~ — resolved in PR #20 (2026-07-11).
 
 ---
 
