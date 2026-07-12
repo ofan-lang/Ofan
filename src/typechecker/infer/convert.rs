@@ -6,7 +6,7 @@ use crate::typechecker::ty::{Region, Ty};
 
 // ─── AST type → internal Ty ───────────────────────────────────────────────────
 
-pub(crate) fn ast_ty_to_ty(
+pub(super) fn ast_ty_to_ty(
     ty: &Type<'_>,
     generic_params: &[&str],
     span: Span,

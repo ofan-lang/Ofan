@@ -1,4 +1,5 @@
 use crate::ast::{Expr, Literal};
+use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{Region, Ty};
@@ -147,7 +148,7 @@ fn infer_literal(lit: &Literal<'_>) -> Ty {
 fn infer_call(
     callee: &Expr<'_>,
     args: &[Expr<'_>],
-    span: crate::lexer::token::Span,
+    span: Span,
     ctx: &mut InferCtx,
     env: &mut Env,
 ) -> Ty {
