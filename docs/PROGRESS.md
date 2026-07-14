@@ -3,6 +3,94 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-13 — parser SelfKw fix (PR #22)
+
+**What was done:**
+
+Two tasks this session:
+
+1. Verified §18 of `docs/SYNTAX_SPEC.md` against the settled self/Self design —
+   confirmed it is already complete and accurate (written in the 2026-07-12 session).
+   No spec changes needed.
+
+2. Fixed the `Token::SelfKw` parser bug in `src/parser/types.rs` (open item #1 from
+   2026-07-07, carried through the 2026-07-12 session).
+
+**Investigation findings:**
+
+The bug description was partially stale. Most of the fix was already in place:
+
+- `Type::SelfTy(Span)` already existed in `ast/mod.rs`
+- `parse_type` already handled capital `Self` correctly via the `Token::Ident("Self")`
+  check in the `Ident` arm (line 24–26)
+- `typechecker/infer/convert.rs` already pattern-matched on `Type::SelfTy` (deferred)
+
+The two remaining bugs were:
+1. `is_type_start` in `try_parse_region_tag` still included `Token::SelfKw` (lowercase
+   `self` is never a valid type; capital `Self` lexes as `Token::Ident("Self")` and was
+   already covered by `Token::Ident(_)`)
+2. `parse_type` had no `Token::SelfKw` arm — fell to the generic "expected a type"
+   catch-all with no guidance about `Self` (capital)
+
+**Changes (src/parser/types.rs only):**
+
+- Extracted `is_type_start_token` predicate — single source of truth for "which tokens
+  can start a valid type"; used by `try_parse_region_tag` in place of the inline `matches!`
+  that previously included `Token::SelfKw` (rust-idiom-reviewer suggestion to prevent
+  future drift between the heuristic and `parse_type`'s own dispatch)
+- Removed `Token::SelfKw` from the region-tag heuristic
+- Added `Token::SelfKw` arm in `parse_type` with a pillar-5 error: names the problem,
+  points at the site, suggests `Self` (capital), cites §18
+- Added 4 tests: `parse_type_self_ty`, `parse_type_ref_self_ty`,
+  `parse_type_region_ref_self_ty`, `parse_type_self_kw_in_type_position_is_error`
+  (error-path assertion guards the suggestion text — "Self", "receiver", "§18")
+
+**Agent reviews:**
+
+`pillars-reviewer` — approved; no violations. Fix strengthens pillars 1, 3, 5.
+Confirmed `&self`/`&mut self` in `parse_params` (item.rs) is a real §18 pillar-3
+discrepancy (those forms "do not exist in Ofan source code" per §18) — tracked
+separately (see open items below).
+
+`rust-idiom-reviewer` — approved after one design note acted on:
+extracted `is_type_start_token` to prevent drift between the heuristic and dispatch.
+One future calcification point noted but not acted on: `ParseError`'s suggestion
+field is `String` (stringly-typed content); if machine-readable diagnostics are ever
+needed, `suggestion` should become a structured variant. Not required now.
+
+**PR:** #22 (`fix/parser-selfkw-type-start` → `main`, merged 2026-07-13, fast-forward).
+
+**Test and lint state:** 147 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Resolved open items:**
+
+- ✅ Open item #1 (2026-07-07): `try_parse_region_tag` `Token::SelfKw` lookahead
+  inconsistency — **closed by PR #22**.
+
+**Known open items (carried forward):**
+
+1. **`parse_params` contradicts §18** — `src/parser/item.rs:65-92` currently parses
+   `&self` and `&mut self` as receiver forms; §18 (SYNTAX_SPEC.md:951–954) explicitly
+   states "These forms do not exist in Ofan source code." Additionally, `self` params
+   get `ty: Type::Named { name: "Self" }` rather than proper access-mode inference.
+   This is the `bind_param`/typechecker self-binding work: replacing `Deferred` for
+   `self`/`Self` params in `infer/convert.rs`, and removing the `&self`/`&mut self`
+   forms from `parse_params`.
+2. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+
+**Pending / next steps:**
+
+- **Typechecker phase 2: method/self resolution** — `parse_params` fix (above) is a
+  prerequisite; once `self` binds correctly in the typechecker, `Expr::MethodCall` and
+  `Expr::Field` can be undeferred.
+- **Typechecker phase 2: lifetime/region inference + Copy/Move enforcement** — partially
+  blocked until method/self resolution is in place.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-12 — formalize self/Self design in SYNTAX_SPEC.md
 
 **What was done:**
