@@ -62,40 +62,66 @@ impl<'src> Parser<'src> {
         loop {
             let start = self.peek_span().start;
 
-            // Handle `self`, `&self`, `&mut self` receiver forms (§18)
-            if matches!(self.peek(), Token::SelfKw) {
+            if matches!(self.peek(), Token::Move) {
+                // `move self` — consuming receiver (§18)
+                let move_span = self.advance().1;
+                if !matches!(self.peek(), Token::SelfKw) {
+                    return Err(self.error_expected(
+                        "`self`",
+                        Some("`move` in a parameter list is only valid as `move self` (consuming receiver — §18)"),
+                    ));
+                }
                 let (_, self_span) = self.advance();
                 params.push(Param {
                     name: "self",
                     name_span: self_span,
-                    ty: Type::Named { name: "Self", args: vec![], span: self_span },
+                    ty: Type::SelfTy(self_span),
+                    consuming: true,
+                    span: Span { start: move_span.start, end: self_span.end },
+                });
+            } else if matches!(self.peek(), Token::SelfKw) {
+                // bare `self` — inferred-access receiver (§18)
+                let (_, self_span) = self.advance();
+                params.push(Param {
+                    name: "self",
+                    name_span: self_span,
+                    ty: Type::SelfTy(self_span),
+                    consuming: false,
                     span: self_span,
                 });
             } else if matches!(self.peek(), Token::Amp) {
-                let amp_span = self.advance().1;
-                let mutable = if matches!(self.peek(), Token::Mut) { self.advance(); true } else { false };
-                if !matches!(self.peek(), Token::SelfKw) {
-                    return Err(self.error_expected("`self`", Some("only `self`, `&self`, or `&mut self` are valid receiver forms")));
-                }
-                let (_, self_span) = self.advance();
-                let end = self_span.end;
-                params.push(Param {
-                    name: "self",
-                    name_span: self_span,
-                    ty: Type::Ref {
-                        mutable,
-                        region: None,
-                        inner: Box::new(Type::SelfTy(self_span)),
-                        span: Span { start: amp_span.start, end },
-                    },
-                    span: Span { start: amp_span.start, end },
+                // `&self` / `&mut self` do not exist in Ofan source (§18) — pillar-5 error.
+                // Consume through the form so the error spans from `&`. Hand-rolling
+                // ParseError::UnexpectedToken rather than using error_expected because we
+                // want `found` to describe the consumed multi-token form, not the lookahead
+                // token that the cursor happens to sit on after consuming `&`/`mut`/`self`.
+                let amp_span = self.peek_span();
+                self.advance(); // `&`
+                let has_mut = if matches!(self.peek(), Token::Mut) { self.advance(); true } else { false };
+                let has_self = if matches!(self.peek(), Token::SelfKw) { self.advance(); true } else { false };
+                let form = match (has_mut, has_self) {
+                    (false, true)  => "`&self`",
+                    (true,  true)  => "`&mut self`",
+                    (true,  false) => "`&mut`",
+                    (false, false) => "`&`",
+                };
+                return Err(ParseError::UnexpectedToken {
+                    span: amp_span,
+                    found: form.to_string(),
+                    expected: "`self` or `move self`".to_string(),
+                    suggestion: Some(format!(
+                        "{form} receiver form does not exist in Ofan — write bare `self` and \
+                         let the compiler infer the borrow level from the body; use `move self` \
+                         to force consuming ownership (§18)"
+                    )),
                 });
             } else {
+                // regular named parameter
                 let (name, name_span) = self.eat_ident()?;
                 self.eat(&Token::Colon)?;
                 let ty = self.parse_type()?;
                 let end = ty.span().end;
-                params.push(Param { name, name_span, ty, span: Span { start, end } });
+                params.push(Param { name, name_span, ty, consuming: false, span: Span { start, end } });
             }
 
             match self.peek() {
@@ -177,5 +203,43 @@ mod tests {
         let tokens = Lexer::new(src).lex().unwrap();
         let ast = Parser::new(tokens).parse().unwrap();
         assert_eq!(ast.items.len(), 2);
+    }
+
+    // --- Self receivers ---
+
+    #[test]
+    fn parse_fn_self_receiver() {
+        use crate::ast::Type;
+        let f = parse_fn("fn foo(self) -> i32 { 42 }").unwrap();
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name, "self");
+        assert!(!f.params[0].consuming);
+        assert!(matches!(f.params[0].ty, Type::SelfTy(_)));
+    }
+
+    #[test]
+    fn parse_fn_move_self_receiver() {
+        use crate::ast::Type;
+        let f = parse_fn("fn into_val(move self) -> i32 { 42 }").unwrap();
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name, "self");
+        assert!(f.params[0].consuming);
+        assert!(matches!(f.params[0].ty, Type::SelfTy(_)));
+    }
+
+    #[test]
+    fn parse_fn_ref_self_is_error() {
+        let err = parse_fn("fn foo(&self) { }").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("§18"), "must cite §18: {msg}");
+        assert!(msg.contains("infer"), "must mention inference: {msg}");
+    }
+
+    #[test]
+    fn parse_fn_ref_mut_self_is_error() {
+        let err = parse_fn("fn foo(&mut self) { }").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("§18"), "must cite §18: {msg}");
+        assert!(msg.contains("infer"), "must mention inference: {msg}");
     }
 }
