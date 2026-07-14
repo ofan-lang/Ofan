@@ -19,8 +19,6 @@ impl<'src> Parser<'src> {
             Token::Ident(_) => {
                 let (name, name_span) = self.eat_ident()?;
                 // Capital `Self` spelled as an ident is the canonical type spelling (§18).
-                // Lowercase `self` (Token::SelfKw) in type position is a parse error —
-                // it is valid only as a value/receiver, not a type name.
                 if name == "Self" {
                     return Ok(Type::SelfTy(name_span));
                 }
@@ -30,8 +28,25 @@ impl<'src> Parser<'src> {
                 };
                 Ok(Type::Named { name, args, span: Span { start, end } })
             }
+            // Lowercase `self` (Token::SelfKw) is a receiver value, never a type (§18).
+            // Give a targeted error rather than the generic "expected a type" fallthrough.
+            Token::SelfKw => Err(self.error_expected(
+                "`Self` (capital)",
+                Some("lowercase `self` is a receiver value, not a type — use `Self` to refer to the enclosing impl type (§18)"),
+            )),
             _ => Err(self.error_expected("a type", Some("valid types: `i32`, `str`, `bool`, `&T`, `Option<T>`, `Checked<T, E>`, ..."))),
         }
+    }
+
+    /// Returns true if `tok` can begin a syntactically valid type (§7, §17, §18).
+    /// Used by `try_parse_region_tag` so the "what starts a type" knowledge is not
+    /// duplicated between the heuristic and `parse_type`'s own match.
+    ///
+    /// Note: `Token::SelfKw` (lowercase `self`) is excluded — it is never valid in
+    /// type position (§18). `Self` (capital) lexes as `Token::Ident("Self")` and is
+    /// covered by the `Ident` arm below.
+    fn is_type_start_token(tok: &Token<'_>) -> bool {
+        matches!(tok, Token::Ident(_) | Token::Amp)
     }
 
     /// Try to consume a region tag (`&r1 str`, `&static str`).
@@ -42,11 +57,7 @@ impl<'src> Parser<'src> {
         }
         if matches!(self.peek(), Token::Ident(_)) {
             let next_next = self.tokens.get(self.pos + 1).map(|(t, _)| t);
-            let is_type_start = matches!(
-                next_next,
-                Some(Token::Ident(_) | Token::Amp | Token::SelfKw)
-            );
-            if is_type_start {
+            if next_next.is_some_and(Self::is_type_start_token) {
                 if let Token::Ident(name) = *self.peek() {
                     self.advance();
                     return Some(RefRegion::Named(name));
@@ -130,5 +141,36 @@ mod tests {
         let ty = parse_type("&r1 str").unwrap();
         if let Type::Ref { region: Some(RefRegion::Named("r1")), .. } = ty { }
         else { panic!("expected region tag r1"); }
+    }
+
+    #[test]
+    fn parse_type_self_ty() {
+        let ty = parse_type("Self").unwrap();
+        assert!(matches!(ty, Type::SelfTy(_)));
+    }
+
+    #[test]
+    fn parse_type_ref_self_ty() {
+        let ty = parse_type("&Self").unwrap();
+        if let Type::Ref { mutable: false, region: None, inner, .. } = ty {
+            assert!(matches!(*inner, Type::SelfTy(_)));
+        } else { panic!("expected &Self"); }
+    }
+
+    #[test]
+    fn parse_type_region_ref_self_ty() {
+        let ty = parse_type("&r1 Self").unwrap();
+        if let Type::Ref { region: Some(RefRegion::Named("r1")), inner, .. } = ty {
+            assert!(matches!(*inner, Type::SelfTy(_)));
+        } else { panic!("expected &r1 Self"); }
+    }
+
+    #[test]
+    fn parse_type_self_kw_in_type_position_is_error() {
+        let err = parse_type("self").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Self"), "error must mention `Self` (capital): {msg}");
+        assert!(msg.contains("receiver"), "error must explain `self` is a receiver, not a type: {msg}");
+        assert!(msg.contains("§18"), "error must cite §18: {msg}");
     }
 }
