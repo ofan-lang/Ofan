@@ -93,7 +93,7 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     env.pop_scope();
 }
 
-/// Bind a parameter name to its type. Handles `self`/`&self`/`&mut self` receivers.
+/// Bind a parameter name to its type. Handles `self` and `move self` receivers.
 ///
 /// ⚠ METHOD/SELF CONTACT: `self` params require `impl` context that doesn't exist
 /// in phase 1. We bind them to `Ty::Error` and emit a `Deferred` diagnostic so
@@ -106,11 +106,9 @@ fn bind_param(
     ctx: &mut InferCtx,
     _env: &mut Env,
 ) -> Ty {
-    // ⚠ METHOD/SELF CONTACT: SelfTy and Ref { inner: SelfTy } arise from
-    // `self`, `&self`, `&mut self` parameter syntax (parsed in item.rs).
-    let is_self_receiver = matches!(ty, Type::SelfTy(_))
-        || matches!(ty, Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::SelfTy(_)));
-    if is_self_receiver {
+    // ⚠ METHOD/SELF CONTACT: both `self` and `move self` produce Type::SelfTy.
+    // Defer until impl block design is in place (phase 2).
+    if matches!(ty, Type::SelfTy(_)) {
         ctx.error(TypeError::Deferred {
             feature: "self receiver — requires impl block design",
             span,

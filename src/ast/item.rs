@@ -32,5 +32,6 @@ pub struct Param<'src> {
     pub name: &'src str,
     pub name_span: Span,
     pub ty: Type<'src>,
+    pub consuming: bool,
     pub span: Span,
 }
