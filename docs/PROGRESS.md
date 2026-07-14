@@ -3,6 +3,50 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-13 — AST modularization (PR #23)
+
+**What was done:**
+
+Reviewed entire codebase for modularization opportunities. Lexer, parser, and typechecker
+were already well-modularized (products of PRs #6, #16, #19, #21). One genuine candidate:
+`src/ast/mod.rs` — 283-line monolith with all AST node types in a single file.
+
+Split `src/ast/mod.rs` into five focused submodules mirroring the parser's structure:
+
+| File | Contents |
+|------|----------|
+| `ty.rs` | `Type<'src>`, `Type::span()`, `RefRegion<'src>` |
+| `pattern.rs` | `Pattern<'src>`, `Pattern::span()` |
+| `expr.rs` | `Expr<'src>`, `Expr::span()`, `MatchArm`, `BinOp`, `UnaryOp`, `BorrowKind` |
+| `stmt.rs` | `Stmt<'src>` |
+| `item.rs` | `Ast<'src>`, `Item<'src>`, `FunctionDef<'src>`, `Param<'src>` |
+
+`Block` and `Literal` kept in `mod.rs`: referenced by multiple siblings; a dedicated
+file for two small leaf types would be noise. All types re-exported from `mod.rs` —
+zero call-site import changes in parser, typechecker, or `main.rs`.
+
+Submodules use private `mod` (not `pub mod`), so only the `pub use` re-exports at
+`mod.rs` are externally reachable — one canonical path per type (pillar 3 clean at the
+Rust impl level too).
+
+**Agent reviews:**
+
+`rust-idiom-reviewer` — approved after one fix: merged split `use super::` lines into
+single grouped imports in `expr.rs` and `stmt.rs`.
+
+`pillars-reviewer` — approved; no violations. Note: reviewer flagged that the comment
+about "avoiding cross-sibling imports" was slightly inaccurate (siblings already import
+from parent freely via `use super::X`); the real reason is avoiding a dedicated module
+for two small shared leaf types. Comment tightened before commit.
+
+**PR:** #23 (`refactor/ast-split` → `main`, merged 2026-07-13, fast-forward).
+
+**Test and lint state:** 147 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Known open items (carried forward):** unchanged — see PR #22 session below.
+
+---
+
 ## Last session: 2026-07-13 — parser SelfKw fix (PR #22)
 
 **What was done:**
