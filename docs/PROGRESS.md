@@ -3,6 +3,73 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-14 — §18 self receiver enforcement (PR #24)
+
+**What was done:**
+
+Fixed three related bugs in `src/parser/item.rs:parse_params`:
+
+1. **`&self`/`&mut self` accepted silently** — §18 states these forms "do not exist in
+   Ofan source code" (pillar 3). Both now produce `ParseError::UnexpectedToken` with
+   §18-citing suggestion to use bare `self` or `move self`.
+
+2. **Bare `self` wrong type** — was `Type::Named { name: "Self" }`, so `bind_param`
+   in the typechecker did not recognise it as a self receiver and emitted "user-defined
+   type" in deferred diagnostics. Fixed to `Type::SelfTy(span)`.
+
+3. **`move self` not parsed** — `Token::Move` existed since §17 but `parse_params`
+   had no case for it. Now produces `Param { consuming: true, ty: Type::SelfTy }`.
+
+**AST change:**
+
+`Param` in `src/ast/item.rs` gains `pub consuming: bool`. False for all regular params
+and bare `self`; true only for `move self`. Available for phase 2 method dispatch.
+
+**Typechecker change:**
+
+`bind_param` in `src/typechecker/infer/mod.rs` — `is_self_receiver` simplified from
+two-arm (`Type::SelfTy` OR `Type::Ref { inner: SelfTy }`) to single arm
+(`Type::SelfTy` only). The `Ref { inner: SelfTy }` arm is no longer reachable from
+receiver position. Both `self` and `move self` still defer to `Ty::Error` in phase 1.
+
+**Agent reviews:**
+
+`pillars-reviewer` — approved; fix directly serves pillar 3 (eliminates second valid
+receiver spelling) and pillar 1 (previously silent acceptance now hard error).
+Minor note: `found` label imprecise when `&mut` not followed by `self` (e.g. `fn
+f(&mut)`) — addressed before commit by tracking `has_self` in the consume loop.
+
+`rust-idiom-reviewer` — approved after three fixes:
+- Stale doc comment on `bind_param` ("Handles `&self`/`&mut self`") updated
+- Comment added explaining why `Amp` branch hand-rolls `ParseError` rather than using `error_expected`
+- Test asymmetry fixed: `parse_fn_ref_mut_self_is_error` now also asserts `infer`
+
+**PR:** #24 (`fix/parse-params-self-receiver` → `main`, merged 2026-07-14, fast-forward).
+
+**Test and lint state:** 151 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Resolved open items:**
+
+- ✅ Open item #1 (carried from 2026-07-13): `parse_params` accepts `&self`/`&mut self`
+  contradicting §18 — **closed by PR #24**.
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+
+**Pending / next steps:**
+
+- **Typechecker phase 2: method/self resolution** — `parse_params` fix now complete;
+  next is replacing `Deferred` for `self`/`Self` in `infer/convert.rs` and implementing
+  `Expr::MethodCall` / `Expr::Field` resolution (currently deferred in `infer/expr.rs`).
+- **Impl block syntax** — `Item::Function` is the only variant; `Item::Impl` needs
+  parser + AST support before method resolution can land.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-13 — AST modularization (PR #23)
 
 **What was done:**
