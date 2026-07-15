@@ -9,6 +9,7 @@ use crate::typechecker::ty::{Region, Ty};
 pub(super) fn ast_ty_to_ty(
     ty: &Type<'_>,
     generic_params: &[&str],
+    impl_type_name: Option<&str>,
     span: Span,
     ctx: &mut InferCtx,
 ) -> Ty {
@@ -33,17 +34,21 @@ pub(super) fn ast_ty_to_ty(
             super::defer(ctx, "generic type instantiation", span)
         }
         Type::Ref { mutable, region, inner, .. } => {
-            let inner_ty = ast_ty_to_ty(inner, generic_params, span, ctx);
+            let inner_ty = ast_ty_to_ty(inner, generic_params, impl_type_name, span, ctx);
             let region = region.as_ref().map(ast_region_to_region);
             Ty::Ref { mutable: *mutable, region, inner: Box::new(inner_ty) }
         }
-        // ⚠ METHOD/SELF CONTACT: `Self` type requires `impl` block context.
+        // `Self` resolves to the enclosing impl type when context is available (§18).
         Type::SelfTy(self_span) => {
-            ctx.error(TypeError::Deferred {
-                feature: "Self type — requires impl block design",
-                span: *self_span,
-            });
-            Ty::Error
+            if let Some(type_name) = impl_type_name {
+                Ty::Named(type_name.to_string())
+            } else {
+                ctx.error(TypeError::Deferred {
+                    feature: "Self type — requires impl block design",
+                    span: *self_span,
+                });
+                Ty::Error
+            }
         }
     }
 }

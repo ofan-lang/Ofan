@@ -3,7 +3,8 @@ mod expr;
 mod ops;
 mod convert;
 
-use crate::ast::{Ast, Block, FunctionDef, ImplBlock, Item, Type};
+use crate::ast::{Ast, Block, Expr, FunctionDef, ImplBlock, Item, Stmt, Type};
+use crate::ast::UnaryOp;
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
@@ -29,7 +30,7 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     for item in &ast.items {
         match item {
             Item::Function(f) => infer_fn(f, &mut ctx, &mut env),
-            Item::Impl(_) => {} // method type-checking deferred — future session
+            Item::Impl(block) => infer_impl_methods(block, &mut ctx, &mut env),
         }
     }
 
@@ -50,12 +51,12 @@ fn collect_fn_sig(f: &FunctionDef<'_>, ctx: &mut InferCtx) {
     let params: Vec<Ty> = f
         .params
         .iter()
-        .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, p.span, ctx))
+        .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, None, p.span, ctx))
         .collect();
     let return_ty = f
         .return_ty
         .as_ref()
-        .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, f.span, ctx))
+        .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, None, f.span, ctx))
         .unwrap_or(Ty::Unit);
     let sig = FnSig { params, return_ty, is_generic };
 
@@ -73,15 +74,21 @@ fn collect_fn_sig(f: &FunctionDef<'_>, ctx: &mut InferCtx) {
 fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
     for f in &block.methods {
         let is_generic = !f.generic_params.is_empty();
-        let params: Vec<Ty> = f
-            .params
+
+        // Strip the self receiver — method calls don't pass self as an explicit argument.
+        let param_slice = match f.params.first() {
+            Some(p) if matches!(p.ty, Type::SelfTy(_)) => &f.params[1..],
+            _ => &f.params[..],
+        };
+
+        let params: Vec<Ty> = param_slice
             .iter()
-            .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, p.span, ctx))
+            .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, Some(block.type_name), p.span, ctx))
             .collect();
         let return_ty = f
             .return_ty
             .as_ref()
-            .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, f.span, ctx))
+            .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, Some(block.type_name), f.span, ctx))
             .unwrap_or(Ty::Unit);
         let sig = FnSig { params, return_ty, is_generic };
 
@@ -118,7 +125,7 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     let declared_return = f
         .return_ty
         .as_ref()
-        .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, f.span, ctx))
+        .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, None, f.span, ctx))
         .unwrap_or(Ty::Unit);
 
     let body_ty = infer_block(&f.body, &declared_return, ctx, env);
@@ -142,11 +149,9 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     env.pop_scope();
 }
 
-/// Bind a parameter name to its type. Handles `self` and `move self` receivers.
-///
-/// ⚠ METHOD/SELF CONTACT: `self` params require `impl` context that doesn't exist
-/// in phase 1. We bind them to `Ty::Error` and emit a `Deferred` diagnostic so
-/// inference can continue into the body without panicking.
+/// Bind a non-self parameter to its type (called from `infer_fn` for top-level functions).
+/// `self`/`move self` params in methods are handled by `infer_method` before this is called.
+/// If a top-level `fn` somehow has a `self` param (syntactically odd), defer as before.
 fn bind_param(
     name: &str,
     ty: &Type<'_>,
@@ -155,17 +160,263 @@ fn bind_param(
     ctx: &mut InferCtx,
     _env: &mut Env,
 ) -> Ty {
-    // ⚠ METHOD/SELF CONTACT: both `self` and `move self` produce Type::SelfTy.
-    // Defer until impl block design is in place (phase 2).
     if matches!(ty, Type::SelfTy(_)) {
         ctx.error(TypeError::Deferred {
-            feature: "self receiver — requires impl block design",
+            feature: "self receiver in top-level fn — only valid inside an impl block",
             span,
         });
         return Ty::Error;
     }
     let _ = name;
-    convert::ast_ty_to_ty(ty, generic_params, span, ctx)
+    convert::ast_ty_to_ty(ty, generic_params, None, span, ctx)
+}
+
+// ─── Pass 2: impl block method body checking ─────────────────────────────────
+
+fn infer_impl_methods(block: &ImplBlock<'_>, ctx: &mut InferCtx, env: &mut Env) {
+    for f in &block.methods {
+        infer_method(f, block.type_name, ctx, env);
+    }
+}
+
+fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, env: &mut Env) {
+    env.push_scope();
+
+    for param in &f.params {
+        let ty = if matches!(param.ty, Type::SelfTy(_)) {
+            if param.consuming {
+                Ty::Named(impl_type_name.to_string())
+            } else {
+                infer_self_access_mode(impl_type_name, &f.body, f.name, param.span, ctx)
+            }
+        } else {
+            // Non-self param: Self in type position resolves via impl context.
+            convert::ast_ty_to_ty(&param.ty, &f.generic_params, Some(impl_type_name), param.span, ctx)
+        };
+        env.define(param.name, ty);
+    }
+
+    let declared_return = f
+        .return_ty
+        .as_ref()
+        .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, Some(impl_type_name), f.span, ctx))
+        .unwrap_or(Ty::Unit);
+
+    let body_ty = infer_block(&f.body, &declared_return, ctx, env);
+
+    if !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
+        && body_ty != declared_return
+    {
+        ctx.error(TypeError::ReturnMismatch {
+            expected: declared_return,
+            found: body_ty,
+            span: f.body.span,
+            suggestion: Some(format!(
+                "method `{}` body must evaluate to the declared return type",
+                f.name
+            )),
+        });
+    }
+
+    env.pop_scope();
+}
+
+// ─── §18 self access-mode inference ──────────────────────────────────────────
+
+/// Infer the access mode for a bare `self` receiver by scanning the method body.
+/// Returns `Ty::Named` (consuming), `Ty::Ref { mutable: true }` (mutating),
+/// or `Ty::Ref { mutable: false }` (read-only). Emits `SelfAccessAmbiguity` if
+/// consuming and non-consuming uses coexist in the same body.
+fn infer_self_access_mode(
+    type_name: &str,
+    body: &Block<'_>,
+    fn_name: &str,
+    _self_span: Span,
+    ctx: &mut InferCtx,
+) -> Ty {
+    let scan = scan_self_usage(body);
+
+    // §18: consuming + any borrowing use (method receiver OR field mutation) is ambiguous.
+    // Mutating field access (`self.x = ...`) is a mutable-borrow-level use and conflicts
+    // with a consuming move of self in the same body.
+    let borrowing = scan.non_consuming.or(scan.mutating);
+    if let (Some(c), Some(other)) = (scan.consuming, borrowing) {
+        ctx.error(TypeError::SelfAccessAmbiguity {
+            fn_name: fn_name.to_string(),
+            consuming_span: c,
+            other_span: other,
+        });
+        return Ty::Error;
+    }
+
+    let inner = Ty::Named(type_name.to_string());
+    match (scan.consuming.is_some(), scan.mutating.is_some()) {
+        (true, _) => inner,
+        (false, true) => Ty::Ref { mutable: true, region: None, inner: Box::new(inner) },
+        (false, false) => Ty::Ref { mutable: false, region: None, inner: Box::new(inner) },
+    }
+}
+
+struct SelfUsageScan {
+    consuming: Option<Span>,     // first consuming use (self moved out)
+    mutating: Option<Span>,      // first mutating use (self.field = ..., &mut self)
+    non_consuming: Option<Span>, // first non-consuming use (self as method receiver, read)
+}
+
+/// Pure AST scan — no type information used. Walks the full block recursively,
+/// classifying each occurrence of `self` by its syntactic usage context.
+fn scan_self_usage(block: &Block<'_>) -> SelfUsageScan {
+    let mut scan = SelfUsageScan { consuming: None, mutating: None, non_consuming: None };
+    scan_block(block, &mut scan);
+    scan
+}
+
+fn scan_block(block: &Block<'_>, scan: &mut SelfUsageScan) {
+    for stmt in &block.stmts {
+        scan_stmt(stmt, scan);
+    }
+    if let Some(tail) = &block.tail {
+        // Tail expression: `self` as tail means it is consumed (returned by value).
+        if is_self_ident(tail) {
+            set_consuming(tail.span(), scan);
+        } else {
+            scan_expr(tail, scan);
+        }
+    }
+}
+
+fn scan_stmt(stmt: &Stmt<'_>, scan: &mut SelfUsageScan) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if is_self_ident(init) {
+                set_consuming(init.span(), scan);
+            } else {
+                scan_expr(init, scan);
+            }
+        }
+        Stmt::Const { init, .. } => scan_expr(init, scan),
+        Stmt::Return { value: Some(v), .. } => {
+            if is_self_ident(v) {
+                set_consuming(v.span(), scan);
+            } else {
+                scan_expr(v, scan);
+            }
+        }
+        Stmt::Return { value: None, .. } | Stmt::Continue { .. } | Stmt::Break { value: None, .. } => {}
+        Stmt::Break { value: Some(v), .. } => scan_expr(v, scan),
+        Stmt::Assign { target, value, .. } => {
+            // `self.field = x` → mutating; `self = x` → non-self (lvalue assignment, unusual)
+            if let Expr::Field { object, .. } = target.as_ref() {
+                if is_self_ident(object) {
+                    set_mutating(object.span(), scan);
+                } else {
+                    scan_expr(object, scan);
+                }
+            } else {
+                scan_expr(target, scan);
+            }
+            if is_self_ident(value) {
+                set_consuming(value.span(), scan);
+            } else {
+                scan_expr(value, scan);
+            }
+        }
+        Stmt::Expr { expr, .. } => scan_expr(expr, scan),
+    }
+}
+
+fn scan_expr(expr: &Expr<'_>, scan: &mut SelfUsageScan) {
+    match expr {
+        Expr::Ident("self", span) => set_non_consuming(*span, scan),
+        Expr::Ident(_, _) | Expr::Literal(_, _) => {}
+
+        Expr::Unary { op: UnaryOp::BorrowMut, expr: inner, .. } => {
+            // `&mut self` is a mutating use.
+            if is_self_ident(inner) {
+                set_mutating(inner.span(), scan);
+            } else {
+                scan_expr(inner, scan);
+            }
+        }
+        Expr::Unary { expr: inner, .. } => scan_expr(inner, scan),
+
+        Expr::Binary { left, right, .. } => {
+            scan_expr(left, scan);
+            scan_expr(right, scan);
+        }
+
+        // Free function call: `self` as an argument is consumed (moved into the function).
+        Expr::Call { callee, args, .. } => {
+            scan_expr(callee, scan);
+            for arg in args {
+                if is_self_ident(arg) {
+                    set_consuming(arg.span(), scan);
+                } else {
+                    scan_expr(arg, scan);
+                }
+            }
+        }
+
+        // Method call: `self` as the *object* receiver is non-consuming (consuming methods
+        // require `move self`). `self` appearing in the *argument list* is consuming.
+        Expr::MethodCall { object, args, .. } => {
+            if is_self_ident(object) {
+                set_non_consuming(object.span(), scan);
+            } else {
+                scan_expr(object, scan);
+            }
+            for arg in args {
+                if is_self_ident(arg) {
+                    set_consuming(arg.span(), scan);
+                } else {
+                    scan_expr(arg, scan);
+                }
+            }
+        }
+
+        Expr::Field { object, .. } => scan_expr(object, scan),
+        Expr::Cast { expr: inner, .. } | Expr::Propagate { expr: inner, .. } => {
+            scan_expr(inner, scan);
+        }
+
+        Expr::Block(b) => scan_block(b, scan),
+
+        Expr::If { condition, then_block, else_branch, .. } => {
+            scan_expr(condition, scan);
+            scan_block(then_block, scan);
+            if let Some(e) = else_branch { scan_expr(e, scan); }
+        }
+        Expr::While { condition, body, .. } => {
+            scan_expr(condition, scan);
+            scan_block(body, scan);
+        }
+        Expr::Loop { body, .. } => scan_block(body, scan),
+        Expr::For { iterable, body, .. } => {
+            scan_expr(iterable, scan);
+            scan_block(body, scan);
+        }
+        Expr::Match { subject, arms, .. } => {
+            scan_expr(subject, scan);
+            for arm in arms {
+                scan_expr(&arm.body, scan);
+                if let Some(g) = &arm.guard { scan_expr(g, scan); }
+            }
+        }
+    }
+}
+
+fn is_self_ident(expr: &Expr<'_>) -> bool {
+    matches!(expr, Expr::Ident("self", _))
+}
+
+fn set_consuming(span: Span, scan: &mut SelfUsageScan) {
+    if scan.consuming.is_none() { scan.consuming = Some(span); }
+}
+fn set_mutating(span: Span, scan: &mut SelfUsageScan) {
+    if scan.mutating.is_none() { scan.mutating = Some(span); }
+}
+fn set_non_consuming(span: Span, scan: &mut SelfUsageScan) {
+    if scan.non_consuming.is_none() { scan.non_consuming = Some(span); }
 }
 
 // ─── Block inference ──────────────────────────────────────────────────────────
@@ -427,19 +678,121 @@ mod tests {
     // ── Deferred — non-fatal, inference continues ─────────────────────────────
 
     #[test]
-    fn deferred_method_call_non_fatal() {
-        // Method call is deferred but must not produce a fatal error.
-        let tokens = Lexer::new("fn f(n: i32) { n.abs(); }").lex().expect("lex");
-        let ast = Parser::new(tokens).parse().expect("parse");
-        // Should succeed (Ok) — Deferred is non-fatal.
-        assert!(typechecker::infer(&ast).is_ok());
-    }
-
-    #[test]
     fn deferred_field_access_non_fatal() {
         let tokens = Lexer::new("fn f(n: i32) { let _x = n.foo; }").lex().expect("lex");
         let ast = Parser::new(tokens).parse().expect("parse");
         assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    // ── Method call resolution ────────────────────────────────────────────────
+
+    fn infer_impl(src: &str) -> Result<crate::typechecker::InferResult, Vec<TypeError>> {
+        let tokens = Lexer::new(src).lex().expect("lex failed in test");
+        let ast = Parser::new(tokens).parse().expect("parse failed in test");
+        typechecker::infer(&ast)
+    }
+
+    fn infer_impl_errors(src: &str) -> Vec<TypeError> {
+        match infer_impl(src) {
+            Ok(_) => vec![],
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn error_method_not_found_on_primitive() {
+        // Previously `deferred_method_call_non_fatal`. Now that method calls are
+        // resolved, calling `.abs()` on `i32` (which has no impl block) is a fatal error.
+        let errs = infer_impl_errors("fn f(n: i32) { n.abs(); }");
+        assert!(errs.iter().any(|e| matches!(e, TypeError::MethodNotFound { .. })));
+    }
+
+    #[test]
+    fn ok_method_call_returns_type() {
+        // self.get() inside call_get should resolve to i32; no ReturnMismatch.
+        let src = "impl Foo { \
+            fn get(self) -> i32 { 0 } \
+            fn call_get(self) -> i32 { self.get() } \
+        }";
+        assert!(infer_impl(src).is_ok());
+    }
+
+    #[test]
+    fn error_method_not_found_wrong_name() {
+        // `other` exists but `missing` does not — suggestion should name `other`.
+        let src = "impl Foo { fn other(self) {} fn bad(self) { self.missing(); } }";
+        let errs = infer_impl_errors(src);
+        assert!(errs.iter().any(|e| {
+            if let TypeError::MethodNotFound { method_name, suggestion, .. } = e {
+                method_name == "missing"
+                    && suggestion.as_deref().unwrap_or("").contains("other")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn error_method_arg_count_mismatch() {
+        let src = "impl Foo { \
+            fn add(self, x: i32) -> i32 { x } \
+            fn test(self) { self.add(); } \
+        }";
+        let errs = infer_impl_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::ArgCountMismatch { name, expected: 1, found: 0, .. }
+            if name == "Foo::add"
+        )));
+    }
+
+    #[test]
+    fn ok_move_self_binds_by_value() {
+        // `move self` → Ty::Named("Foo") by value; no fatal errors.
+        assert!(infer_impl("impl Foo { fn consume(move self) {} }").is_ok());
+    }
+
+    #[test]
+    fn error_self_access_ambiguity() {
+        // `take(self)` consumes self; `self.peek()` does not — ambiguity.
+        let src = "\
+            fn take(x: Foo) {} \
+            impl Foo { \
+                fn peek(self) {} \
+                fn bad(self) { take(self); self.peek(); } \
+            }";
+        let errs = infer_impl_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::SelfAccessAmbiguity { fn_name, .. } if fn_name == "bad"
+        )));
+    }
+
+    #[test]
+    fn ok_method_cascade_suppression() {
+        // Receiver type is Ty::Error (undefined var); no second error from method lookup.
+        let src = "fn test() { missing.method(); }";
+        let errs = infer_impl_errors(src);
+        // Exactly one error: UndefinedVariable for `missing`; no MethodNotFound piled on.
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(&errs[0], TypeError::UndefinedVariable { name, .. } if name == "missing"));
+    }
+
+    #[test]
+    fn ok_self_return_type_resolves() {
+        // `Self` in return position resolves to Ty::Named("Foo"); no Deferred for Self.
+        // `self` as tail → consuming → self: Ty::Named("Foo"); return type Ty::Named("Foo") matches.
+        let src = "impl Foo { fn dup(self) -> Self { self } }";
+        assert!(infer_impl(src).is_ok());
+    }
+
+    #[test]
+    fn ok_self_ref_receiver_dispatch() {
+        // Non-consuming self is bound as Ty::Ref { inner: Ty::Named("Foo") }.
+        // Auto-deref in dispatch_type_name strips the Ref to find "Foo" in impl_sigs.
+        let src = "impl Foo { \
+            fn get(self) -> i32 { 0 } \
+            fn call_get(self) -> i32 { self.get() } \
+        }";
+        assert!(infer_impl(src).is_ok());
     }
 
     // ── Duplicate detection ───────────────────────────────────────────────────

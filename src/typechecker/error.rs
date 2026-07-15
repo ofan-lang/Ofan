@@ -66,6 +66,33 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
+    /// Method name not found in the impl block for the receiver's type (§22).
+    /// Emitted for `obj.method()` when `impl_sigs[type]` exists but has no entry for `method`,
+    /// or when the receiver type has no impl block at all.
+    #[error("method `{method_name}` not found on type `{type_name}` at byte {}{}", span.start,
+        suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
+    MethodNotFound {
+        type_name: String,
+        method_name: String,
+        span: Span,
+        suggestion: Option<String>,
+    },
+
+    /// §18 ambiguity: body of a bare-`self` method has both a consuming use of `self` and a
+    /// non-consuming use. The compiler cannot infer a single access mode; `move self` should
+    /// be written explicitly if consuming ownership is intended.
+    #[error("cannot infer access mode for `self` in `{fn_name}` — \
+        consuming use at byte {} conflicts with non-consuming use at byte {}\n\
+        note: these requirements conflict — the method cannot simultaneously borrow and consume\n\
+        suggestion: if consuming ownership is intended, write `move self` and restructure \
+        the body so any borrowing use precedes the move",
+        consuming_span.start, other_span.start)]
+    SelfAccessAmbiguity {
+        fn_name: String,
+        consuming_span: Span,
+        other_span: Span,
+    },
+
     /// Duplicate top-level function name — same name declared twice in program scope.
     /// Both definition sites are cited; the first definition wins for subsequent checking.
     #[error("duplicate function `{name}` — first definition at byte {}, \
