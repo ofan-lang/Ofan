@@ -38,20 +38,21 @@
 | [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
 | [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
 | [21](#21-match--pattern-matching) | Match / pattern matching | Decided |
-| [22](#22-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [22](#22-impl-block-syntax) | `impl` block syntax | Decided |
+| [23](#23-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **21 of 22 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **22 of 23 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
-covered. §18 now also covers `Self` (capital) — the impl-block type alias — resolving
-the open question previously listed in §22. The remaining open ground is §22 — constructs
-that have never been formally designed at all (traits, modules, attributes, array literals,
-generic call syntax, void/unit type) — which were always out of scope for the lexer's
-first pass and do not block it.
+covered. §18 covers `Self` (capital) — the impl-block type alias. §22 now formally
+specifies `impl` block structure, multiplicity, and conflict detection. The remaining
+open ground is §23 — constructs that have never been formally designed at all (traits,
+modules, attributes, array literals, generic call syntax, void/unit type) — which were
+always out of scope for the lexer's first pass and do not block it.
 
 ---
 
@@ -780,7 +781,7 @@ independently.
 > **See also:** [§7](#7-lifetime--region-inference-and-escape-hatch) — borrow rules
 > govern `for item in &items` and `for item in &mut items`. [§17](#17-copymove-semantics)
 > — Copy/Move rule determines element ownership in `for item in items`.
-> [§18](#18-method-receiver-syntax) — the same `&`/`&mut`/bare-value pattern applied at
+> [§18](#18-method-receiver--self-and-self) — the same `&`/`&mut`/bare-value pattern applied at
 > the method-receiver position; §18 is the first prior validation of the model's
 > generalization to a new syntactic position.
 
@@ -1024,8 +1025,9 @@ pattern, three positions validated without special-casing.
 
 > **See also:** [§17](#17-copymove-semantics) — the Copy/Move structural inference
 > mechanism is the same one applied here to receiver access mode; `move self` mirrors
-> `move struct`. [§22](#22-not-yet-decided--deferred) — trait/interface syntax (how `impl`
-> blocks interact with named traits) remains unresolved and does not block this.
+> `move struct`. [§22](#22-impl-block-syntax) — `impl` block structure, multiplicity,
+> and conflict detection. [§23](#23-not-yet-decided--deferred) — trait/interface syntax
+> (how `impl` blocks interact with named traits) remains unresolved and does not block this.
 
 ---
 
@@ -1232,15 +1234,17 @@ receivers, loop iteration — with zero special cases.
 **Methods on enums:**
 
 Enums can have `impl` blocks and methods using exactly the same mechanism decided
-in §18. `&self`, `&mut self`, and `self` receivers work identically for enums and
-structs — no new syntax or special-casing at the enum position.
+in §18 (receiver forms) and §22 (block structure, multiplicity, conflict detection).
+`self` receivers work identically for enums and structs — no new syntax or
+special-casing at the enum position.
 
 > **See also:** [§7](#7-lifetime--region-inference-and-escape-hatch) — compile-time
 > parameters `<T>` for generic enums. [§17](#17-copymove-semantics) — Copy/Move rule
-> extended to enums here. [§18](#18-method-receiver-syntax) — `impl` blocks and method
-> receivers apply to enums unchanged. [§19](#19-option-and-checked-types-and-variant-names)
+> extended to enums here. [§18](#18-method-receiver--self-and-self) — method receiver
+> forms (`self`, `move self`, `Self`) apply to enums unchanged. [§19](#19-option-and-checked-types-and-variant-names)
 > — `Option<T>` and `Checked<T, E>` are the canonical generic enum examples.
 > [§21](#21-match--pattern-matching) — pattern matching on enum variants.
+> [§22](#22-impl-block-syntax) — `impl` block structure and conflict detection.
 
 ---
 
@@ -1470,12 +1474,12 @@ means both `Ok` and `Err` arms must always be present — no silent discard of e
 
 **Deferred:**
 
-- **Range patterns** (`0..10 =>`) — range literal/expression syntax not yet decided (§22).
+- **Range patterns** (`0..10 =>`) — range literal/expression syntax not yet decided (§23).
 - **`@`-binding** (`x @ Some(y) =>`) — binds the whole matched value and destructures;
   useful for logging/re-wrapping but not essential for `Option`/`Checked` use cases.
 - **Struct patterns** (`Rect { width, height } =>`) — struct variants are deferred in
   §20; struct patterns follow when struct variants are decided.
-- **Slice/array patterns** — array/slice literal syntax is §22 deferred.
+- **Slice/array patterns** — array/slice literal syntax is §23 deferred.
 - **Or-pattern exhaustiveness with guards** — the rule for when `A | B` in a guarded
   arm counts toward exhaustiveness is subtle; defer to type-checker design session.
 
@@ -1490,7 +1494,116 @@ means both `Ok` and `Err` arms must always be present — no silent discard of e
 
 ---
 
-## §22 Not yet decided — deferred
+## §22 `impl` block syntax
+
+**Decided: `impl TypeName { ... }` blocks attach methods and associated functions to a named
+type. Multiple `impl` blocks for the same type are permitted anywhere in the program; the
+compiler merges them into one namespace. Duplicate method or associated-function names across
+any blocks are a hard compile error citing all conflict sites.**
+
+```ofn
+impl Entity {
+    fn distance_to(self, other: &Entity) -> f32 { ... }  // method — §18 receiver
+    fn update(self, dt: f32) { ... }                      // mutable borrow inferred
+    fn into_id(move self) -> u32 { ... }                  // consuming method
+    fn default() -> Self { Entity { ... } }               // associated function — no receiver
+}
+```
+
+### Structure
+
+`impl TypeName { items }` — braces mandatory per §4. Items are `fn` declarations (§6). Two
+kinds:
+
+- **Method:** first parameter is a `self` or `move self` receiver per §18. Access mode is
+  inferred from body usage; `move self` is the only explicit override.
+- **Associated function:** no receiver parameter. Called without an instance. `Self` in
+  return type or body resolves to `TypeName`.
+
+An `impl` block is a declaration namespace, not an executable block. No expressions, `let`
+bindings, or free statements are valid at the top level — only `fn` declarations.
+
+### Multiplicity
+
+Any file may contain any number of `impl TypeName` blocks for the same type. The compiler
+merges all of them across the whole program into one method/associated-function namespace.
+This is a **whole-program property**, consistent with the single-binary-install model
+(pillar 4) and the compiler's existing whole-program analysis.
+
+```ofn
+// file: entity_movement.ofn
+impl Entity {
+    fn move_by(self, dx: f32, dy: f32) { ... }
+}
+
+// file: entity_render.ofn
+impl Entity {
+    fn draw(self, canvas: &Canvas) { ... }
+}
+// Both blocks merge: Entity has both move_by and draw.
+```
+
+No declaration is needed to "open" a type for extension. Any `impl TypeName` block is valid
+wherever `TypeName` is in scope.
+
+### Conflict detection
+
+Duplicate method or associated-function names for the same type, across any combination of
+`impl` blocks and files, are a **hard compile error** (pillar 1). The error cites **all**
+conflict sites by file and line (pillar 5) — no silent last-write-wins.
+
+```
+error: duplicate method `draw` on type `Entity`
+  → entity_render.ofn:4:5 — first definition
+  → entity_render_hd.ofn:12:5 — duplicate definition
+note: all `impl Entity` blocks merge into one namespace;
+      each name must be unique across all of them
+suggestion: rename one of the conflicting definitions
+```
+
+### Pillar-alignment rationale
+
+**Pillar 1 (explicit erroneous behavior):** merge makes the namespace global to the type;
+any ambiguity is a compile error, not a resolution tie-break. Citing all conflict sites
+(not just the duplicate) ensures the programmer can locate and resolve the conflict without
+guessing which file "won."
+
+**Pillar 3 (single canonical syntax):** one block syntax, one keyword (`impl`), one item
+kind inside (`fn`). No `extend`, no `open impl`, no type prefix on individual methods. The
+block itself carries the type binding.
+
+**Pillar 4 (single-binary install):** merge-at-compile-time requires no separate linking
+step. The compiler sees all source; the merged namespace assembles once in a single
+whole-program pass — the same analysis model already used for the existing declaration
+collection pass in the type-checker.
+
+**Pillar 5 (context + suggestion in errors):** the duplicate-name error must explain the
+merge rule. "Duplicate definition" without it is pedagogically opaque for a programmer who
+wrote two `impl Entity` blocks in different files without knowing they share a namespace.
+
+### Deferred (§23)
+
+`impl Trait for Type` — trait implementation syntax is not decided here and remains in §23.
+The block-merging mechanism above is designed to generalize: a trait impl is structurally
+"another `impl` block for the same type, scoped to a named trait's method set." No rework
+of the merge or conflict-detection rules is anticipated when trait impls are added. This
+ordering — `impl` block structure settled first, trait impls as an additive extension — is
+a deliberate design choice.
+
+*Pre-existing pillar 1 gap (noted, not fixed here):* the type-checker's current
+`collect_fn_sig` pass (`src/typechecker/infer/mod.rs:56`) uses a bare `HashMap::insert`
+for free-function signatures, which silently overwrites on duplicate names. Two top-level
+`fn foo()` definitions will not produce a compile error today. Fixing this and implementing
+impl-block conflict detection belong in the same future session — they should share one
+declaration-collection pass rather than being patched independently.
+
+> **See also:** [§6](#6-function-declarations) — `fn` syntax used inside `impl` blocks.
+> [§18](#18-method-receiver--self-and-self) — `self`, `move self`, `Self` receiver forms.
+> [§23](#23-not-yet-decided--deferred) — `impl Trait for Type` syntax deferred.
+
+---
+
+## §23 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -1530,15 +1643,15 @@ Words reserved from **decided syntax** (§16, §17, §18, §21) that were not ye
 | `move` | `Token::Move` | §17 Copy/Move modifier |
 | `self` | `Token::SelfKw` | §18 method receiver value |
 | `Self` | (type name, not a token variant) | §18 impl-block type alias; resolves via type namespace |
-| `impl` | `Token::Impl` | §18 impl blocks |
+| `impl` | `Token::Impl` | §22 impl block syntax |
 | `match` | `Token::Match` | §21 match / pattern matching |
 
-Words reserved **ahead of syntax decisions** (constructs in this §22 list):
+Words reserved **ahead of syntax decisions** (constructs in this §23 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `trait` | `Token::Trait` | trait / interface syntax (§22) |
-| `mod` | `Token::Mod` | module / import syntax (§22) |
+| `trait` | `Token::Trait` | trait / interface syntax (§23) |
+| `mod` | `Token::Mod` | module / import syntax (§23) |
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
