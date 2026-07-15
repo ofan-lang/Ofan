@@ -66,6 +66,48 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
+    /// Consuming method called through a reference receiver — cannot move out of a borrow.
+    /// Detected at the type level (no lifetime machinery needed): receiver is `Ty::Ref`
+    /// but the method declares `move self`, requiring ownership.
+    #[error("cannot call consuming method `{type_name}::{method_name}` on a reference receiver at byte {}\n\
+        note: `{method_name}` declares `move self`, which requires ownership of `{type_name}`, \
+        but the receiver is a reference and does not hold ownership\n\
+        suggestion: call this method on an owned `{type_name}` value, \
+        or change `move self` to `self` in the method signature if ownership is not required",
+        span.start)]
+    ConsumeViaRef {
+        type_name: String,
+        method_name: String,
+        span: Span,
+    },
+
+    /// Method name not found in the impl block for the receiver's type (§22).
+    /// Emitted for `obj.method()` when `impl_sigs[type]` exists but has no entry for `method`,
+    /// or when the receiver type has no impl block at all.
+    #[error("method `{method_name}` not found on type `{type_name}` at byte {}{}", span.start,
+        suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
+    MethodNotFound {
+        type_name: String,
+        method_name: String,
+        span: Span,
+        suggestion: Option<String>,
+    },
+
+    /// §18 ambiguity: body of a bare-`self` method has both a consuming use of `self` and a
+    /// non-consuming use. The compiler cannot infer a single access mode; `move self` should
+    /// be written explicitly if consuming ownership is intended.
+    #[error("cannot infer access mode for `self` in `{fn_name}` — \
+        consuming use at byte {} conflicts with non-consuming use at byte {}\n\
+        note: these requirements conflict — the method cannot simultaneously borrow and consume\n\
+        suggestion: if consuming ownership is intended, write `move self` and restructure \
+        the body so any borrowing use precedes the move",
+        consuming_span.start, other_span.start)]
+    SelfAccessAmbiguity {
+        fn_name: String,
+        consuming_span: Span,
+        other_span: Span,
+    },
+
     /// Duplicate top-level function name — same name declared twice in program scope.
     /// Both definition sites are cited; the first definition wins for subsequent checking.
     #[error("duplicate function `{name}` — first definition at byte {}, \

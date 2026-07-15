@@ -10,7 +10,7 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
         Stmt::Let { name, ty, init, span, .. } => {
             let init_ty = super::expr::infer_expr(init, ctx, env);
             let binding_ty = if let Some(ann) = ty {
-                let ann_ty = super::convert::ast_ty_to_ty(ann, &[], *span, ctx);
+                let ann_ty = super::convert::ast_ty_to_ty(ann, &[], None, *span, ctx);
                 super::check_types(&ann_ty, &init_ty, *span, ctx, || {
                     Some(format!(
                         "variable `{name}` is annotated as `{ann_ty:?}` \
@@ -26,7 +26,7 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
         }
 
         Stmt::Const { name, ty, init, span, .. } => {
-            let ann_ty = super::convert::ast_ty_to_ty(ty, &[], *span, ctx);
+            let ann_ty = super::convert::ast_ty_to_ty(ty, &[], None, *span, ctx);
             let init_ty = super::expr::infer_expr(init, ctx, env);
             super::check_types(&ann_ty, &init_ty, *span, ctx, || {
                 Some(format!(

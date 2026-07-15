@@ -63,12 +63,36 @@ pub enum Region {
     // InferCtx::fresh_region_var(). Never constructed in phase 1.
 }
 
-/// Resolved signature of a top-level function, used for call-site checking.
+/// Resolved signature of a function or method, used for call-site checking.
 #[derive(Debug, Clone)]
 pub struct FnSig {
+    /// Parameter types. For methods, the self receiver has already been stripped;
+    /// call sites must NOT pass self as an explicit argument.
     pub params: Vec<Ty>,
     pub return_ty: Ty,
     /// True when the function has generic params (`fn f<T>(...)`).
     /// Phase 1: call-site type checking is deferred for generic functions.
     pub is_generic: bool,
+    /// True when this method's self receiver is `move self` (consumes ownership).
+    /// Always `false` for free functions. Used in `infer_method_call` to reject
+    /// calling a consuming method through a shared/mutable reference.
+    pub self_consuming: bool,
+}
+
+impl std::fmt::Display for Ty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ty::I32 => write!(f, "i32"),
+            Ty::F64 => write!(f, "f64"),
+            Ty::Bool => write!(f, "bool"),
+            Ty::Char => write!(f, "char"),
+            Ty::Str => write!(f, "str"),
+            Ty::Unit => write!(f, "unit"),
+            Ty::Named(n) | Ty::Param(n) => write!(f, "{n}"),
+            Ty::Ref { mutable: true, inner, .. } => write!(f, "&mut {inner}"),
+            Ty::Ref { mutable: false, inner, .. } => write!(f, "&{inner}"),
+            Ty::TyVar(id) => write!(f, "?{id}"),
+            Ty::Error => write!(f, "<error>"),
+        }
+    }
 }
