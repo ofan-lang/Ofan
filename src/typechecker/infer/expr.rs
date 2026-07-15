@@ -203,6 +203,20 @@ fn infer_method_call(
         }
     };
 
+    // Reject calling a move-self method through a reference — this is a type-level
+    // violation (cannot move out of a borrowed value), detectable without lifetime machinery.
+    if sig.self_consuming {
+        if let Ty::Ref { .. } = &recv_ty {
+            infer_all(args, ctx, env);
+            ctx.error(TypeError::ConsumeViaRef {
+                type_name: type_name.clone(),
+                method_name: method.to_string(),
+                span,
+            });
+            return Ty::Error;
+        }
+    }
+
     if sig.is_generic {
         infer_all(args, ctx, env);
         return super::defer(ctx, "generic method call instantiation — unification not yet implemented", span);

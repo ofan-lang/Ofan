@@ -58,7 +58,7 @@ fn collect_fn_sig(f: &FunctionDef<'_>, ctx: &mut InferCtx) {
         .as_ref()
         .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, None, f.span, ctx))
         .unwrap_or(Ty::Unit);
-    let sig = FnSig { params, return_ty, is_generic };
+    let sig = FnSig { params, return_ty, is_generic, self_consuming: false };
 
     if let Some((_, first_span)) = ctx.fn_sigs.get(f.name) {
         ctx.error(TypeError::DuplicateFn {
@@ -76,9 +76,11 @@ fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
         let is_generic = !f.generic_params.is_empty();
 
         // Strip the self receiver — method calls don't pass self as an explicit argument.
-        let param_slice = match f.params.first() {
-            Some(p) if matches!(p.ty, Type::SelfTy(_)) => &f.params[1..],
-            _ => &f.params[..],
+        // Record whether it was `move self` so infer_method_call can reject calling
+        // a consuming method through a reference receiver.
+        let (self_consuming, param_slice) = match f.params.first() {
+            Some(p) if matches!(p.ty, Type::SelfTy(_)) => (p.consuming, &f.params[1..]),
+            _ => (false, &f.params[..]),
         };
 
         let params: Vec<Ty> = param_slice
@@ -90,7 +92,7 @@ fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
             .as_ref()
             .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, Some(block.type_name), f.span, ctx))
             .unwrap_or(Ty::Unit);
-        let sig = FnSig { params, return_ty, is_generic };
+        let sig = FnSig { params, return_ty, is_generic, self_consuming };
 
         // Re-borrow each iteration to avoid holding &mut across ctx.error().
         if let Some((_, first_span)) = ctx.impl_sigs
@@ -793,6 +795,53 @@ mod tests {
             fn call_get(self) -> i32 { self.get() } \
         }";
         assert!(infer_impl(src).is_ok());
+    }
+
+    #[test]
+    fn error_method_arg_type_mismatch() {
+        // Right arg count, wrong type: `add` expects i32, caller passes bool.
+        let src = "impl Foo { \
+            fn add(self, x: i32) -> i32 { x } \
+            fn test(self) { self.add(true); } \
+        }";
+        let errs = infer_impl_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::Mismatch { expected: Ty::I32, found: Ty::Bool, .. }
+        )));
+    }
+
+    #[test]
+    fn error_self_mutating_and_consuming_ambiguity() {
+        // `&mut self` in the body is a mutating (borrowing) use.
+        // `take(self)` is a consuming use in the same body.
+        // §18 widened predicate: mutating+consuming → SelfAccessAmbiguity, not silent by-value.
+        let src = "\
+            fn take(x: Foo) {} \
+            impl Foo { \
+                fn bad(self) { let _b = &mut self; take(self); } \
+            }";
+        let errs = infer_impl_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::SelfAccessAmbiguity { fn_name, .. } if fn_name == "bad"
+        )));
+    }
+
+    #[test]
+    fn error_consume_via_ref() {
+        // `consume` declares `move self` (requires ownership).
+        // `caller` has bare `self` → scanned as non-consuming → self bound as &Foo.
+        // Calling `self.consume()` through &Foo must be a hard ConsumeViaRef error.
+        let src = "impl Foo { \
+            fn consume(move self) {} \
+            fn caller(self) { self.consume(); } \
+        }";
+        let errs = infer_impl_errors(src);
+        // Exactly one error — ConsumeViaRef does not cascade further.
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(&errs[0],
+            TypeError::ConsumeViaRef { type_name, method_name, .. }
+            if type_name == "Foo" && method_name == "consume"
+        ));
     }
 
     // ── Duplicate detection ───────────────────────────────────────────────────

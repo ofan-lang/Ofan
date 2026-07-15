@@ -73,6 +73,10 @@ pub struct FnSig {
     /// True when the function has generic params (`fn f<T>(...)`).
     /// Phase 1: call-site type checking is deferred for generic functions.
     pub is_generic: bool,
+    /// True when this method's self receiver is `move self` (consumes ownership).
+    /// Always `false` for free functions. Used in `infer_method_call` to reject
+    /// calling a consuming method through a shared/mutable reference.
+    pub self_consuming: bool,
 }
 
 impl std::fmt::Display for Ty {

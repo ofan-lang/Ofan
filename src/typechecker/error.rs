@@ -66,6 +66,21 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
+    /// Consuming method called through a reference receiver — cannot move out of a borrow.
+    /// Detected at the type level (no lifetime machinery needed): receiver is `Ty::Ref`
+    /// but the method declares `move self`, requiring ownership.
+    #[error("cannot call consuming method `{type_name}::{method_name}` on a reference receiver at byte {}\n\
+        note: `{method_name}` declares `move self`, which requires ownership of `{type_name}`, \
+        but the receiver is a reference and does not hold ownership\n\
+        suggestion: call this method on an owned `{type_name}` value, \
+        or change `move self` to `self` in the method signature if ownership is not required",
+        span.start)]
+    ConsumeViaRef {
+        type_name: String,
+        method_name: String,
+        span: Span,
+    },
+
     /// Method name not found in the impl block for the receiver's type (§22).
     /// Emitted for `obj.method()` when `impl_sigs[type]` exists but has no entry for `method`,
     /// or when the receiver type has no impl block at all.
