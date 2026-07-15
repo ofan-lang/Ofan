@@ -3,6 +3,106 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-15 — §22 impl-block merge + conflict detection (PR #26)
+
+**What was done:**
+
+Closed two pillar-1 gaps in one declaration-collection pass in the typechecker.
+
+**`collect_fn_sig` fix (`src/typechecker/infer/mod.rs`):**
+
+Pre-existing gap: bare `HashMap::insert` silently overwrote on duplicate top-level
+function names (documented in §22 rationale as a known issue). Fixed: check
+`ctx.fn_sigs.get(f.name)` before inserting; on collision emit `TypeError::DuplicateFn`
+citing both definition spans and return early (keep first definition).
+
+**Impl-block merge + duplicate detection (`src/typechecker/infer/mod.rs`):**
+
+New `collect_impl_sigs` function populates `ctx.impl_sigs: HashMap<String,
+HashMap<String, (FnSig, Span)>>` (outer = type name, inner = method/assoc-fn name).
+Per §22's merge rule — all `impl TypeName` blocks in the program form one namespace —
+any duplicate method name across blocks emits `TypeError::DuplicateMethod` citing both
+definition spans, naming the type, and explaining the merge rule. Pass 1 loop updated
+to dispatch `Item::Impl(block) => collect_impl_sigs(block, &mut ctx)`. Pass 2 still
+defers method body checking (`Item::Impl(_) => {}`).
+
+**Borrow pattern in `collect_impl_sigs`:** Re-borrows `ctx.impl_sigs` each iteration
+(via `.get().and_then()` for the check, `.entry().or_default().insert()` for the
+insert) to avoid holding `&mut` across the `ctx.error()` call — avoids a two-mutable-
+borrow compile error without a local error buffer.
+
+**`InferCtx` changes (`src/typechecker/env.rs`):**
+
+`fn_sigs` widened from `HashMap<String, FnSig>` to `HashMap<String, (FnSig, Span)>`
+to carry the first-definition span. `impl_sigs: HashMap<String, HashMap<String,
+(FnSig, Span)>>` added. Both fields initialized in `InferCtx::new()`.
+
+**New `TypeError` variants (`src/typechecker/error.rs`):**
+
+- `DuplicateFn { name, first_span, duplicate_span }` — cites both sites; suggests rename
+- `DuplicateMethod { type_name, method_name, first_span, duplicate_span }` — cites both
+  sites, explains §22 merge rule ("all `impl {type_name}` blocks merge into one namespace"),
+  suggests rename. Two distinct variants rather than one shared variant because the method
+  error requires naming the type and explaining the merge rule — a `context: String` field
+  would provide no actual simplification.
+
+**`expr.rs` updates (`src/typechecker/infer/expr.rs`):**
+
+Two `fn_sigs` access sites updated to destructure `(FnSig, Span)`:
+- Line 29: `ctx.fn_sigs.get(*name)` → `if let Some((sig, _)) = ctx.fn_sigs.get(*name)`
+- Line 177: `ctx.fn_sigs.get(name).cloned()` → `match ctx.fn_sigs.get(name) { Some((s, _)) => s.clone() }`
+
+**Tests added (`src/typechecker/infer/mod.rs`):**
+
+6 new tests: `error_duplicate_free_fn`, `error_duplicate_method_same_type`,
+`ok_two_impl_blocks_non_overlapping`, `ok_duplicate_method_name_different_types`,
+`ok_free_fn_and_method_same_name`, `error_duplicate_fn_and_method_coexist`.
+
+**Agent reviews:**
+
+`pillars-reviewer` — approved, no violations. Net pillar-1 improvement (closes
+documented silent-overwrite gap). Pillar-5 satisfied: both new variants cite multiple
+spans. One cosmetic note: `DuplicateFn` message shape (single em-dash line) differs
+from `DuplicateMethod` (separate `note:`/`suggestion:` labels) — not a violation.
+Pre-existing byte-offset rendering (`at byte {}`) is codebase-wide; not this PR's fix.
+
+`rust-idiom-reviewer` — clean. No unsafe, no swallowed errors, no avoidable clones,
+no unnecessary `Arc`/`Rc`. Re-borrow-per-iteration pattern confirmed sound. One finding
+rejected: reviewer suggested `type_name_span` (impl block header) over `f.name_span`
+(method name) in `DuplicateMethod`. Disagreement: for "duplicate method `bar`",
+pointing at the conflicting method names is more actionable than pointing at the
+enclosing `impl` header; the error already names the type.
+
+**PR:** #26 (`feat/impl-merge-conflict-detection` → `main`, merged 2026-07-15, fast-forward).
+
+**Test and lint state:** 164 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Resolved open items:**
+
+- ✅ Pre-existing pillar-1 gap: `collect_fn_sig` silent overwrite on duplicate free-fn names — **closed by PR #26**.
+- ✅ §22 whole-program impl-block merge + conflict detection — **closed by PR #26**.
+
+**Multi-file note (documented, not a gap now):**
+
+`main.rs` reads one `.ofn` file; "whole program" = one `Ast`. Cross-file duplicate
+detection works when both `impl` blocks are in the same source file — the only case
+that currently exists. Fix when multi-file pipeline lands.
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+
+**Pending / next steps:**
+
+- **Typechecker method/self resolution** — `bind_param` still defers `Type::SelfTy`;
+  `Expr::MethodCall` / `Expr::Field` still deferred. Now unblocked (impl-block
+  namespace exists). Next natural step.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-15 — §22 impl block parser + AST (PR #25)
 
 **What was done:**
