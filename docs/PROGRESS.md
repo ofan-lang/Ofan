@@ -3,6 +3,160 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-15 — method/self resolution (PR #27)
+
+**What was done:**
+
+Implemented method/self resolution in the typechecker, completing the impl-sigs pipeline
+started in PR #26. Two commits on the branch — both reviewed and merged together.
+
+**Self receiver binding (`src/typechecker/infer/mod.rs`):**
+
+`move self` → `Ty::Named(type_name)` by value; no scan.
+
+Bare `self` → body scan (`scan_self_usage`, `scan_block`, `scan_stmt`, `scan_expr`) before
+type-checking classifies each `self` occurrence by syntactic position:
+- `self` in free-function args, `let`/`return`/tail → CONSUMING
+- `&mut self`, `self.field = ...` → MUTATING
+- `self.method()` (object position) → NON-CONSUMING
+
+Access mode resolved: CONSUMING → `Ty::Named`; MUTATING → `Ty::Ref { mutable: true }`;
+else → `Ty::Ref { mutable: false }`.
+
+`SelfAccessAmbiguity` hard error when the same body contains a consuming use AND any
+borrowing use (non-consuming OR mutating). Predicate: `consuming.is_some() &&
+(non_consuming.or(mutating)).is_some()`. Cites both conflict sites; never silently
+falls through. Fixes two cases: (a) consuming+non-consuming (original spec), (b)
+consuming+mutating (field assignment + move in same body — found by pillars-reviewer
+and fixed in the same PR).
+
+**`Self` in type position (`src/typechecker/infer/convert.rs`):**
+
+`ast_ty_to_ty` gained `impl_type_name: Option<&str>` parameter. `Type::SelfTy` arm:
+if `Some(name)` → `Ty::Named(name.to_string())` (no Deferred); if `None` → Deferred
+error (top-level context, Self has no meaning). All non-impl call sites pass `None`.
+
+**Method call dispatch (`src/typechecker/infer/expr.rs`):**
+
+`Expr::MethodCall` stub replaced with `infer_method_call`:
+1. Type receiver via `infer_expr`
+2. `Ty::Error` receiver → cascade-suppress (infer all args, return `Ty::Error`, no
+   second error)
+3. `dispatch_type_name` — strips one `Ty::Ref` layer to find `Ty::Named` for dispatch
+   (handles bare-self methods where `self: &Foo`)
+4. `impl_sigs[type_name][method]` lookup
+5. `sig.self_consuming && recv_ty is Ty::Ref` → `TypeError::ConsumeViaRef` (see Gap A)
+6. Generic method → defer
+7. Arg count check → `ArgCountMismatch`
+8. Per-arg type check → `Mismatch`
+9. Return `sig.return_ty`
+
+`MethodNotFound` lists available methods sorted when the type has an impl block, uses
+`Display` (not `{:?}`) for receiver type in messages. `Display` impl added to `Ty`.
+
+`infer_all(args, ctx, env)` helper extracted to replace fivefold duplicated arg-drain
+pattern.
+
+**Gap A — consuming method called through reference (`src/typechecker/error.rs`):**
+
+Found in pre-merge clarification pass. `move self` method callable through `&Entity`
+with no error — type-level violation (cannot move out of a borrow), detectable without
+lifetime machinery. Fix:
+
+- `FnSig.self_consuming: bool` restored (had been dropped post-review as "dead" — but
+  the use case was identified; the choice to drop rather than wire was premature)
+- `collect_impl_sigs`: extracts `self_consuming = p.consuming` from the self param
+- `infer_method_call`: after sig lookup, before arg checks — if `sig.self_consuming &&
+  Ty::Ref { .. } = recv_ty` → `TypeError::ConsumeViaRef { type_name, method_name, span }`
+- `ConsumeViaRef` message: names the method, states receiver is a reference, offers
+  two suggestions (call on owned value, or remove `move self`)
+- Covers both `&T` and `&mut T` (both are `Ty::Ref`)
+
+**New `TypeError` variants (`src/typechecker/error.rs`):**
+
+- `MethodNotFound { type_name, method_name, span, suggestion }` — method not in impl
+  namespace or type has no impl block; suggestion lists available methods
+- `SelfAccessAmbiguity { fn_name, consuming_span, other_span }` — §18 hard error;
+  cites both sites; never silently resolves
+- `ConsumeViaRef { type_name, method_name, span }` — move-self method called through
+  a reference receiver
+
+**`FnSig` changes (`src/typechecker/ty.rs`):**
+
+- `self_consuming: bool` — true when `move self`; false for free functions and bare-self methods
+- `Display` impl added to `Ty` for user-readable type names in error messages
+
+**Tests (12 new, `src/typechecker/infer/mod.rs`):**
+
+`error_method_not_found_on_primitive`, `ok_method_call_returns_type`,
+`error_method_not_found_wrong_name`, `error_method_arg_count_mismatch`,
+`ok_move_self_binds_by_value`, `error_self_access_ambiguity`, `ok_method_cascade_suppression`,
+`ok_self_return_type_resolves`, `ok_self_ref_receiver_dispatch`,
+`error_method_arg_type_mismatch`, `error_self_mutating_and_consuming_ambiguity`,
+`error_consume_via_ref` (asserts `errs.len() == 1` — ConsumeViaRef does not cascade).
+
+**Pre-merge clarification pass (two rounds of reviews, two commits):**
+
+Commit 1 (`a6518d3`): original implementation. Pillars-reviewer found the §18
+consuming+mutating ambiguity gap (predicate widened) and noted dead `has_self_receiver`/
+`self_consuming` fields. Rust-idiom-reviewer found the `{:?}` Debug blob in MethodNotFound
+and the fivefold arg-drain duplication. Both fixed before committing.
+
+A post-commit clarification Q&A against §18/§22 surfaced Gap A (consuming-through-reference
+silently allowed — `self_consuming` was dropped in the clean-up but its only real use case
+was exactly the ConsumeViaRef check).
+
+Commit 2 (`b58bebc`): Gap A fix + 3 new tests. Both reviewers re-ran on the delta and
+approved. Pillars-reviewer confirmed both `&T` and `&mut T` covered, `self_consuming`
+cannot be spuriously true (parser guarantees `consuming` only for `move self`), Pillar 5
+satisfied. Rust-idiom-reviewer found no blockers; suggested tightening the ConsumeViaRef
+test to also assert `errs.len() == 1` (done before push).
+
+**`bind_param` note (not a gap, documented):**
+
+`bind_param` still contains a `Type::SelfTy` arm that emits Deferred — this fires only
+for a `self` param on a top-level `fn` (syntactically odd but syntactically legal). Methods
+route through `infer_method` before `bind_param` is reached. Self-parameter logic now
+lives in two places with different behavior; future sessions should not assume `bind_param`
+is the single source of truth.
+
+**Phase 2 scope (not addressed, not a gap):**
+
+Double-consume and consume-while-simultaneously-borrowed require move tracking and borrow
+checking. `UseAfterMove` and `BorrowConflict` placeholder variants already in `error.rs`;
+this is explicitly Phase 2 scope.
+
+**PR:** #27 (`feat/method-self-resolution` → `main`, merged 2026-07-15).
+
+**Test and lint state:** 175 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Resolved open items:**
+
+- ✅ `Expr::MethodCall` deferred stub — **closed by PR #27**.
+- ✅ `Type::SelfTy` always Deferred in `ast_ty_to_ty` — **closed by PR #27** (`Self` in
+  impl context now resolves to `Ty::Named`).
+- ✅ `bind_param` defers `self`/`move self` to `Ty::Error` — **closed by PR #27**
+  (methods route through `infer_method` instead).
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+
+**Pending / next steps:**
+
+- **`Expr::Field` resolution** — field access still deferred; requires struct field table
+  (struct definitions not yet parsed/stored). Natural follow-on once struct declaration
+  lands.
+- **Struct declaration syntax + typechecker** — `Type::Named` for user types currently
+  defers to `Ty::Error`; struct definitions needed to populate a type table and unblock
+  field access, method arg types involving user-defined types, and proper `Ty::Named`
+  resolution.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-15 — §22 impl-block merge + conflict detection (PR #26)
 
 **What was done:**
