@@ -142,3 +142,9 @@ pub fn parse_type_str(src: &str) -> Result<crate::ast::Type<'_>, ParseError> {
     let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
     Parser::new(tokens).parse_type()
 }
+
+#[cfg(test)]
+pub fn parse_impl(src: &str) -> Result<crate::ast::ImplBlock<'_>, ParseError> {
+    let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
+    Parser::new(tokens).parse_impl_block()
+}

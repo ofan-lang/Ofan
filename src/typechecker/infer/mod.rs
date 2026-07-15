@@ -18,15 +18,19 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     // Pass 1: collect all function signatures before checking any body.
     // This allows mutual recursion and forward references.
     for item in &ast.items {
-        let Item::Function(f) = item;
-        collect_fn_sig(f, &mut ctx);
+        match item {
+            Item::Function(f) => collect_fn_sig(f, &mut ctx),
+            Item::Impl(_) => {} // method type-checking deferred — future session
+        }
     }
 
     // Pass 2: check each function body.
     let mut env = Env::new();
     for item in &ast.items {
-        let Item::Function(f) = item;
-        infer_fn(f, &mut ctx, &mut env);
+        match item {
+            Item::Function(f) => infer_fn(f, &mut ctx, &mut env),
+            Item::Impl(_) => {} // method type-checking deferred — future session
+        }
     }
 
     if ctx.has_fatal_errors() {
@@ -191,7 +195,7 @@ mod tests {
         let result = typechecker::infer(&ast)?;
         // Return the type of the tail expression of the first function's body.
         // Fall back to Unit if no tail (void function).
-        let Item::Function(f) = &ast.items[0];
+        let Item::Function(f) = &ast.items[0] else { panic!("first item must be a function") };
         let tail_span = f
             .body
             .tail

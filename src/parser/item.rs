@@ -1,13 +1,48 @@
-use crate::ast::{FunctionDef, Item, Param, Type};
+use crate::ast::{FunctionDef, ImplBlock, Item, Param, Type};
 use crate::lexer::token::{Span, Token};
 use crate::parser::{ParseError, Parser};
 
 impl<'src> Parser<'src> {
     pub(super) fn parse_item(&mut self) -> Result<Item<'src>, ParseError> {
         match self.peek() {
-            Token::Fn => Ok(Item::Function(self.parse_function()?)),
-            _ => Err(self.error_expected("`fn`", Some("only `fn` declarations are allowed at the top level"))),
+            Token::Fn   => Ok(Item::Function(self.parse_function()?)),
+            Token::Impl => Ok(Item::Impl(self.parse_impl_block()?)),
+            _ => Err(self.error_expected(
+                "`fn` or `impl`",
+                Some("only `fn` declarations and `impl` blocks are allowed at the top level"),
+            )),
         }
+    }
+
+    /// `impl TypeName { [fn ...] }`
+    pub(super) fn parse_impl_block(&mut self) -> Result<ImplBlock<'src>, ParseError> {
+        let start = self.peek_span().start;
+        self.eat(&Token::Impl)?;
+        let (type_name, type_name_span) = self.eat_ident()?;
+        self.eat(&Token::LBrace)?;
+
+        let mut methods = Vec::new();
+        loop {
+            match self.peek() {
+                Token::RBrace => break,
+                Token::Fn => methods.push(self.parse_function()?),
+                Token::Eof => return Err(self.error_expected(
+                    "`}` or `fn`",
+                    Some("add `}` to close the impl block"),
+                )),
+                _ => return Err(self.error_expected(
+                    "`fn`",
+                    Some(
+                        "impl blocks are declaration namespaces — only `fn` declarations \
+                         are valid inside; variables, expressions, and statements are not \
+                         permitted here (§22)",
+                    ),
+                )),
+            }
+        }
+
+        let end = self.eat(&Token::RBrace)?.end;
+        Ok(ImplBlock { type_name, type_name_span, methods, span: Span { start, end } })
     }
 
     /// `fn name[<T, r1, ...>](params) [-> RetType] { body }`
@@ -241,5 +276,85 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("§18"), "must cite §18: {msg}");
         assert!(msg.contains("infer"), "must mention inference: {msg}");
+    }
+
+    // --- impl blocks ---
+
+    #[test]
+    fn parse_impl_empty() {
+        use crate::parser::parse_impl;
+        let b = parse_impl("impl Foo { }").unwrap();
+        assert_eq!(b.type_name, "Foo");
+        assert!(b.methods.is_empty());
+    }
+
+    #[test]
+    fn parse_impl_single_method() {
+        use crate::ast::Type;
+        use crate::parser::parse_impl;
+        let b = parse_impl("impl Foo { fn bar(self) -> i32 { 42 } }").unwrap();
+        assert_eq!(b.methods.len(), 1);
+        let m = &b.methods[0];
+        assert_eq!(m.name, "bar");
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "self");
+        assert!(!m.params[0].consuming);
+        assert!(matches!(m.params[0].ty, Type::SelfTy(_)));
+    }
+
+    #[test]
+    fn parse_impl_move_self_method() {
+        use crate::ast::Type;
+        use crate::parser::parse_impl;
+        let b = parse_impl("impl Foo { fn consume(move self) { } }").unwrap();
+        assert_eq!(b.methods.len(), 1);
+        assert!(b.methods[0].params[0].consuming);
+        assert!(matches!(b.methods[0].params[0].ty, Type::SelfTy(_)));
+    }
+
+    #[test]
+    fn parse_impl_associated_fn_self_return() {
+        use crate::ast::Type;
+        use crate::parser::parse_impl;
+        // associated fn: no receiver; Self in return position
+        let b = parse_impl("impl Foo { fn default() -> Self { 0 } }").unwrap();
+        assert_eq!(b.methods.len(), 1);
+        let m = &b.methods[0];
+        assert_eq!(m.name, "default");
+        assert!(m.params.is_empty());
+        assert!(matches!(m.return_ty, Some(Type::SelfTy(_))));
+    }
+
+    #[test]
+    fn parse_impl_mixed_method_and_assoc_fn() {
+        use crate::ast::Type;
+        use crate::parser::parse_impl;
+        let src = "impl Entity { fn update(self) { } fn default() -> Self { 0 } }";
+        let b = parse_impl(src).unwrap();
+        assert_eq!(b.methods.len(), 2);
+        // first: method with self receiver
+        assert_eq!(b.methods[0].params.len(), 1);
+        assert!(matches!(b.methods[0].params[0].ty, Type::SelfTy(_)));
+        // second: associated fn, no receiver
+        assert!(b.methods[1].params.is_empty());
+    }
+
+    #[test]
+    fn parse_impl_non_fn_rejected() {
+        use crate::parser::parse_impl;
+        let err = parse_impl("impl Foo { let x = 5; }").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("§22"), "must cite §22: {msg}");
+    }
+
+    #[test]
+    fn parse_impl_integrated_with_top_level_fn() {
+        use crate::ast::Item;
+        let src = "fn free() -> i32 { 1 } impl Foo { fn bar(self) { } }";
+        let tokens = Lexer::new(src).lex().unwrap();
+        let ast = Parser::new(tokens).parse().unwrap();
+        assert_eq!(ast.items.len(), 2);
+        assert!(matches!(ast.items[0], Item::Function(_)));
+        assert!(matches!(ast.items[1], Item::Impl(_)));
     }
 }

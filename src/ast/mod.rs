@@ -10,7 +10,7 @@ pub use ty::{Type, RefRegion};
 pub use pattern::Pattern;
 pub use expr::{Expr, MatchArm, BinOp, UnaryOp, BorrowKind};
 pub use stmt::Stmt;
-pub use item::{Ast, Item, FunctionDef, Param};
+pub use item::{Ast, Item, FunctionDef, ImplBlock, Param};
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 // Block and Literal live here, not in a submodule, because each is needed by
