@@ -26,7 +26,7 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
             // (Rare, but syntactically possible: `let f = my_fn;`)
             // For phase 1 treat function idents as their return type only when the
             // name is unambiguously a function and not a local.
-            if let Some(sig) = ctx.fn_sigs.get(*name) {
+            if let Some((sig, _)) = ctx.fn_sigs.get(*name) {
                 return sig.return_ty.clone();
             }
             ctx.error(TypeError::UndefinedVariable {
@@ -174,8 +174,8 @@ fn infer_call(
         return super::defer(ctx, "calling local variables as functions (closures/fn pointers)", span);
     }
 
-    let sig = match ctx.fn_sigs.get(name).cloned() {
-        Some(s) => s,
+    let sig = match ctx.fn_sigs.get(name) {
+        Some((s, _)) => s.clone(),
         None => {
             for arg in args {
                 infer_expr(arg, ctx, env);

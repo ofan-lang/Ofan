@@ -66,6 +66,33 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
+    /// Duplicate top-level function name — same name declared twice in program scope.
+    /// Both definition sites are cited; the first definition wins for subsequent checking.
+    #[error("duplicate function `{name}` — first definition at byte {}, \
+        duplicate at byte {} \
+        — rename one of the conflicting definitions",
+        first_span.start, duplicate_span.start)]
+    DuplicateFn {
+        name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
+    /// Duplicate method or associated-function name within the merged impl namespace
+    /// for a given type (§22 — all impl blocks for the same type form one namespace).
+    #[error("duplicate method `{method_name}` on type `{type_name}` — \
+        first definition at byte {}, duplicate at byte {}\n\
+        note: all `impl {type_name}` blocks merge into one namespace; \
+        each name must be unique across all of them\n\
+        suggestion: rename one of the conflicting definitions",
+        first_span.start, duplicate_span.start)]
+    DuplicateMethod {
+        type_name: String,
+        method_name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
     /// Non-fatal: a syntactically valid construct that phase 1 does not yet
     /// type-check. Inference continues with `Ty::Error` for the node.
     /// Does not count as a hard failure in `Result::Err`.
