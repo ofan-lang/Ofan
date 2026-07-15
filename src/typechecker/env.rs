@@ -33,9 +33,15 @@ impl Env {
 
 /// Global inference context threaded through the entire checking pass.
 pub(crate) struct InferCtx {
-    /// Top-level function signatures, populated by the collection pass before
-    /// any body is checked. Enables mutual recursion.
-    pub(crate) fn_sigs: HashMap<String, FnSig>,
+    /// Top-level function signatures + definition span, populated by the collection
+    /// pass before any body is checked. Enables mutual recursion. Span is used to
+    /// cite both sites when a duplicate name is detected (pillar 1 + pillar 5).
+    pub(crate) fn_sigs: HashMap<String, (FnSig, Span)>,
+
+    /// Per-type method namespaces, keyed by type name then method/associated-fn name.
+    /// Populated during the collection pass alongside fn_sigs. Used now for
+    /// whole-program duplicate detection (§22); method dispatch in a future session.
+    pub(crate) impl_sigs: HashMap<String, HashMap<String, (FnSig, Span)>>,
 
     /// Span → inferred type. Codegen queries this to determine LLVM operand types.
     /// Keyed by the expression span from the AST.
@@ -59,6 +65,7 @@ impl InferCtx {
     pub(crate) fn new() -> Self {
         InferCtx {
             fn_sigs: HashMap::new(),
+            impl_sigs: HashMap::new(),
             type_map: HashMap::new(),
             errors: Vec::new(),
         }

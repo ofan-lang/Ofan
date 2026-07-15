@@ -3,7 +3,7 @@ mod expr;
 mod ops;
 mod convert;
 
-use crate::ast::{Ast, Block, FunctionDef, Item, Type};
+use crate::ast::{Ast, Block, FunctionDef, ImplBlock, Item, Type};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
@@ -20,7 +20,7 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     for item in &ast.items {
         match item {
             Item::Function(f) => collect_fn_sig(f, &mut ctx),
-            Item::Impl(_) => {} // method type-checking deferred — future session
+            Item::Impl(block) => collect_impl_sigs(block, &mut ctx),
         }
     }
 
@@ -57,7 +57,52 @@ fn collect_fn_sig(f: &FunctionDef<'_>, ctx: &mut InferCtx) {
         .as_ref()
         .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, f.span, ctx))
         .unwrap_or(Ty::Unit);
-    ctx.fn_sigs.insert(f.name.to_string(), FnSig { params, return_ty, is_generic });
+    let sig = FnSig { params, return_ty, is_generic };
+
+    if let Some((_, first_span)) = ctx.fn_sigs.get(f.name) {
+        ctx.error(TypeError::DuplicateFn {
+            name: f.name.to_string(),
+            first_span: *first_span,
+            duplicate_span: f.name_span,
+        });
+        return; // keep first definition; don't overwrite
+    }
+    ctx.fn_sigs.insert(f.name.to_string(), (sig, f.name_span));
+}
+
+fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
+    for f in &block.methods {
+        let is_generic = !f.generic_params.is_empty();
+        let params: Vec<Ty> = f
+            .params
+            .iter()
+            .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, p.span, ctx))
+            .collect();
+        let return_ty = f
+            .return_ty
+            .as_ref()
+            .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, f.span, ctx))
+            .unwrap_or(Ty::Unit);
+        let sig = FnSig { params, return_ty, is_generic };
+
+        // Re-borrow each iteration to avoid holding &mut across ctx.error().
+        if let Some((_, first_span)) = ctx.impl_sigs
+            .get(block.type_name)
+            .and_then(|ns| ns.get(f.name))
+        {
+            ctx.error(TypeError::DuplicateMethod {
+                type_name: block.type_name.to_string(),
+                method_name: f.name.to_string(),
+                first_span: *first_span,
+                duplicate_span: f.name_span,
+            });
+        } else {
+            ctx.impl_sigs
+                .entry(block.type_name.to_string())
+                .or_default()
+                .insert(f.name.to_string(), (sig, f.name_span));
+        }
+    }
 }
 
 // ─── Pass 2: function body checking ──────────────────────────────────────────
@@ -395,5 +440,65 @@ mod tests {
         let tokens = Lexer::new("fn f(n: i32) { let _x = n.foo; }").lex().expect("lex");
         let ast = Parser::new(tokens).parse().expect("parse");
         assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    // ── Duplicate detection ───────────────────────────────────────────────────
+
+    #[test]
+    fn error_duplicate_free_fn() {
+        let errs = check_fn_errors("fn foo() {} fn foo() {}");
+        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateFn { name, .. } if name == "foo")));
+    }
+
+    #[test]
+    fn error_duplicate_method_same_type() {
+        let src = "impl Foo { fn bar(self) {} } impl Foo { fn bar(self) {} }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        let errs = match typechecker::infer(&ast) {
+            Ok(_) => vec![],
+            Err(e) => e,
+        };
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::DuplicateMethod { type_name, method_name, .. }
+            if type_name == "Foo" && method_name == "bar"
+        )));
+    }
+
+    #[test]
+    fn ok_two_impl_blocks_non_overlapping() {
+        let src = "impl Foo { fn a(self) {} } impl Foo { fn b(self) {} }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    #[test]
+    fn ok_duplicate_method_name_different_types() {
+        let src = "impl Foo { fn draw(self) {} } impl Bar { fn draw(self) {} }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    #[test]
+    fn ok_free_fn_and_method_same_name() {
+        let src = "fn draw() {} impl Foo { fn draw(self) {} }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    #[test]
+    fn error_duplicate_fn_and_method_coexist() {
+        let src = "fn foo() {} fn foo() {} impl Foo { fn bar() {} } impl Foo { fn bar() {} }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        let errs = match typechecker::infer(&ast) {
+            Ok(_) => vec![],
+            Err(e) => e,
+        };
+        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateFn { .. })));
+        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateMethod { .. })));
     }
 }
