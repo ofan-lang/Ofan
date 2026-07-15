@@ -3,6 +3,96 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-15 — §22 impl block parser + AST (PR #25)
+
+**What was done:**
+
+Added `Item::Impl` AST variant and parser support for `impl TypeName { ... }` blocks,
+formalizing the block structure decided in §22 of `SYNTAX_SPEC.md`.
+
+**AST changes (`src/ast/item.rs`, `src/ast/mod.rs`):**
+
+- Added `ImplBlock<'src>` struct: `type_name: &'src str`, `type_name_span: Span`,
+  `methods: Vec<FunctionDef<'src>>`, `span: Span`
+- Added `Item::Impl(ImplBlock<'src>)` variant — old `// Struct, Enum, TypeAlias,
+  ImplBlock — next PR` comment updated to reflect ImplBlock is now done
+- `ImplBlock` exported from `ast::mod`
+
+**Parser changes (`src/parser/item.rs`, `src/parser/mod.rs`):**
+
+- `parse_impl_block`: eats `impl TypeName { fn* }`; reuses `parse_function` for each
+  item inside; `Token::Eof` → "add `}` to close the impl block"; non-`fn` → hard parse
+  error citing §22 via `error_expected`
+- `parse_item` updated: `Token::Impl` arm added; top-level error now mentions both
+  `fn` and `impl`
+- `parse_impl` test helper added to `parser::mod`
+
+**Typechecker changes (`src/typechecker/infer/mod.rs`):**
+
+Both passes converted from `let Item::Function(f) = item else { continue }` to
+exhaustive `match`:
+```rust
+match item {
+    Item::Function(f) => collect_fn_sig(f, &mut ctx),
+    Item::Impl(_) => {} // method type-checking deferred — future session
+}
+```
+Exhaustive match ensures future `Item::Struct` / `Item::Enum` variants produce a
+compile-time tripwire rather than silently being skipped. Test helper at line 196
+updated to `let...else { panic!(...) }`.
+
+**Agent reviews:**
+
+`pillars-reviewer` — approved; no violations. Confirmed non-fn error cites §22 in
+message and that `error_expected` routes the string through `Display` correctly.
+Noted that the pre-existing `collect_fn_sig` `HashMap::insert` silent-overwrite gap
+becomes a real pillar 1 issue once methods are collected — correctly deferred.
+
+`rust-idiom-reviewer` — two findings acted on before commit:
+- Finding A: `let...else { continue }` → exhaustive `match` in both typechecker
+  passes (compile-time tripwire for future variants)
+- Finding C: `_ =>` arm in `parse_impl_block` changed from hand-rolled
+  `ParseError::UnexpectedToken` to `error_expected` helper (consistency)
+
+Findings B (dead error path on final `eat` — by design) and D (tighter error-type
+assertion in one test — minor) noted, not acted on.
+
+**PR:** #25 (`feat/parse-impl-block` → `main`, merged 2026-07-15, fast-forward).
+
+**Test and lint state:** 158 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Spec changes this session (`docs/SYNTAX_SPEC.md`):**
+
+- Added §22 `impl` block syntax (Decided) — structure, multiplicity, conflict
+  detection, pillar rationale, deferred note on `impl Trait for Type`
+- Old §22 (deferred) renumbered to §23; all cross-references updated
+- Pre-existing pillar 1 gap noted in §22 rationale: `collect_fn_sig` at
+  `src/typechecker/infer/mod.rs:56` uses bare `HashMap::insert` → silently
+  overwrites duplicate free-function names
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+2. **Pre-existing pillar 1 gap:** `collect_fn_sig` (`src/typechecker/infer/mod.rs:56`)
+   silently overwrites duplicate free-function names via `HashMap::insert`. Fix in the
+   same session that builds impl-block conflict detection — they share a
+   declaration-collection pass.
+
+**Pending / next steps:**
+
+- **Whole-program impl merge + conflict detection** — next natural step after this PR.
+  Build a declaration-collection pass that merges all `Item::Impl` blocks for the same
+  type and hard-errors on duplicate method names (citing file+line). Fix the
+  `collect_fn_sig` overwrite gap in the same pass.
+- **Typechecker method/self resolution** — `bind_param` still defers `Type::SelfTy` to
+  `Ty::Error`; `Expr::MethodCall` / `Expr::Field` still deferred in `infer/expr.rs`.
+  Unblocked once conflict detection is in place.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-14 — §18 self receiver enforcement (PR #24)
 
 **What was done:**
