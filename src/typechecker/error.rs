@@ -135,6 +135,60 @@ pub enum TypeError {
         duplicate_span: Span,
     },
 
+    /// Duplicate struct name — two `struct Foo { ... }` blocks with the same name.
+    /// Both definition sites are cited; the first definition wins for subsequent checking.
+    #[error("duplicate struct `{name}` — first definition at byte {}, \
+        duplicate at byte {} \
+        — rename one of the conflicting definitions",
+        first_span.start, duplicate_span.start)]
+    DuplicateStruct {
+        name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
+    /// Field name not found in the struct's field table (§23).
+    /// Emitted for `obj.field` when the struct has no field named `field`.
+    #[error("field `{field_name}` not found on type `{type_name}` at byte {}{}\n\
+        suggestion: check the field name against the definition of `{type_name}`",
+        span.start,
+        if available.is_empty() { " — type has no fields".to_string() }
+        else { format!(" — available fields: {}", available.join(", ")) })]
+    FieldNotFound {
+        type_name: String,
+        field_name: String,
+        span: Span,
+        available: Vec<String>,
+    },
+
+    /// Writing to a field through a shared (`&T`) reference — requires ownership or `&mut T`.
+    /// Detected at the type level without borrow-checker machinery (§23).
+    #[error("cannot assign to `{type_name}::{field_name}` through a shared reference at byte {}\n\
+        note: the receiver is a shared borrow (`&{type_name}`) — field mutation requires \
+        either a mutable borrow (`&mut {type_name}`) or an owned value\n\
+        suggestion: use a `&mut {type_name}` receiver, or restructure so the owning \
+        binding is used directly",
+        span.start)]
+    FieldWriteViaSharedRef {
+        type_name: String,
+        field_name: String,
+        span: Span,
+    },
+
+    /// Moving a non-Copy field out of a struct — partial moves not yet supported (§23).
+    /// Detected in let bindings, return statements, and function-call arguments where
+    /// consuming intent is unambiguous from call-site context.
+    #[error("cannot move `{type_name}::{field_name}` out of a field access at byte {}\n\
+        note: moving a single field out of a struct requires tracking that the struct \
+        is partially moved, which is not implemented in this compiler phase\n\
+        suggestion: either move the whole struct, or access `{field_name}` only by borrow",
+        span.start)]
+    FieldOwnNonCopy {
+        type_name: String,
+        field_name: String,
+        span: Span,
+    },
+
     /// Non-fatal: a syntactically valid construct that phase 1 does not yet
     /// type-check. Inference continues with `Ty::Error` for the node.
     /// Does not count as a hard failure in `Result::Err`.

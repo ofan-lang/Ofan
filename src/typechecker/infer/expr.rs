@@ -105,9 +105,8 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
             infer_method_call(object, method, *method_span, args, *span, ctx, env)
         }
 
-        // ⚠ METHOD/SELF CONTACT: Field access requires struct field table.
-        Expr::Field { span, .. } => {
-            super::defer(ctx, "field access — requires struct design", *span)
+        Expr::Field { object, field, field_span, span } => {
+            infer_field_access(object, field, *field_span, *span, ctx, env)
         }
 
         // PHASE2: cast rules not yet spec'd
@@ -241,6 +240,16 @@ fn infer_method_call(
     let mut any_error = false;
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
+        if let Expr::Field { object, field, field_span, .. } = arg {
+            // Skip FieldOwnNonCopy when expected type is a ref — caller will pass
+            // by borrow, and a type-mismatch error fires anyway.
+            if !matches!(expected_ty, Ty::Ref { .. })
+                && super::check_field_own_non_copy(object, field, *field_span, &arg_ty, ctx)
+            {
+                any_error = true;
+                continue;
+            }
+        }
         if !matches!(arg_ty, Ty::Error) && &arg_ty != expected_ty {
             ctx.error(TypeError::Mismatch {
                 expected: expected_ty.clone(),
@@ -260,6 +269,51 @@ fn infer_method_call(
 
 fn infer_all(args: &[Expr<'_>], ctx: &mut InferCtx, env: &mut Env) {
     for arg in args { infer_expr(arg, ctx, env); }
+}
+
+// ─── Field access typing ──────────────────────────────────────────────────────
+
+fn infer_field_access(
+    object: &Expr<'_>,
+    field: &str,
+    field_span: Span,
+    span: Span,
+    ctx: &mut InferCtx,
+    env: &mut Env,
+) -> Ty {
+    let obj_ty = infer_expr(object, ctx, env);
+    if matches!(obj_ty, Ty::Error) { return Ty::Error; }
+
+    // Auto-deref one Ref layer to find the underlying struct type.
+    let effective_ty = match &obj_ty {
+        Ty::Ref { inner, .. } => inner.as_ref().clone(),
+        t => t.clone(),
+    };
+
+    let type_name = match &effective_ty {
+        Ty::Named(n) => n.clone(),
+        _ => return super::defer(ctx, "field access on non-struct type", span),
+    };
+
+    let info = match ctx.struct_defs.get(&type_name) {
+        Some(i) => i,
+        None => return super::defer(ctx, "field access — struct type not in table", span),
+    };
+
+    if info.is_generic {
+        return super::defer(ctx, "field access on generic struct — requires type instantiation", span);
+    }
+
+    match info.fields.get(field) {
+        Some(ty) => ty.clone(),
+        None => {
+            let available = info.field_order.clone();
+            ctx.error(TypeError::FieldNotFound {
+                type_name, field_name: field.to_string(), span: field_span, available,
+            });
+            Ty::Error
+        }
+    }
 }
 
 /// Extract the type name to use for method dispatch.
@@ -354,6 +408,14 @@ fn infer_call(
     let mut any_error = false;
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
+        if let Expr::Field { object, field, field_span, .. } = arg {
+            if !matches!(expected_ty, Ty::Ref { .. })
+                && super::check_field_own_non_copy(object, field, *field_span, &arg_ty, ctx)
+            {
+                any_error = true;
+                continue;
+            }
+        }
         if !matches!(arg_ty, Ty::Error) && &arg_ty != expected_ty {
             ctx.error(TypeError::Mismatch {
                 expected: expected_ty.clone(),

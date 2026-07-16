@@ -11,7 +11,36 @@ pub struct Ast<'src> {
 pub enum Item<'src> {
     Function(FunctionDef<'src>),
     Impl(ImplBlock<'src>),
-    // Struct, Enum, TypeAlias — future PRs
+    Struct(StructDef<'src>),
+    // Enum, TypeAlias — future PRs
+}
+
+/// Explicit Copy/Move override on a struct definition (§23).
+/// `None` means the compiler infers Copy-ness from the fields.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CopyMove {
+    Copy,
+    Move,
+}
+
+/// `[copy|move] struct Name[<T, ...>] { field: Type, ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructDef<'src> {
+    pub name: &'src str,
+    pub name_span: Span,
+    pub copy_move: Option<CopyMove>,
+    pub generic_params: Vec<&'src str>,
+    pub fields: Vec<StructField<'src>>,
+    pub span: Span,
+}
+
+/// A single field declaration inside a struct body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField<'src> {
+    pub name: &'src str,
+    pub name_span: Span,
+    pub ty: Type<'src>,
+    pub span: Span,
 }
 
 /// `impl TypeName { fn ... }` — declaration namespace for methods and associated functions.

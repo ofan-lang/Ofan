@@ -3,10 +3,10 @@ mod expr;
 mod ops;
 mod convert;
 
-use crate::ast::{Ast, Block, Expr, FunctionDef, ImplBlock, Item, Stmt, Type};
+use crate::ast::{Ast, Block, CopyMove, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type};
 use crate::ast::UnaryOp;
 use crate::lexer::token::Span;
-use crate::typechecker::env::{Env, InferCtx};
+use crate::typechecker::env::{Env, InferCtx, StructInfo};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Ty};
 use crate::typechecker::InferResult;
@@ -16,21 +16,36 @@ use crate::typechecker::InferResult;
 pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
 
-    // Pass 1: collect all function signatures before checking any body.
-    // This allows mutual recursion and forward references.
+    // Sub-pass 1a: register struct names so 1b can resolve forward references.
+    for item in &ast.items {
+        if let Item::Struct(def) = item {
+            collect_struct_name(def, &mut ctx);
+        }
+    }
+
+    // Sub-pass 1b: populate struct field types (all names now known from 1a).
+    for item in &ast.items {
+        if let Item::Struct(def) = item {
+            collect_struct_fields(def, &mut ctx);
+        }
+    }
+
+    // Sub-pass 1c: collect fn/impl signatures.
     for item in &ast.items {
         match item {
             Item::Function(f) => collect_fn_sig(f, &mut ctx),
             Item::Impl(block) => collect_impl_sigs(block, &mut ctx),
+            Item::Struct(_) => {}
         }
     }
 
-    // Pass 2: check each function body.
+    // Pass 2: check each function/method body.
     let mut env = Env::new();
     for item in &ast.items {
         match item {
             Item::Function(f) => infer_fn(f, &mut ctx, &mut env),
             Item::Impl(block) => infer_impl_methods(block, &mut ctx, &mut env),
+            Item::Struct(_) => {}
         }
     }
 
@@ -111,6 +126,45 @@ fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
                 .or_default()
                 .insert(f.name.to_string(), (sig, f.name_span));
         }
+    }
+}
+
+// ─── Pass 1: struct collection ───────────────────────────────────────────────
+
+fn collect_struct_name(def: &StructDef<'_>, ctx: &mut InferCtx) {
+    if let Some(existing) = ctx.struct_defs.get(def.name) {
+        ctx.error(TypeError::DuplicateStruct {
+            name: def.name.to_string(),
+            first_span: existing.name_span,
+            duplicate_span: def.name_span,
+        });
+        return;
+    }
+    ctx.struct_defs.insert(def.name.to_string(), StructInfo {
+        name_span: def.name_span,
+        fields: std::collections::HashMap::new(),
+        field_order: Vec::new(),
+        copy_override: None,
+        is_generic: !def.generic_params.is_empty(),
+    });
+}
+
+fn collect_struct_fields(def: &StructDef<'_>, ctx: &mut InferCtx) {
+    if !ctx.struct_defs.contains_key(def.name) {
+        return; // duplicate struct — skip field population
+    }
+    let gp: Vec<&str> = def.generic_params.to_vec();
+    let mut fields = std::collections::HashMap::new();
+    let mut field_order = Vec::new();
+    for f in &def.fields {
+        let ty = convert::ast_ty_to_ty(&f.ty, &gp, None, f.span, ctx);
+        fields.insert(f.name.to_string(), ty);
+        field_order.push(f.name.to_string());
+    }
+    if let Some(info) = ctx.struct_defs.get_mut(def.name) {
+        info.fields = fields;
+        info.field_order = field_order;
+        info.copy_override = def.copy_move;
     }
 }
 
@@ -476,6 +530,68 @@ pub(super) fn check_types<F>(
     }
 }
 
+/// Emit `FieldOwnNonCopy` if the struct type that owns `object` is non-Copy.
+/// Returns true when an error was emitted so callers can short-circuit.
+/// The `expected_ref` guard (call args that expect `&T`) must be checked before
+/// calling this — the helper only looks at struct Copy-ness, not parameter shape.
+pub(super) fn check_field_own_non_copy(
+    object: &Expr<'_>,
+    field: &str,
+    field_span: Span,
+    field_ty: &Ty,
+    ctx: &mut InferCtx,
+) -> bool {
+    if matches!(field_ty, Ty::Error) {
+        return false;
+    }
+    let obj_ty = ctx.type_map.get(&object.span()).cloned().unwrap_or(Ty::Error);
+    let struct_ty = match &obj_ty {
+        Ty::Ref { inner, .. } => inner.as_ref().clone(),
+        t => t.clone(),
+    };
+    if is_copy(&struct_ty, ctx) {
+        return false;
+    }
+    ctx.error(TypeError::FieldOwnNonCopy {
+        type_name: named_base_deref(&obj_ty),
+        field_name: field.to_string(),
+        span: field_span,
+    });
+    true
+}
+
+/// Returns true if `ty` is Copy-eligible (§17 + §23).
+/// Primitives and shared refs are always Copy. `&mut T` and non-Copy structs are not.
+pub(super) fn is_copy(ty: &Ty, ctx: &InferCtx) -> bool {
+    match ty {
+        Ty::I32 | Ty::F64 | Ty::Bool | Ty::Char | Ty::Unit => true,
+        Ty::Ref { mutable: false, .. } => true,
+        Ty::Ref { mutable: true, .. } => false,
+        Ty::Named(name) => match ctx.struct_defs.get(name.as_str()) {
+            Some(info) => match info.copy_override {
+                Some(CopyMove::Copy) => true,
+                Some(CopyMove::Move) => false,
+                None => info.fields.values().all(|fty| is_copy(fty, ctx)),
+            },
+            None => false,
+        },
+        Ty::Str | Ty::Param(_) | Ty::TyVar(_) | Ty::Error => false,
+    }
+}
+
+/// Extract the struct name from a type, auto-derefing one level of `Ty::Ref`.
+/// Returns `"<unknown>"` when the type is not a named struct.
+pub(super) fn named_base_deref(ty: &Ty) -> String {
+    match ty {
+        Ty::Named(n) => n.clone(),
+        Ty::Ref { inner, .. } => match inner.as_ref() {
+            Ty::Named(n) => n.clone(),
+            _ => "<unknown>".to_string(),
+        },
+        _ => "<unknown>".to_string(),
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -680,7 +796,8 @@ mod tests {
     // ── Deferred — non-fatal, inference continues ─────────────────────────────
 
     #[test]
-    fn deferred_field_access_non_fatal() {
+    fn deferred_field_access_on_primitive_non_fatal() {
+        // i32 is not a struct — deferred with "field access on non-struct type", still non-fatal.
         let tokens = Lexer::new("fn f(n: i32) { let _x = n.foo; }").lex().expect("lex");
         let ast = Parser::new(tokens).parse().expect("parse");
         assert!(typechecker::infer(&ast).is_ok());
@@ -902,5 +1019,130 @@ mod tests {
         };
         assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateFn { .. })));
         assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateMethod { .. })));
+    }
+
+    // ── Struct field access (§23) ─────────────────────────────────────────────
+
+    fn infer_program(src: &str) -> Result<crate::typechecker::InferResult, Vec<TypeError>> {
+        let tokens = Lexer::new(src).lex().expect("lex failed");
+        let ast = Parser::new(tokens).parse().expect("parse failed");
+        typechecker::infer(&ast)
+    }
+
+    fn infer_program_errors(src: &str) -> Vec<TypeError> {
+        match infer_program(src) {
+            Ok(_) => vec![],
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn ok_copy_field_read() {
+        // f64 is Copy — reading p.x in let is fine.
+        let src = "struct Point { x: f64, y: f64 } fn f(p: Point) -> f64 { let v = p.x; v }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn ok_borrow_of_non_copy_field() {
+        // &entity.sprite is a borrow (Unary), not a direct Let/Return/call-arg move.
+        // FieldOwnNonCopy only fires at those positions; borrowing a field is always fine.
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn f(e: Entity) -> &Sprite { &e.sprite }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn error_field_own_non_copy_let() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn f(e: Entity) { let _s = e.sprite; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_return() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn f(e: Entity) -> Sprite { return e.sprite; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_call_arg() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn consume(s: Sprite) {} \
+                   fn f(e: Entity) { consume(e.sprite); }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+    }
+
+    #[test]
+    fn error_field_write_via_shared_ref() {
+        // Writing through &Point is forbidden.
+        let src = "struct Point { x: f64 } fn f(r: &Point) { r.x = 1.0; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldWriteViaSharedRef { type_name, field_name, .. }
+            if type_name == "Point" && field_name == "x"
+        )));
+    }
+
+    #[test]
+    fn error_field_not_found() {
+        let src = "struct Point { x: f64, y: f64 } fn f(p: Point) -> f64 { p.z }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| {
+            if let TypeError::FieldNotFound { field_name, available, .. } = e {
+                field_name == "z" && available.contains(&"x".to_string())
+            } else { false }
+        }));
+    }
+
+    #[test]
+    fn ok_cascade_suppression_on_error_receiver() {
+        // Receiver is Ty::Error (undefined var) — no FieldNotFound piled on.
+        let src = "struct Point { x: f64 } fn f() -> f64 { missing.x }";
+        let errs = infer_program_errors(src);
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(&errs[0], TypeError::UndefinedVariable { name, .. } if name == "missing"));
+    }
+
+    #[test]
+    fn ok_copy_struct_override() {
+        // `copy struct` → always Copy even if we explicitly use fields in let.
+        let src = "copy struct Handle { fd: i32 } fn f(h: Handle) -> i32 { let v = h.fd; v }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn error_move_struct_override_non_copy_field() {
+        // `move struct` with an i32 field: the struct is Move despite i32 being Copy.
+        let src = "move struct Fd { raw: i32 } fn f(s: Fd) { let _x = s.raw; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "raw")));
+    }
+
+    #[test]
+    fn ok_mutable_ref_field_write() {
+        // Writing through &mut Point is valid — no FieldWriteViaSharedRef.
+        let src = "struct Point { x: f64 } fn f(r: &mut Point) { r.x = 1.0; }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn deferred_generic_struct_field_access() {
+        // Generic struct: field access is deferred (non-fatal) in phase 1.
+        let src = "struct Cache<T> { val: T } fn f(c: Cache) -> i32 { c.val }";
+        let tokens = Lexer::new(src).lex().expect("lex");
+        let ast = Parser::new(tokens).parse().expect("parse");
+        assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    #[test]
+    fn error_duplicate_struct() {
+        let src = "struct Foo { x: i32 } struct Foo { y: bool }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateStruct { name, .. } if name == "Foo")));
     }
 }

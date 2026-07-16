@@ -39,20 +39,22 @@
 | [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
 | [21](#21-match--pattern-matching) | Match / pattern matching | Decided |
 | [22](#22-impl-block-syntax) | `impl` block syntax | Decided |
-| [23](#23-not-yet-decided--deferred) | Not yet decided — deferred | — |
+| [23](#23-struct-field-access) | Struct field access | Decided |
+| [24](#24-not-yet-decided--deferred) | Not yet decided — deferred | — |
 
 ---
 
 ## Status summary
 
-At a glance: **22 of 23 numbered sections decided** (§15 has two narrow, deliberately
+At a glance: **23 of 24 numbered sections decided** (§15 has two narrow, deliberately
 deferred extensions — Unicode escapes and raw strings — that do not block the core
 lexer work). Every token-level construct needed for a first lexer implementation is now
 covered. §18 covers `Self` (capital) — the impl-block type alias. §22 now formally
-specifies `impl` block structure, multiplicity, and conflict detection. The remaining
-open ground is §23 — constructs that have never been formally designed at all (traits,
-modules, attributes, array literals, generic call syntax, void/unit type) — which were
-always out of scope for the lexer's first pass and do not block it.
+specifies `impl` block structure, multiplicity, and conflict detection. §23 specifies
+struct field access. The remaining open ground is §24 — constructs that have never been
+formally designed at all (traits, modules, attributes, array literals, generic call
+syntax, void/unit type) — which were always out of scope for the lexer's first pass
+and do not block it.
 
 ---
 
@@ -1026,7 +1028,7 @@ pattern, three positions validated without special-casing.
 > **See also:** [§17](#17-copymove-semantics) — the Copy/Move structural inference
 > mechanism is the same one applied here to receiver access mode; `move self` mirrors
 > `move struct`. [§22](#22-impl-block-syntax) — `impl` block structure, multiplicity,
-> and conflict detection. [§23](#23-not-yet-decided--deferred) — trait/interface syntax
+> and conflict detection. [§24](#24-not-yet-decided--deferred) — trait/interface syntax
 > (how `impl` blocks interact with named traits) remains unresolved and does not block this.
 
 ---
@@ -1474,12 +1476,12 @@ means both `Ok` and `Err` arms must always be present — no silent discard of e
 
 **Deferred:**
 
-- **Range patterns** (`0..10 =>`) — range literal/expression syntax not yet decided (§23).
+- **Range patterns** (`0..10 =>`) — range literal/expression syntax not yet decided (§24).
 - **`@`-binding** (`x @ Some(y) =>`) — binds the whole matched value and destructures;
   useful for logging/re-wrapping but not essential for `Option`/`Checked` use cases.
 - **Struct patterns** (`Rect { width, height } =>`) — struct variants are deferred in
   §20; struct patterns follow when struct variants are decided.
-- **Slice/array patterns** — array/slice literal syntax is §23 deferred.
+- **Slice/array patterns** — array/slice literal syntax is §24 deferred.
 - **Or-pattern exhaustiveness with guards** — the rule for when `A | B` in a guarded
   arm counts toward exhaustiveness is subtle; defer to type-checker design session.
 
@@ -1581,9 +1583,9 @@ collection pass in the type-checker.
 merge rule. "Duplicate definition" without it is pedagogically opaque for a programmer who
 wrote two `impl Entity` blocks in different files without knowing they share a namespace.
 
-### Deferred (§23)
+### Deferred (§24)
 
-`impl Trait for Type` — trait implementation syntax is not decided here and remains in §23.
+`impl Trait for Type` — trait implementation syntax is not decided here and remains in §24.
 The block-merging mechanism above is designed to generalize: a trait impl is structurally
 "another `impl` block for the same type, scoped to a named trait's method set." No rework
 of the merge or conflict-detection rules is anticipated when trait impls are added. This
@@ -1599,11 +1601,159 @@ declaration-collection pass rather than being patched independently.
 
 > **See also:** [§6](#6-function-declarations) — `fn` syntax used inside `impl` blocks.
 > [§18](#18-method-receiver--self-and-self) — `self`, `move self`, `Self` receiver forms.
-> [§23](#23-not-yet-decided--deferred) — `impl Trait for Type` syntax deferred.
+> [§24](#24-not-yet-decided--deferred) — `impl Trait for Type` syntax deferred.
 
 ---
 
-## §23 Not yet decided — deferred
+## §23 Struct field access
+
+**Decided: `obj.field` reuses the existing dot operator — no new token, no new grammar rule.
+Access mode (immutable or mutable borrow) is inferred from body usage by the same mechanism as
+§18 `self` receiver inference and §17 Copy/Move inference. Copy-typed fields read by value via
+implicit-Copy per §17. Non-Copy field ownership beyond a borrow is a hard compile error at
+phase 1 — partial-move tracking is explicitly deferred. Mutation through a shared reference is a
+hard compile error (same shape as the `ConsumeViaRef` check from PR #27). Visibility is deferred.
+No `move obj.field` syntax until a dedicated phase-2 design session.**
+
+### 1. Syntax
+
+`obj.field` uses the dot operator already in the lexer and parser. Field access vs. method call
+is disambiguated by trailing `()`:
+
+```ofn
+let x = point.x;        // field access — no ()
+let d = point.dist();   // method call  — ()
+```
+
+No new token or grammar rule is required. `Expr::Field` is already in the AST
+(`src/ast/expr.rs:48`) and parsed in `parse_postfix` (`src/parser/expr.rs:116`). This section
+formalizes what the implementation already does.
+
+### 2. Access mode — inferred, not annotated
+
+`obj.field` always yields a borrow of the field. The borrow mode — immutable or mutable — is
+inferred from how the field is used in the enclosing body:
+
+- **Immutable** if the field is only read (value used, passed to a shared-reference parameter,
+  or compared).
+- **Mutable** if the field is assigned to (`obj.field = value`) or passed to a mutable-borrow
+  parameter.
+
+This is the **exact same inference mechanism** already built for `self` in §18 (receiver access
+mode inferred from body usage) and the Copy/Move structural inference in §17. No new inference
+concept is introduced. The programmer does not write `&obj.field` or `&mut obj.field` in source;
+the mode is compiler-visible information only. Per pillar 3, there is one way to access a field
+in shared source: bare `obj.field`.
+
+### 3. Copy fields — implicit copy by value
+
+If the field's type is inferred as `Copy` by §17's rule (all primitives; structs/enums whose
+every field/payload is recursively `Copy`), then reading `obj.field` in a value position is an
+implicit copy of the field's value — the same implicit-Copy inference already used everywhere
+else in the language. No syntax change at the call site; no keyword.
+
+### 4. Non-Copy field ownership — phase 1 boundary
+
+If the body's usage of `obj.field` genuinely requires **ownership** (not just a borrow) and the
+field's type is not `Copy`, this is a **hard compile error** — not silent, not a partial move,
+not a deferred panic:
+
+```
+error: cannot move `Entity::sprite` out of a field access — partial moves are not supported yet
+note: moving a single field out of a struct requires tracking that the struct is partially moved,
+      which is not implemented in this compiler phase
+suggestion: either move the whole struct (pass `entity` instead of `entity.sprite`),
+            or restructure the code so `sprite` is accessed only by borrow
+```
+
+**Partial-move tracking is explicitly deferred to phase 2 / borrow-checker work.** Partial-move
+tracking requires lifetime/region machinery that does not yet exist. This mirrors the pattern
+established by the §18 `SelfAccessAmbiguity` error and the `ConsumeViaRef` error (PR #27): when
+the compiler cannot yet prove something safe, it says so with full context and actionable
+alternatives — it does not half-implement a check that could miss cases. Pillar 1 mandates the
+compile error; pillar 5 mandates the message quality.
+
+### 5. Mutation through a shared reference — hard error
+
+Assigning to a field through a shared reference is a hard compile error:
+
+```ofn
+let r: &Entity = &entity;
+r.x = 1.0;   // ERROR — cannot assign through a shared reference
+```
+
+```
+error: cannot assign to `Entity::x` through a shared reference
+note: `r` is a shared borrow (`&Entity`) — field mutation requires either a mutable borrow
+      (`&mut Entity`) or an owned value
+suggestion: use `&mut entity` if mutation is intended, or restructure so the owning
+            binding `entity` is used directly
+```
+
+This is the **same ownership-violation shape** as `TypeError::ConsumeViaRef` from PR #27
+(calling a `move self` method through a `&T` receiver). The typechecker check mirrors that
+pattern: detect `Ty::Ref { mutable: false }` as the object type when the field appears in an
+assignment lvalue position, emit a hard error, do not cascade. The two checks share a pattern,
+not a code path — the error variant is field-access-specific.
+
+### 6. Visibility — deferred
+
+Access control (`pub`, `private`, crate-level visibility) is **not decided here**. For phase 1,
+all fields are accessible anywhere within the compiling program. Visibility gates belong to the
+module/import design session (§24), not here. No `pub` keyword on struct fields until that
+session settles module syntax.
+
+### 7. No `move obj.field` syntax — explicitly rejected for now
+
+Pre-reserving `move obj.field` syntax ahead of the phase-2 partial-move design session is
+**rejected for this session**, with the following rationale:
+
+Internal compiler scaffolding added ahead of its use — `Ty::TyVar`, `Region::Var`, phase-2
+`TypeError` variants — costs nothing observable: those identifiers live only in `.rs` source
+files and have no surface in the compiled program or in persisted `.ofn` source files.
+
+`move obj.field` is different in kind: it would be **user-facing syntax written into real
+programs** before its semantics are designed. If the phase-2 partial-move design session settles
+on different syntax — or settles that `move obj.field` is not the right mechanism at all — there
+are two bad outcomes: either the language breaks existing programs that used the pre-shipped form,
+or it supports two syntactic forms for the same operation, violating pillar 3 (single canonical
+syntax in shared source). Neither outcome is acceptable.
+
+The decision rule: no field-access-specific `move` syntax ships until a dedicated phase-2 design
+session settles it spec-first, the same process used for every other construct in this language.
+
+### Pillar-alignment rationale
+
+**Pillar 1 (explicit erroneous behavior):** two hard errors, each with full context: non-Copy
+ownership attempts cite the partial-move gap and give two escape paths; shared-ref mutation cites
+the borrow kind and suggests `&mut`. Neither is silent, neither defers to runtime. The phase-1
+error boundary is declared explicitly in the spec, not left to implementers to discover.
+
+**Pillar 2 (lifetime inference with opt-in escape hatch):** access mode is inferred — the
+programmer writes `obj.field` in all cases; the compiler determines immutable vs. mutable borrow
+from usage. No annotation, no escape hatch yet (`move obj.field` is deferred pending phase-2
+design). This is the same ergonomic contract as §18's `self` receiver.
+
+**Pillar 3 (single canonical syntax):** one form — `obj.field` — for all field reads and writes
+regardless of inferred access mode. No `&obj.field` or `&mut obj.field` in source. No
+`move obj.field` until the phase-2 session designs it.
+
+**Fifth validation of the §17/§18 model:** struct field access is the fifth syntactic position at
+which the inference model applies — struct declaration (§17), function parameters (§7), method
+receivers (§18), loop iteration (§16), and now field reads/writes. No special cases at any
+position.
+
+> **See also:** [§7](#7-lifetime--region-inference-and-escape-hatch) — borrow inference.
+> [§17](#17-copymove-semantics) — Copy/Move rule applied to field types.
+> [§18](#18-method-receiver--self-and-self) — same inference mechanism at the receiver position;
+> `ConsumeViaRef` pattern this section's mutation-through-ref check mirrors.
+> [§22](#22-impl-block-syntax) — impl block structure; methods that access `self` fields follow
+> the same borrow inference as standalone field access.
+> [§24](#24-not-yet-decided--deferred) — visibility/module syntax; partial-move tracking.
+
+---
+
+## §24 Not yet decided — deferred
 
 The following constructs have appeared informally in design examples, or were surfaced
 during review, but have **never been formally decided**. Do not assume any particular
@@ -1646,17 +1796,17 @@ Words reserved from **decided syntax** (§16, §17, §18, §21) that were not ye
 | `impl` | `Token::Impl` | §22 impl block syntax |
 | `match` | `Token::Match` | §21 match / pattern matching |
 
-Words reserved **ahead of syntax decisions** (constructs in this §23 list):
+Words reserved **ahead of syntax decisions** (constructs in this §24 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `trait` | `Token::Trait` | trait / interface syntax (§23) |
-| `mod` | `Token::Mod` | module / import syntax (§23) |
+| `trait` | `Token::Trait` | trait / interface syntax (§24) |
+| `mod` | `Token::Mod` | module / import syntax (§24) |
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
 word list) is now resolved by the table above.
 
-These do not block lexer work on the tokens decided in §1–§21, but the token set will
+These do not block lexer work on the tokens decided in §1–§23, but the token set will
 need a follow-up pass once the parser/typechecker-relevant items above are resolved.
 
 ---
