@@ -3,7 +3,50 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-16 — ARCHITECTURE.md + pillars-reviewer update
+## Last session: 2026-07-16 — infer/self_access.rs extraction (PR #29)
+
+**What was done:**
+
+Extracted the §18 self-access-mode scanning subsystem from `src/typechecker/infer/mod.rs`
+into a new file `src/typechecker/infer/self_access.rs` (PR #29, commit `26c320f`, merged
+to main `5a2d28c`). Pure file-move — no logic changed.
+
+**Motivation:** `infer/mod.rs` reached 1286 lines after PR #27. The §18 scanning block
+(198 lines: `infer_self_access_mode`, `SelfUsageScan`, all `scan_*` / `set_*` helpers)
+is fully self-contained — pure AST tree-walk with no dependency on orchestration or
+declaration-collection concerns. Extraction follows the exact precedent of the infer/
+submodule split after PR #21.
+
+**Changes:**
+- `src/typechecker/infer/self_access.rs` created (202 lines).
+- `src/typechecker/infer/mod.rs` 1286 → 1088 lines. Remaining bulk: collection passes
+  + shared helpers + all tests. Health-check assessment: does not warrant further splitting.
+- `infer_self_access_mode` visibility: `fn` → `pub(super) fn` (only caller is `mod.rs`).
+- Dead `_self_span: Span` parameter dropped from `infer_self_access_mode` (never read;
+  identified by `rust-idiom-reviewer`).
+
+**Review:**
+- `pillars-reviewer`: APPROVED — all 5 pillars N/A; pure move; tail-position transparency
+  pre-existing and verified.
+- `rust-idiom-reviewer`: no blockers; `pub(super)` correct; `_self_span` dead param cleaned.
+
+**Test and lint state:** 204 passed, 0 failed; `cargo clippy -- -D warnings` clean.
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment
+   at wildcard arm in `src/typechecker/infer/mod.rs`; blocked on §21 typechecker support.
+
+**Pending / next steps:**
+
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser + `Expr::StructLiteral`
+  + typechecker field-count / field-name / field-type checking. Most natural next feature.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
+## Session: 2026-07-16 — ARCHITECTURE.md + pillars-reviewer update
 
 **What was done:**
 
