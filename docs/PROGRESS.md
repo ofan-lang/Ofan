@@ -3,7 +3,70 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-16 — infer/self_access.rs extraction (PR #29)
+## Last session: 2026-07-16 — codegen kickoff design (docs)
+
+**What was done:**
+
+Expanded `docs/ARCHITECTURE.md` `## Codegen` section (commit `9c1006b`, direct to main)
+with three settled design decisions from a pillar-alignment session.
+
+**Decisions recorded:**
+
+1. **LLVM static linking** — `ofanc` statically links LLVM (inkwell) into the
+   distributed binary; no runtime dependency on a system LLVM. Concrete fulfillment of
+   pillar 4 extended to "using the compiler." Dynamic linking rejected: reintroduces
+   exactly the toolchain-fragmentation pillar 4 prevents, especially damaging for
+   microcontroller/embedded targets.
+   Pragmatic exception: shells out to the system linker (`cc`/`clang`/`link.exe`) for
+   the final object-file → executable step. System C linkers are near-universally
+   available in a way LLVM isn't — narrow, deliberate exception, not a violation of
+   intent. Bundling lld noted as future option if the exception proves painful.
+
+2. **First codegen slice scope** — slice 1 (first PR): primitive types/literals,
+   arithmetic/comparison/logical operators, free function calls, `if`/`else`, `while`,
+   `loop`, `let`, `return`. Structs/impl-block methods/field access deferred to slice 2.
+   Rationale: isolates pipeline-plumbing risk (build system, object files, linking,
+   target triples — first time any Ofan program produces a binary) from type-lowering
+   risk (struct layout, ABI, method dispatch). Slice 1 maps cleanly to what the
+   typechecker already fully resolves today.
+
+3. **Ty::Error / Deferred gate** — hard structural check in `main.rs`: if
+   `typechecker::infer()` returns `Err` or `InferResult::has_deferred()` is true,
+   codegen is never invoked; driver prints which unsupported constructs are present and
+   exits. One call site enforces the invariant — codegen lowering functions can assume
+   every `Ty` is fully resolved. Documented as consistent with pattern §2
+   (whole-program declaration-collection) and pattern §3 (tail-position transparency /
+   pillar 1: stop and say so, never quietly degrade).
+
+**Also done this session (docs):**
+
+- Added cross-cutting pattern §4 (submodule-split precedent) to `docs/ARCHITECTURE.md`
+  (commit `4d1cfb1`): three-question decision model, three precedent PRs (#21/#23/#29),
+  navigation row added to "Where to look" table.
+- Modularization health check: confirmed `infer/mod.rs` at exactly 1088 lines as
+  predicted; no new files crossed the 300-line bar since last scan; no further
+  splits warranted.
+
+**Test and lint state:** no code changes; 204 passed, 0 failed (unchanged from PR #29).
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment
+   at wildcard arm in `src/typechecker/infer/mod.rs`; blocked on §21 typechecker support.
+
+**Pending / next steps:**
+
+- **Codegen slice 1** — implement per settled design above. First time an Ofan program
+  produces a binary. Pipeline-plumbing focus: build system, inkwell wiring, object-file
+  generation, system-linker invocation, driver loop changes in `main.rs`.
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser +
+  `Expr::StructLiteral` + typechecker field-count/name/type checking. Could land before
+  or after codegen slice 1 depending on priority.
+
+---
+
+## Session: 2026-07-16 — infer/self_access.rs extraction (PR #29)
 
 **What was done:**
 
