@@ -3,6 +3,163 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-16 — struct field access typechecking (PR #28)
+
+**What was done:**
+
+Implemented struct declaration parsing and field access typechecking (§23), completing
+the `Expr::Field` deferred stub from the phase 1 typechecker and landing struct definitions
+as first-class items across the parser, AST, and typechecker.
+
+**Struct declaration AST + parser (`src/ast/item.rs`, `src/parser/item.rs`):**
+
+`StructDef<'src>` added: `name`, `name_span`, `generic_params: Vec<&'src str>`,
+`fields: Vec<FieldDef<'src>>`, `copy_move: Option<CopyMove>`, `span`. `CopyMove` enum:
+`Copy` / `Move`. `Item::Struct(StructDef)` added — exhaustive match in typechecker passes
+now has a `Struct(_) => {}` arm so future variants remain tripwires.
+
+`parse_struct_def` in `item.rs`: optional `copy`/`move` prefix → `CopyMove`; `struct
+Name`; optional `<T, U, …>` generic param list; `{ fields }` with `name: Type` entries
+(trailing comma optional). `parse_item` updated; `parse_struct` helper in test module.
+
+`SYNTAX_SPEC.md` §23 populated (was deferred): struct declaration syntax, `copy`/`move`
+override, generic param list, field grammar. 184 lines of spec additions.
+
+**Two-pass struct collection (`src/typechecker/infer/mod.rs`, `src/typechecker/env.rs`):**
+
+Old single pass 1 became sub-passes 1a / 1b / 1c:
+
+- 1a: `collect_struct_name` — register name + `name_span` into `ctx.struct_defs`; emit
+  `DuplicateStruct` on collision, skip field population for duplicate.
+- 1b: `collect_struct_fields` — populate `StructInfo.fields` (HashMap) and `field_order`
+  (Vec for available-list ordering); resolves types with `convert::ast_ty_to_ty`. Two-pass
+  design allows struct fields to reference other structs defined later in the file.
+- 1c: existing fn/impl sig collection (unchanged).
+
+`StructInfo` added to `env.rs`: `name_span`, `fields: HashMap<String, Ty>`,
+`field_order: Vec<String>`, `copy_override: Option<CopyMove>`, `is_generic: bool`.
+`InferCtx.struct_defs: HashMap<String, StructInfo>` added.
+
+**`is_copy` helper (`src/typechecker/infer/mod.rs`):**
+
+Implements §17 + §23 Copy-eligibility rule:
+- Primitives (`i32`, `f64`, `bool`, `char`, `()`): always Copy.
+- `&T` (shared ref): always Copy. `&mut T`: never Copy.
+- `Ty::Named(name)`: check `struct_defs[name].copy_override` — `Some(Copy)` → Copy;
+  `Some(Move)` → not Copy; `None` → recursive: all fields Copy iff all field types are Copy.
+- `Ty::Str`, `Ty::Param`, `Ty::TyVar`, `Ty::Error`: not Copy.
+
+**Field access typechecking (`src/typechecker/infer/expr.rs`):**
+
+`infer_field_access` function (replaces the `Expr::Field` `defer()` call):
+1. If object type is `Ty::Error` → cascade-suppress (no `FieldNotFound` piled on).
+2. If object type is generic struct (`is_generic`) → defer (phase 1 limit).
+3. Strip one `Ty::Ref` layer to find named struct type.
+4. Look up field in `struct_defs[type].fields`; emit `FieldNotFound { available }` on miss.
+5. Record field type in `ctx.type_map`.
+
+**Ownership and mutability enforcement (`src/typechecker/infer/stmt.rs`):**
+
+`Stmt::Assign` on `Expr::Field` target: if receiver is `Ty::Ref { mutable: false }` →
+emit `FieldWriteViaSharedRef`; infer RHS and return early (no further type check). Falls
+through for `&mut T` and owned receivers.
+
+`FieldOwnNonCopy` checked at three call sites via `check_tail_field_own_non_copy`:
+- `Stmt::Let` init: `let x = e.field` when struct is non-Copy.
+- `Stmt::Return` value: `return e.field` when struct is non-Copy.
+- Call args (expr.rs): `consume(e.field)` when struct is non-Copy and expected type is
+  not a ref (ref-expected suppressed: type-mismatch fires instead).
+
+**`check_tail_field_own_non_copy` (`src/typechecker/infer/mod.rs`):**
+
+Recursive helper that follows transparent tail-position wrappers before checking
+`check_field_own_non_copy`:
+- `Expr::Field` → direct check.
+- `Expr::Block` → recurse into `block.tail`.
+- `Expr::If` → recurse into `then_block.tail` and `else_branch`; fires if either fires.
+- `_ => false` — stops at non-transparent expressions (Unary, Binary, Call, etc.).
+
+**Precondition:** `infer_expr` must have run on the full expression tree before this helper
+is called, so `ctx.type_map` is populated for every `Expr::Field` span encountered.
+
+**`infer_fn` and `infer_method` tail-guard (`src/typechecker/infer/mod.rs`):**
+
+Bare function-body tail (`fn f(e) -> Sprite { e.sprite }`) is `f.body.tail` — an `Expr`,
+not a `Stmt`. `infer_stmt` is never called on it; `Stmt::Return` does not catch it. After
+`infer_block` returns, both `infer_fn` and `infer_method` now call
+`check_tail_field_own_non_copy(f.body.tail)` and gate `ReturnMismatch` behind
+`!tail_owns_non_copy` — ownership error is the root cause; the type error is noise.
+
+These two call sites are separate (not DRY-merged) because they diverge on self-param
+binding. Both are now symmetric for the tail-guard behavior. No third call site exists:
+`infer_block` called from `infer_expr` (nested `Expr::Block`) has its value flow into a
+containing `Stmt::Let` / `Stmt::Return` / call-arg — all three already covered.
+
+**New `TypeError` variants (`src/typechecker/error.rs`):**
+
+- `DuplicateStruct { name, first_span, duplicate_span }` — cites both sites; suggests rename.
+- `FieldNotFound { type_name, field_name, span, available: Vec<String> }` — lists available
+  fields sorted by definition order; empty-field case handled ("type has no fields").
+- `FieldWriteViaSharedRef { type_name, field_name, span }` — names receiver kind, offers
+  `&mut T` and owned-binding suggestions.
+- `FieldOwnNonCopy { type_name, field_name, span }` — explains partial-move limitation,
+  suggests borrow or whole-struct move.
+
+**Tests (19 new in `src/typechecker/infer/mod.rs`):**
+
+`ok_copy_field_read`, `ok_borrow_of_non_copy_field`, `error_field_own_non_copy_let`,
+`error_field_own_non_copy_return`, `error_field_own_non_copy_call_arg`,
+`error_field_write_via_shared_ref`, `error_field_not_found` (asserts field name AND
+`available.contains(&"x")` — not just `errs.len() > 0`), `ok_cascade_suppression_on_error_receiver`
+(asserts `errs.len() == 1` and variant is `UndefinedVariable`), `ok_copy_struct_override`,
+`error_move_struct_override_non_copy_field`, `ok_mutable_ref_field_write`,
+`deferred_generic_struct_field_access`, `error_field_own_non_copy_through_shared_ref_receiver`,
+`error_field_own_non_copy_block_tail_let`, `error_field_own_non_copy_block_tail_return`,
+`error_field_own_non_copy_block_tail_call_arg`, `error_field_own_non_copy_if_else_branches`,
+`error_field_own_non_copy_implicit_return_bare`, `error_field_own_non_copy_implicit_return_if_else`,
+`ok_field_copy_through_block_tail`, `ok_field_borrow_in_block_tail`, `error_duplicate_struct`.
+
+**`Expr::Match` open item (documented, not a gap now):**
+
+`check_tail_field_own_non_copy` hits `_ => false` for `Expr::Match` — each match arm is a
+value-producing tail position. Flagged with a `NB` comment at the wildcard arm. Will need
+to be added when §21 reaches full typechecker support. Currently non-fatal: match is still
+deferred at the typechecker level, so the case cannot arise in practice.
+
+**Two commits on this PR:**
+- `ba7740e` — main struct parsing + field typechecking implementation.
+- `33400a8` — `check_tail_field_own_non_copy` + `infer_fn`/`infer_method` tail-guard;
+  call-arg sites upgraded from direct `Expr::Field` match to the recursive helper; 8 new
+  tail-position regression tests.
+
+**PR:** #28 (`feat/struct-field-typechecking` → `main`, merged 2026-07-16, fast-forward).
+
+**Test and lint state:** 204 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Resolved open items:**
+
+- ✅ `Expr::Field` deferred stub — **closed by PR #28** (field access now fully typechecked
+  for non-generic concrete structs).
+- ✅ Struct declaration syntax + typechecker — **closed by PR #28** (§23 struct parsing,
+  two-pass collection, `StructInfo` table in `InferCtx`).
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` test code — not
+   in the lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — flagged with
+   `NB` comment at `mod.rs` wildcard arm; blocked on §21 typechecker support.
+
+**Pending / next steps:**
+
+- **Struct literal construction** — `Point { x: 1.0, y: 2.0 }` is not yet parsed or
+  typechecked. Natural follow-on: parser support + `Expr::StructLiteral` + field-count /
+  field-name / field-type checking in the typechecker.
+- **`docs/ARCHITECTURE.md`** — high-level compiler-phase map.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-15 — method/self resolution (PR #27)
 
 **What was done:**
