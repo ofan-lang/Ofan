@@ -3,7 +3,74 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-16 — codegen kickoff design (docs)
+## Last session: 2026-07-17 — codegen PR 30 infrastructure (first binary)
+
+**What was done:**
+
+Implemented end-to-end codegen pipeline and produced the first binary from an Ofan source
+file: `fn main() -> i32 { 0 }` → `hello.exe` → exits 0. PR #30 (`feat/codegen-pr30-infrastructure`,
+merged `f0cf83d` fast-forward).
+
+**`src/codegen/llvm.rs`** — expanded from 20-line stub:
+
+`LlvmContext::emit_hardcoded_main(&self, out: &Path) -> Result<(), String>`:
+- `Target::initialize_x86` (x86-only for now; comment added)
+- Build `define i32 @main() { ret i32 0 }` via inkwell builder API
+- `TargetMachine::get_default_triple()` → `write_to_file` → intermediate `.o`
+- `link_object` helper: tries `cc` → `clang` → `$LLVM_SYS_181_PREFIX\bin\clang.exe`
+  (Windows fallback) in order; continues past non-zero exits (broken `cc` doesn't
+  block working `clang`); retains last non-NotFound error for reporting
+- Cleanup of `.o`: `eprintln!` warning on failure instead of silent `.ok()` (Pillar 1)
+- TODO comment: promote to typed `CodegenError` enum for consistency with `TypeError`
+
+**`src/main.rs`** — `Ok(result)` arm split into three parts:
+1. `if result.has_deferred()` → print unsupported-construct diagnostics, exit 1
+   (hard gate: no codegen node can be `Ty::Error`)
+2. `#[cfg(feature = "codegen")]` → `LlvmContext::new()` + `emit_hardcoded_main(&out)` +
+   print `"ofan: compiled → {out}"`
+3. `#[cfg(not(feature = "codegen"))]` → existing not-yet-implemented message, exit 1
+
+Removed crate-level `#[allow(dead_code)]`; replaced with targeted suppressions on
+phase-2 items: `type_map`/`type_of` (PR 31+), `LifetimeConflict`/`UseAfterMove`/
+`BorrowConflict` (phase-2 `TypeError` variants), `Ty::TyVar` (unification, phase 2).
+
+**Review:**
+- `pillars-reviewer`: APPROVED. Deferred gate airtight: every `Ty::Error` production site
+  pairs with either a fatal `ctx.errors` entry or a `deferred` entry — no silent path to
+  codegen. Pillar 4: system linker shell-out is a compile-action dependency, not an install
+  dependency (consistent with documented design). Two carry-forward notes: (a) confirm
+  release pipeline statically links LLVM; (b) `has_deferred()` gate unexercised until PR 31
+  introduces real lowering — re-verify invariant then.
+- `rust-idiom-reviewer`: Two issues found and fixed before commit:
+  1. Silent `.ok()` on `.o` cleanup → explicit `eprintln!` warning
+  2. Linker fallback stopped at first non-zero exit → try-all with last-error tracking
+
+**Test and lint state:** 204 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**Verified end-to-end:**
+```
+ofan hello.ofn  →  ofan: compiled → hello.exe
+./hello.exe     →  exit 0
+```
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment
+   at wildcard arm; blocked on §21 typechecker support.
+3. **LLVM dev build targets X86+AMDGPU only** (carried from 2026-07-16 — see that entry
+   for full detail).
+
+**Pending / next steps:**
+
+- **PR 31** — real AST lowering: primitive literals (`i32`, `f64`, `bool`), arithmetic
+  operators, `let` bindings, `return`. Verification: binary exits expected value (e.g.
+  `fn main() -> i32 { 1 + 2 * 3 }` exits 7).
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser + typechecker.
+
+---
+
+## Session: 2026-07-16 — codegen kickoff design (docs)
 
 **What was done:**
 
