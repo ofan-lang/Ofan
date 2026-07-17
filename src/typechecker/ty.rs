@@ -40,6 +40,7 @@ pub enum Ty {
     /// **Never constructed in phase 1** — any code path that constructs it is a
     /// compiler bug and should be caught by the exhaustive match in `infer_expr`.
     #[allow(clippy::enum_variant_names)]
+    #[allow(dead_code)] // phase 2: used when unification is introduced
     TyVar(u32),
 
     /// Error sentinel used for deferred or failed sub-expressions.
