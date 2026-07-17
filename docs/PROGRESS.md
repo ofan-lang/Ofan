@@ -3,6 +3,61 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-16 — ARCHITECTURE.md + pillars-reviewer update
+
+**What was done:**
+
+Created `docs/ARCHITECTURE.md` (commit `ca36745`, direct to main — docs-only).
+Updated `.claude/agents/pillars-reviewer.md` (commit `0aa6423`) with a standing
+checklist item for tail-position transparency.
+
+**`docs/ARCHITECTURE.md` contents:**
+
+- Compilation pipeline: ASCII flow diagram + pointer to `main.rs` for wiring.
+  Explicitly marks codegen as NOT YET IMPLEMENTED (exits 1 with message after typechecking).
+- Per-phase sections (Lexer / AST / Parser / Typechecker / Codegen): entry points,
+  key types, submodule tables, completeness status.
+- Three named cross-cutting design patterns:
+  1. **Inference-with-explicit-override** — same 3-case structure in §17 Copy/Move,
+     §18 self receivers, §23 field access. `is_copy()` is the shared implementation.
+  2. **Whole-program declaration-collection pass** — pass 1 sub-passes collect all
+     names before pass 2 checks any body; future enum/trait/module support extends
+     this pass.
+  3. **Tail-position transparency (Pillar 1)** — named pattern distilled from Gap A
+     (PR #27) and FieldOwnNonCopy (PR #28); pointer to `check_tail_field_own_non_copy`
+     and the quick-test ("wrap in `{ … }` — does check still fire?").
+- Not-yet-designed list (points at SYNTAX_SPEC.md §24 as canonical).
+- Navigation table: "want to do X → look here."
+
+**`.claude/agents/pillars-reviewer.md` update:**
+
+Added explicit tail-position transparency checklist item: for any new
+ownership/consumption check at a specific expression position, the reviewer must
+verify it fires through `Expr::Block` tail, `Expr::If`/`else` branches, and future
+`Expr::Match` arms. Names both historical instances (PR #27 Gap A, PR #28
+FieldOwnNonCopy) as the rationale.
+
+**Test and lint state:** 204 passed, 0 failed (no code changes).
+
+**Resolved open items:**
+
+- ✅ `docs/ARCHITECTURE.md` — **created this session** (was listed as pending in every
+  session since PR #21).
+
+**Known open items (carried forward):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment
+   at wildcard arm in `src/typechecker/infer/mod.rs`; blocked on §21 typechecker support.
+
+**Pending / next steps:**
+
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser + `Expr::StructLiteral`
+  + typechecker field-count / field-name / field-type checking. Most natural next feature.
+- **Anchor CLI tool** — real program to compile; validates language design against usage.
+
+---
+
 ## Last session: 2026-07-16 — struct field access typechecking (PR #28)
 
 **What was done:**
