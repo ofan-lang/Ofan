@@ -24,9 +24,7 @@ pub(super) fn ast_ty_to_ty(
                     "str" => return Ty::Str,
                     "unit" => return Ty::Unit,
                     n if generic_params.contains(&n) => return Ty::Param(n.to_string()),
-                    // No struct/enum definitions in phase 1 — any unknown type name is
-                    // unresolvable. Defer so it surfaces in InferResult::deferred rather
-                    // than silently reaching codegen as Ty::Named.
+                    n if ctx.struct_defs.contains_key(n) => return Ty::Named(n.to_string()),
                     _ => return super::defer(ctx, "user-defined type — struct/enum design pending", span),
                 }
             }

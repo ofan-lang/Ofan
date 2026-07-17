@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::ast::CopyMove;
 use crate::lexer::token::Span;
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Ty};
@@ -31,6 +32,23 @@ impl Env {
     }
 }
 
+/// Resolved struct definition stored in InferCtx after collection sub-passes.
+pub(crate) struct StructInfo {
+    /// Span of the struct name — used to cite the first definition in DuplicateStruct.
+    pub(crate) name_span: Span,
+    /// Resolved field types, keyed by field name.
+    pub(crate) fields: HashMap<String, Ty>,
+    /// Field names in source order — used for `available` lists in FieldNotFound errors.
+    pub(crate) field_order: Vec<String>,
+    /// Explicit Copy/Move override from the struct modifier keyword (§23).
+    ///   Some(CopyMove::Copy) = `copy struct` → always Copy
+    ///   Some(CopyMove::Move) = `move struct` → never Copy
+    ///   None                 = infer from field types
+    pub(crate) copy_override: Option<CopyMove>,
+    /// True when the struct has generic parameters — field access deferred in phase 1.
+    pub(crate) is_generic: bool,
+}
+
 /// Global inference context threaded through the entire checking pass.
 pub(crate) struct InferCtx {
     /// Top-level function signatures + definition span, populated by the collection
@@ -42,6 +60,10 @@ pub(crate) struct InferCtx {
     /// Populated during the collection pass alongside fn_sigs. Used now for
     /// whole-program duplicate detection (§22); method dispatch in a future session.
     pub(crate) impl_sigs: HashMap<String, HashMap<String, (FnSig, Span)>>,
+
+    /// Struct definitions collected in sub-passes 1a/1b, keyed by struct name.
+    /// Queried by infer_field_access and is_copy (§23).
+    pub(crate) struct_defs: HashMap<String, StructInfo>,
 
     /// Span → inferred type. Codegen queries this to determine LLVM operand types.
     /// Keyed by the expression span from the AST.
@@ -66,6 +88,7 @@ impl InferCtx {
         InferCtx {
             fn_sigs: HashMap::new(),
             impl_sigs: HashMap::new(),
+            struct_defs: HashMap::new(),
             type_map: HashMap::new(),
             errors: Vec::new(),
         }
