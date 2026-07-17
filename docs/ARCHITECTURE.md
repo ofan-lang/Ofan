@@ -229,6 +229,14 @@ Dynamic linking was rejected because it reintroduces exactly the toolchain-fragm
 problem pillar 4 exists to prevent. This matters most for the microcontroller/embedded
 niche, where a system LLVM is often unavailable or the wrong version.
 
+**Applies to the distributed release binary only.** The static-linking requirement is
+enforced in the release CI pipeline via `LLVM_SYS_181_STATIC=1` and a statically-built
+LLVM installation. Local development builds (including all codegen slice 1/2 work) may
+link dynamically against a system LLVM for iteration speed — `cargo build --features
+codegen` with a dynamic system LLVM is the expected developer workflow. This is a
+deliberate, documented exception for developer builds, not a relaxation of the pillar-4
+commitment for what ships to users.
+
 **Pragmatic exception:** `ofanc` shells out to the system linker (`cc` / `clang` /
 `link.exe`) for the final object-file → executable step rather than bundling a linker
 (e.g. lld). A system C linker is near-universally available on developer machines in a
