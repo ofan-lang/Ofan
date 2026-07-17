@@ -206,6 +206,7 @@ pub enum TypeError {
 
     /// Lifetime/region conflict — emitted when region constraint solving fails.
     /// Phase 2.
+    #[allow(dead_code)]
     #[error("lifetime conflict at byte {}: {note}{}", span.start,
         suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     LifetimeConflict {
@@ -215,6 +216,7 @@ pub enum TypeError {
     },
 
     /// Use of a moved value. Phase 2.
+    #[allow(dead_code)]
     #[error("use of moved value `{name}` at byte {}; value was moved at byte {}{}", use_span.start, moved_at.start,
         suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     UseAfterMove {
@@ -225,6 +227,7 @@ pub enum TypeError {
     },
 
     /// Conflicting borrows. Phase 2.
+    #[allow(dead_code)]
     #[error("conflicting borrows at byte {}{}", span.start,
         suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     BorrowConflict {

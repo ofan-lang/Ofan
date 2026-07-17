@@ -16,6 +16,7 @@ use std::collections::HashMap;
 /// Internal representation can grow (new fields, region solutions, etc.) without
 /// changing the public type — callers access it through `type_of` and `deferred`.
 pub struct InferResult {
+    #[allow(dead_code)] // used by codegen in PR 31+
     pub(crate) type_map: HashMap<Span, Ty>,
     /// Non-fatal `TypeError::Deferred` diagnostics collected during inference.
     /// These represent constructs that were accepted syntactically but NOT fully
@@ -29,6 +30,7 @@ pub struct InferResult {
 impl InferResult {
     /// Look up the inferred type for the expression at the given source span.
     /// Returns `None` for spans not recorded (e.g. spans not yet visited).
+    #[allow(dead_code)] // used by codegen in PR 31+
     pub fn type_of(&self, span: Span) -> Option<&Ty> {
         self.type_map.get(&span)
     }

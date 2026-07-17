@@ -1,5 +1,3 @@
-#![allow(dead_code)] // skeleton — remove once all pipeline stages produce real output
-
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -45,8 +43,33 @@ fn main() {
 
     match typechecker::infer(&ast) {
         Ok(result) => {
-            for w in &result.deferred {
-                eprintln!("ofan: warning: {w}");
+            if result.has_deferred() {
+                for d in &result.deferred {
+                    eprintln!("ofan: unsupported construct: {d}");
+                }
+                eprintln!("ofan: cannot compile: source contains unresolved constructs");
+                std::process::exit(1);
+            }
+            #[cfg(feature = "codegen")]
+            {
+                use codegen::llvm::LlvmContext;
+                let stem = args.source.file_stem().unwrap_or_default();
+                let out = args.source.with_file_name(stem)
+                    .with_extension(std::env::consts::EXE_EXTENSION);
+                let ctx = LlvmContext::new();
+                if let Err(e) = ctx.emit_hardcoded_main(&out) {
+                    eprintln!("ofan: codegen error: {e}");
+                    std::process::exit(1);
+                }
+                eprintln!("ofan: compiled \u{2192} {}", out.display());
+            }
+            #[cfg(not(feature = "codegen"))]
+            {
+                eprintln!(
+                    "ofan: codegen not yet implemented\nsource: {}",
+                    args.source.display()
+                );
+                std::process::exit(1);
             }
         }
         Err(errors) => {
@@ -56,10 +79,4 @@ fn main() {
             std::process::exit(1);
         }
     }
-
-    eprintln!(
-        "ofan: codegen not yet implemented\nsource: {}",
-        args.source.display()
-    );
-    std::process::exit(1);
 }
