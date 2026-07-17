@@ -10,12 +10,11 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
         Stmt::Let { name, ty, init, span, .. } => {
             let init_ty = super::expr::infer_expr(init, ctx, env);
 
-            // FieldOwnNonCopy: `let x = obj.field` when struct is non-Copy (§23).
-            if let Expr::Field { object, field, field_span, .. } = init.as_ref() {
-                if super::check_field_own_non_copy(object, field, *field_span, &init_ty, ctx) {
-                    env.define(name, Ty::Error);
-                    return;
-                }
+            // FieldOwnNonCopy: detect partial moves through tail-position wrappers (§23).
+            // Recurses into block tails and if/else branches via check_tail_field_own_non_copy.
+            if super::check_tail_field_own_non_copy(init, ctx) {
+                env.define(name, Ty::Error);
+                return;
             }
 
             let binding_ty = if let Some(ann) = ty {
@@ -53,12 +52,10 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
                 None => Ty::Unit,
             };
 
-            // FieldOwnNonCopy: `return obj.field` when struct is non-Copy (§23).
+            // FieldOwnNonCopy: detect partial moves through tail-position wrappers (§23).
             if let Some(expr) = value {
-                if let Expr::Field { object, field, field_span, .. } = expr.as_ref() {
-                    if super::check_field_own_non_copy(object, field, *field_span, &ret_ty, ctx) {
-                        return;
-                    }
+                if super::check_tail_field_own_non_copy(expr, ctx) {
+                    return;
                 }
             }
 

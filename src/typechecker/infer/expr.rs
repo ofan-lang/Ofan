@@ -240,15 +240,12 @@ fn infer_method_call(
     let mut any_error = false;
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
-        if let Expr::Field { object, field, field_span, .. } = arg {
-            // Skip FieldOwnNonCopy when expected type is a ref — caller will pass
-            // by borrow, and a type-mismatch error fires anyway.
-            if !matches!(expected_ty, Ty::Ref { .. })
-                && super::check_field_own_non_copy(object, field, *field_span, &arg_ty, ctx)
-            {
-                any_error = true;
-                continue;
-            }
+        // Skip FieldOwnNonCopy when expected type is a ref — type-mismatch fires instead.
+        if !matches!(expected_ty, Ty::Ref { .. })
+            && super::check_tail_field_own_non_copy(arg, ctx)
+        {
+            any_error = true;
+            continue;
         }
         if !matches!(arg_ty, Ty::Error) && &arg_ty != expected_ty {
             ctx.error(TypeError::Mismatch {
@@ -408,13 +405,12 @@ fn infer_call(
     let mut any_error = false;
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
-        if let Expr::Field { object, field, field_span, .. } = arg {
-            if !matches!(expected_ty, Ty::Ref { .. })
-                && super::check_field_own_non_copy(object, field, *field_span, &arg_ty, ctx)
-            {
-                any_error = true;
-                continue;
-            }
+        // Skip FieldOwnNonCopy when expected type is a ref — type-mismatch fires instead.
+        if !matches!(expected_ty, Ty::Ref { .. })
+            && super::check_tail_field_own_non_copy(arg, ctx)
+        {
+            any_error = true;
+            continue;
         }
         if !matches!(arg_ty, Ty::Error) && &arg_ty != expected_ty {
             ctx.error(TypeError::Mismatch {

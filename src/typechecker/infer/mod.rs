@@ -186,9 +186,16 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
 
     let body_ty = infer_block(&f.body, &declared_return, ctx, env);
 
+    // FieldOwnNonCopy: detect partial moves in implicit function return (tail expr, §23).
+    let tail_owns_non_copy = f.body.tail.as_ref()
+        .is_some_and(|tail| check_tail_field_own_non_copy(tail, ctx));
+
     // Check that the body's tail type matches the declared return type.
     // `return` statements are checked individually as they are encountered.
-    if !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
+    // Suppress ReturnMismatch when FieldOwnNonCopy already fired — the ownership
+    // error is the root cause; the type error is noise on top of it.
+    if !tail_owns_non_copy
+        && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
         ctx.error(TypeError::ReturnMismatch {
@@ -260,7 +267,12 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
 
     let body_ty = infer_block(&f.body, &declared_return, ctx, env);
 
-    if !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
+    // FieldOwnNonCopy: detect partial moves in implicit method return (tail expr, §23).
+    let tail_owns_non_copy = f.body.tail.as_ref()
+        .is_some_and(|tail| check_tail_field_own_non_copy(tail, ctx));
+
+    if !tail_owns_non_copy
+        && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
         ctx.error(TypeError::ReturnMismatch {
@@ -558,6 +570,40 @@ pub(super) fn check_field_own_non_copy(
         span: field_span,
     });
     true
+}
+
+/// Checks FieldOwnNonCopy through transparent tail-position wrappers.
+/// Recurses into block tails and if/else branches — any position where
+/// the wrapped expression IS the value the surrounding expression produces.
+/// Does not recurse into non-tail positions (conditions, binary operands, call args).
+/// Precondition: `infer_expr` must have already run on `expr` (and all sub-expressions),
+/// so `ctx.type_map` is populated for every `Expr::Field` span we encounter.
+pub(super) fn check_tail_field_own_non_copy(expr: &Expr<'_>, ctx: &mut InferCtx) -> bool {
+    match expr {
+        Expr::Field { object, field, field_span, span } => {
+            let field_ty = ctx.type_map.get(span).cloned().unwrap_or(Ty::Error);
+            check_field_own_non_copy(object, field, *field_span, &field_ty, ctx)
+        }
+        Expr::Block(block) => match &block.tail {
+            Some(e) => check_tail_field_own_non_copy(e, ctx),
+            None => false,
+        },
+        Expr::If { then_block, else_branch, .. } => {
+            let then_fired = match &then_block.tail {
+                Some(e) => check_tail_field_own_non_copy(e, ctx),
+                None => false,
+            };
+            let else_fired = match else_branch {
+                Some(e) => check_tail_field_own_non_copy(e, ctx),
+                None => false,
+            };
+            then_fired || else_fired
+        }
+        // Any other expression is not a transparent tail wrapper (Unary, Binary, Call, etc.).
+        // NB: when Expr::Match leaves deferred status it must be added here — it is a
+        // value-producing tail wrapper and the wildcard will silently skip it otherwise.
+        _ => false,
+    }
 }
 
 /// Returns true if `ty` is Copy-eligible (§17 + §23).
@@ -1137,6 +1183,98 @@ mod tests {
         let tokens = Lexer::new(src).lex().expect("lex");
         let ast = Parser::new(tokens).parse().expect("parse");
         assert!(typechecker::infer(&ast).is_ok());
+    }
+
+    #[test]
+    fn error_field_own_non_copy_through_shared_ref_receiver() {
+        // `ref_entity: &Entity`, Entity is non-Copy because Sprite is move struct.
+        // `ref_entity.sprite` is a direct Expr::Field — check fires despite receiver being a ref.
+        // auto-deref in check_field_own_non_copy: obj_ty = &Entity → struct_ty = Entity → non-Copy.
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(r: &Entity) { let _s: Sprite = r.sprite; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    // ── check_tail_field_own_non_copy: block/if tail wrappers ────────────────
+
+    #[test]
+    fn error_field_own_non_copy_block_tail_let() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(e: Entity) { let _x: Sprite = { e.sprite }; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_block_tail_return() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(e: Entity) -> Sprite { return { e.sprite }; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_block_tail_call_arg() {
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn consume(_s: Sprite) {}                    fn f(e: Entity) { consume({ e.sprite }); }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_if_else_branches() {
+        // let-init is Expr::If — both branches are field accesses on non-Copy struct.
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(e1: Entity, e2: Entity, cond: bool) {                        let _s = if cond { e1.sprite } else { e2.sprite };                    }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_implicit_return_bare() {
+        // Function body tail is a bare Expr::Field — implicit return, no `return` keyword.
+        // infer_fn must call check_tail_field_own_non_copy on f.body.tail (§23).
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn f(e: Entity) -> Sprite { e.sprite }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn error_field_own_non_copy_implicit_return_if_else() {
+        // Function body tail is Expr::If with field accesses in both branches.
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   fn f(e1: Entity, e2: Entity, cond: bool) -> Sprite { \
+                       if cond { e1.sprite } else { e2.sprite } \
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
+    fn ok_field_copy_through_block_tail() {
+        // Point is inferred-Copy (all fields f64) — block tail should not fire FieldOwnNonCopy.
+        let src = "struct Point { x: f64 } fn f(p: Point) { let _x: f64 = { p.x }; }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn ok_field_borrow_in_block_tail() {
+        // Block tail is &e.sprite (Expr::Unary { Ref, Expr::Field }) — not Expr::Field at tail.
+        // helper hits _ => false → no FieldOwnNonCopy.
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(e: &Entity) { let _r = { &e.sprite }; }";
+        let errs = infer_program_errors(src);
+        assert!(!errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { .. })));
     }
 
     #[test]
