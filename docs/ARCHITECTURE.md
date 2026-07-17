@@ -211,18 +211,68 @@ Placeholder variants already exist in `TypeError` and `Ty` for API stability.
 
 ## Codegen  (`src/codegen/`)
 
-**Status: SKELETON ONLY.**
-
-`src/codegen/mod.rs` contains `LlvmContext` wrapping `inkwell::context::Context` — no
-lowering logic, no IR passes. `src/codegen/llvm.rs` is gated behind
-`#[cfg(feature = "codegen")]` and requires LLVM dev libraries at build time; it is
-excluded from default `cargo build`.
-
-`main.rs` prints `"ofan: codegen not yet implemented"` and exits 1 after a successful
-typechecking pass.
+**Current status:** skeleton only. `src/codegen/mod.rs` feature-gates `pub mod llvm`;
+`src/codegen/llvm.rs` contains `LlvmContext` wrapping `inkwell::context::Context` with
+no lowering logic. `main.rs` prints `"ofan: codegen not yet implemented"` and exits 1
+after a successful typechecking pass.
 
 **Planned backend:** LLVM via inkwell (decided 2026-06-24; rationale in `PROGRESS.md` —
 multi-platform reach without per-arch codegen; Cranelift evaluated and rejected).
+
+### Linking strategy — LLVM static, system linker for final link
+
+`ofanc` statically links LLVM (via inkwell) into the distributed binary — no runtime
+dependency on a system-installed LLVM. This is the concrete fulfillment of pillar 4
+(single-binary install) extended to *using* the compiler, not just installing it.
+
+Dynamic linking was rejected because it reintroduces exactly the toolchain-fragmentation
+problem pillar 4 exists to prevent. This matters most for the microcontroller/embedded
+niche, where a system LLVM is often unavailable or the wrong version.
+
+**Pragmatic exception:** `ofanc` shells out to the system linker (`cc` / `clang` /
+`link.exe`) for the final object-file → executable step rather than bundling a linker
+(e.g. lld). A system C linker is near-universally available on developer machines in a
+way LLVM itself is not, so this is a narrow, deliberate exception — not a violation of
+intent. If this proves painful in practice (e.g. bare-metal targets with no `cc`),
+bundling lld can be revisited.
+
+### First codegen slice — explicit scope
+
+The first codegen slice is deliberately minimal to isolate two independent risk vectors:
+
+1. **Pipeline-plumbing risk** — build system, object-file generation, linking, target
+   triples, and the driver loop in `main.rs` are all being exercised for the first time.
+2. **Type-lowering risk** — struct layout, ABI choices, method dispatch convention.
+
+Attempting both simultaneously on the first PR creates too much simultaneous surface area
+with no clear midpoint milestone.
+
+**Slice 1 (first PR):** primitive types and literals (`i32`, `f64`, `bool`, `()`),
+arithmetic / comparison / logical operators, free function calls (no methods, no `self`),
+`if` / `else`, `while`, `loop`, `let` bindings, `return`.
+
+**Slice 2 (subsequent PR):** struct layout and instantiation, impl-block method dispatch,
+field reads and writes.
+
+This boundary maps cleanly to what the typechecker already phase-1-checks vs. what it
+defers: slice 1 consists entirely of constructs the typechecker fully resolves today.
+
+### Ty::Error / Deferred gate
+
+Codegen is gated behind a hard structural check in `main.rs`: if `typechecker::infer()`
+returns `Err`, or if `InferResult::has_deferred()` is true, codegen is never invoked.
+The driver prints which unsupported construct(s) are present (via the deferred diagnostic
+list) and exits without attempting compilation.
+
+This is a hard gate at **one call site**, not defensive `Ty::Error` checks scattered
+across codegen lowering functions. Reasons:
+
+- Codegen can be written assuming every `Ty` it sees is fully resolved — no lowering
+  function needs to handle `Ty::Error` as a defensive case.
+- Same "one place enforces the invariant" pattern already established for whole-program
+  declaration collection (see cross-cutting pattern §2).
+- Same discipline as the tail-position-transparency lesson (cross-cutting pattern §3):
+  pillar 1 means stopping and saying so clearly, never quietly degrading.
 
 ---
 
