@@ -278,6 +278,32 @@ item for this pattern.
 **Quick test:** if wrapping the flagged expression in `{ … }` or `if true { … } else { … }`
 makes the check silent, it is a pillar-1 violation.
 
+### 4. Submodule-split precedent — when and why to extract
+
+Two phases have established the same extraction pattern:
+
+| Phase | Current submodules |
+|-------|--------------------|
+| `src/parser/` | `mod.rs`, `item.rs`, `expr.rs`, `stmt.rs`, `types.rs`, `control_flow.rs`, `pattern.rs`, `error.rs` |
+| `src/typechecker/infer/` | `mod.rs`, `expr.rs`, `stmt.rs`, `ops.rs`, `convert.rs`, `self_access.rs` |
+
+The bar for extraction is **self-contained subsystem**, not file size alone:
+
+- **PR #21** — typechecker `infer.rs` (single file) split into `infer/mod.rs` + submodules after phase 1 was complete and the internal boundaries were stable. Splitting before that point would have created churn.
+- **PR #23** — `ast/mod.rs` split into `ast/{item,expr,stmt,ty,pattern}.rs` by the same logic once all AST node types were settled.
+- **PR #29** — §18 self-access scanning (198 lines, 10 items) extracted from `infer/mod.rs` into `infer/self_access.rs`. Trigger: the subsystem had a single entry point (`infer_self_access_mode`), zero dependencies on `mod.rs` orchestration concerns, and one qualified call site — a clean seam.
+
+**The decision model (from the modularization health check, 2026-07-16):**
+
+A file is a split candidate if and only if it contains a block of items that:
+1. Has a single well-named entry point callable from outside.
+2. Has no dependency on the surrounding file's private state (orchestration, scope stack, pass-control variables).
+3. Can be stated as a named concern ("§18 self-access-mode scanning"), not just "a bunch of helpers."
+
+Size is a signal, not the criterion. `infer/mod.rs` at 1088 lines is not a split candidate because ~640 lines are tests (which use private helpers and must stay co-located) and the remaining ~445 lines are the correct nucleus for a `mod.rs`: orchestration, collection passes, and `pub(super)` helpers that every sibling submodule calls. Moving those helpers into a `helpers.rs` would create a file that every submodule imports — that is noise, not separation of concerns.
+
+When assessing future candidates, ask: "can I name the subsystem as a domain concept, and does it have a clean single-function interface to the rest of the module?" If yes, extract. If not, leave it.
+
 ---
 
 ## Not yet designed
@@ -313,3 +339,4 @@ See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 | Add a pass-1 declaration check | `src/typechecker/infer/mod.rs` (`collect_*` fns) |
 | Check Copy-eligibility for a type | `is_copy()` in `src/typechecker/infer/mod.rs` |
 | Understand the tail-position transparency pattern | `check_tail_field_own_non_copy` in `src/typechecker/infer/mod.rs` |
+| Decide whether to split a file into submodules | Architecture §4 (submodule-split precedent) |
