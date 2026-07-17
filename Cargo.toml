@@ -14,3 +14,6 @@ inkwell = { version = "0.9", features = ["llvm18-1"], optional = true }
 
 [features]
 codegen = ["inkwell"]
+
+[profile.dev]
+lto = "thin"

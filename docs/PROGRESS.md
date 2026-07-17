@@ -54,6 +54,18 @@ with three settled design decisions from a pillar-alignment session.
 1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
 2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment
    at wildcard arm in `src/typechecker/infer/mod.rs`; blocked on §21 typechecker support.
+3. **LLVM dev build targets X86+AMDGPU only.** The local development LLVM (vovkos
+   llvm-package-windows 18.1.8, `C:\LLVM18`) only includes X86 and AMDGPU backends.
+   This is sufficient for PR 30/31/32 (all host-native x86-64 development), but is a
+   real gap relative to the LLVM-over-Cranelift decision, which was justified specifically
+   by multi-platform reach including ARM/RISC-V for the microcontroller niche.
+   Before any embedded/cross-compilation work begins, this needs a dedicated session to
+   decide: (a) build a full-target LLVM for CI/release (required regardless — the
+   distributed binary must support cross-compilation targets the dev convenience build
+   doesn't); (b) confirm the dev/release LLVM split doesn't silently mask target-support
+   gaps until someone tries to compile for ARM. `[profile.dev] lto = "thin"` in
+   Cargo.toml works around the missing-symbol linker errors in debug builds by
+   dead-stripping the unused `initialize_*` target functions from inkwell.
 
 **Pending / next steps:**
 
