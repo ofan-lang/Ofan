@@ -57,7 +57,7 @@ fn main() {
                 let out = args.source.with_file_name(stem)
                     .with_extension(std::env::consts::EXE_EXTENSION);
                 let ctx = LlvmContext::new();
-                if let Err(e) = ctx.emit_hardcoded_main(&out) {
+                if let Err(e) = ctx.emit(&ast, &result, &out) {
                     eprintln!("ofan: codegen error: {e}");
                     std::process::exit(1);
                 }
