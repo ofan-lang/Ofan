@@ -114,6 +114,730 @@ fn unit_value<'ctx>(ctx: &'ctx Context) -> BasicValueEnum<'ctx> {
     ctx.bool_type().const_int(0, false).into()
 }
 
+/// Invariant lowering context for one LLVM function body.
+///
+/// Holds the five parameters that were previously threaded through every
+/// lowering call as separate arguments, eliminating the parameter-threading
+/// problem and the `#[allow(clippy::too_many_arguments)]` suppressions it caused.
+///
+/// Lifetime parameters:
+/// - `'ctx`: LLVM context lifetime — all inkwell types carry this.
+/// - `'b`: borrow lifetime for `module` and `types` references, which live
+///   for one compilation pass but not the entire LLVM context lifetime.
+///
+/// The source-text lifetime `'src` (string slices in `CodegenEnv`, AST nodes)
+/// appears only in method signatures, not as a struct field.
+struct FnLower<'ctx, 'b> {
+    /// IR builder; owned and created fresh per function body.
+    builder: Builder<'ctx>,
+    ctx: &'ctx Context,
+    module: &'b Module<'ctx>,
+    types: &'b InferResult,
+    /// The LLVM function currently being populated; `Copy`.
+    fn_val: FunctionValue<'ctx>,
+}
+
+impl<'ctx, 'b> FnLower<'ctx, 'b> {
+    // ── Alloca hoisting ───────────────────────────────────────────────────────
+
+    /// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT
+    /// builder position.  Callers must ensure this is the function entry block for
+    /// mem2reg eligibility.  Recurses into block-like `Stmt::Expr` so nested lets
+    /// inside if/while/loop bodies are also hoisted.
+    ///
+    /// Shadowing (same name at multiple nesting depths) is deferred to PR 33:
+    /// when a name collision is detected the inner binding falls back to inline
+    /// alloca emission in `lower_stmt`.
+    fn emit_allocas<'src>(
+        &self,
+        stmts: &[Stmt<'src>],
+        env: &mut CodegenEnv<'ctx, 'src>,
+    ) -> Result<(), String> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { name, init, .. } => {
+                    if env.contains_key(*name) {
+                        // Known limitation (PR 33): shadowed bindings reuse the outer alloca.
+                        // A full scope-stack is needed to assign each shadow its own slot.
+                        continue;
+                    }
+                    let ty = self
+                        .types
+                        .type_of(init.span())
+                        .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
+                    let llvm_ty = basic_type(ty, self.ctx)?;
+                    let ptr = self
+                        .builder
+                        .build_alloca(llvm_ty, name)
+                        .map_err(|e| e.to_string())?;
+                    env.insert(*name, (ptr, llvm_ty));
+                }
+                Stmt::Expr { expr, .. } => {
+                    self.emit_allocas_in_expr(expr, env)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Recurse into block-like expressions to hoist their nested `let` allocas.
+    fn emit_allocas_in_expr<'src>(
+        &self,
+        expr: &Expr<'src>,
+        env: &mut CodegenEnv<'ctx, 'src>,
+    ) -> Result<(), String> {
+        match expr {
+            Expr::If { then_block, else_branch, .. } => {
+                self.emit_allocas(&then_block.stmts, env)?;
+                if let Some(tail) = &then_block.tail {
+                    self.emit_allocas_in_expr(tail, env)?;
+                }
+                if let Some(else_expr) = else_branch {
+                    self.emit_allocas_in_expr(else_expr, env)?;
+                }
+            }
+            Expr::While { body, .. } | Expr::Loop { body, .. } => {
+                self.emit_allocas(&body.stmts, env)?;
+                if let Some(tail) = &body.tail {
+                    self.emit_allocas_in_expr(tail, env)?;
+                }
+            }
+            Expr::Block(block) => {
+                self.emit_allocas(&block.stmts, env)?;
+                if let Some(tail) = &block.tail {
+                    self.emit_allocas_in_expr(tail, env)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // ── Block / statement lowering ────────────────────────────────────────────
+
+    /// Lower a braced block. Returns the tail expression value (if any); does NOT emit `ret`.
+    fn lower_block<'src>(
+        &self,
+        block: &Block<'src>,
+        env: &mut CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        for stmt in &block.stmts {
+            self.lower_stmt(stmt, env, loop_ctx)?;
+            if self
+                .builder
+                .get_insert_block()
+                .and_then(|b| b.get_terminator())
+                .is_some()
+            {
+                return Ok(None); // break / continue / return terminated this path
+            }
+        }
+        match &block.tail {
+            Some(tail) => self.lower_expr(tail, env, loop_ctx).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn lower_stmt<'src>(
+        &self,
+        stmt: &Stmt<'src>,
+        env: &mut CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<(), String> {
+        match stmt {
+            Stmt::Let { name, init, .. } => {
+                let val = self.lower_expr(init, env, loop_ctx)?;
+                // Use the pre-hoisted alloca if available; otherwise emit inline (nested block).
+                let (ptr, _) = if let Some(&entry) = env.get(*name) {
+                    entry
+                } else {
+                    let ty = self
+                        .types
+                        .type_of(init.span())
+                        .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
+                    let llvm_ty = basic_type(ty, self.ctx)?;
+                    let ptr = self
+                        .builder
+                        .build_alloca(llvm_ty, name)
+                        .map_err(|e| e.to_string())?;
+                    env.insert(*name, (ptr, llvm_ty));
+                    (ptr, llvm_ty)
+                };
+                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+            }
+
+            Stmt::Assign { target, op, value, .. } => {
+                let Expr::Ident(name, _) = target.as_ref() else {
+                    return Err(
+                        "assignment to non-identifier targets not supported in PR 32".to_string(),
+                    );
+                };
+                let &(ptr, llvm_ty) = env
+                    .get(*name)
+                    .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
+                let rhs = self.lower_expr(value, env, loop_ctx)?;
+                let new_val = match op {
+                    None => rhs,
+                    Some(binop) => {
+                        let assign_ty =
+                            self.types.type_of(target.span()).ok_or_else(|| {
+                                format!("missing type for assignment target `{name}`")
+                            })?;
+                        let current = self
+                            .builder
+                            .build_load(llvm_ty, ptr, "load")
+                            .map_err(|e| e.to_string())?;
+                        self.lower_binary(*binop, current, rhs, assign_ty)?
+                    }
+                };
+                self.builder.build_store(ptr, new_val).map_err(|e| e.to_string())?;
+            }
+
+            Stmt::Return { value: Some(expr), .. } => {
+                let val = self.lower_expr(expr, env, loop_ctx)?;
+                self.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
+            }
+            Stmt::Return { value: None, .. } => {
+                self.builder.build_return(None).map_err(|e| e.to_string())?;
+            }
+
+            Stmt::Break { value: Some(_), .. } => {
+                return Err(
+                    "break with value not supported in PR 32 — assign to a variable before breaking"
+                        .to_string(),
+                );
+            }
+            Stmt::Break { value: None, .. } => {
+                let lctx = loop_ctx.ok_or_else(|| {
+                    "ICE: break outside loop — should be caught by the typechecker".to_string()
+                })?;
+                self.builder
+                    .build_unconditional_branch(lctx.break_bb)
+                    .map_err(|e| e.to_string())?;
+            }
+            Stmt::Continue { .. } => {
+                let lctx = loop_ctx.ok_or_else(|| {
+                    "ICE: continue outside loop — should be caught by the typechecker".to_string()
+                })?;
+                self.builder
+                    .build_unconditional_branch(lctx.continue_bb)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            Stmt::Expr { expr, .. } => {
+                self.lower_expr(expr, env, loop_ctx)?;
+            }
+
+            other => {
+                return Err(format!(
+                    "statement not supported in PR 32 (at byte {}): \
+                     `const` and other forms land in a later PR",
+                    stmt_span_start(other)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ── Expression lowering ───────────────────────────────────────────────────
+
+    fn lower_expr<'src>(
+        &self,
+        expr: &Expr<'src>,
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match expr {
+            Expr::Literal(lit, span) => {
+                let ty = self
+                    .types
+                    .type_of(*span)
+                    .ok_or_else(|| "missing type for literal".to_string())?;
+                match (lit, ty) {
+                    (Literal::Integer(n), Ty::I32) => {
+                        if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
+                            return Err(format!(
+                                "integer literal {n} out of range for i32 at byte {}: \
+                                 valid range {}..={} — annotate the wider type when it lands",
+                                span.start,
+                                i32::MIN,
+                                i32::MAX
+                            ));
+                        }
+                        Ok(self.ctx.i32_type().const_int(*n as u64, true).into())
+                    }
+                    (Literal::Float(f), Ty::F64) => {
+                        Ok(self.ctx.f64_type().const_float(*f).into())
+                    }
+                    (Literal::Bool(b), Ty::Bool) => {
+                        Ok(self.ctx.bool_type().const_int(*b as u64, false).into())
+                    }
+                    (lit, ty) => Err(format!("unsupported literal/type: {lit:?} : {ty}")),
+                }
+            }
+
+            Expr::Ident(name, _) => {
+                let &(ptr, llvm_ty) = env
+                    .get(*name)
+                    .ok_or_else(|| format!("undefined variable in codegen: `{name}`"))?;
+                self.builder
+                    .build_load(llvm_ty, ptr, name)
+                    .map_err(|e| e.to_string())
+            }
+
+            Expr::Binary { op, left, right, .. } => {
+                let lv = self.lower_expr(left, env, loop_ctx)?;
+                let rv = self.lower_expr(right, env, loop_ctx)?;
+                let operand_ty = self
+                    .types
+                    .type_of(left.span())
+                    .ok_or_else(|| "missing type for binary left operand".to_string())?;
+                self.lower_binary(*op, lv, rv, operand_ty)
+            }
+
+            Expr::Unary { op, expr: inner, .. } => {
+                let val = self.lower_expr(inner, env, loop_ctx)?;
+                let ty = self
+                    .types
+                    .type_of(inner.span())
+                    .ok_or_else(|| "missing type for unary operand".to_string())?;
+                match (op, ty) {
+                    (UnaryOp::Neg, Ty::I32) => self
+                        .builder
+                        .build_int_neg(val.into_int_value(), "neg")
+                        .map_err(|e| e.to_string())
+                        .map(Into::into),
+                    (UnaryOp::Neg, Ty::F64) => self
+                        .builder
+                        .build_float_neg(val.into_float_value(), "fneg")
+                        .map_err(|e| e.to_string())
+                        .map(Into::into),
+                    (UnaryOp::Not, Ty::Bool) => self
+                        .builder
+                        .build_not(val.into_int_value(), "not")
+                        .map_err(|e| e.to_string())
+                        .map(Into::into),
+                    (op, ty) => Err(format!("unsupported unary op: {op:?} on {ty}")),
+                }
+            }
+
+            Expr::If { condition, then_block, else_branch, span } => {
+                let cond_val = self
+                    .lower_expr(condition, env, loop_ctx)?
+                    .into_int_value();
+
+                let if_ty = self.types.type_of(*span);
+                let is_unit = matches!(if_ty, None | Some(Ty::Unit));
+
+                let then_bb = self.ctx.append_basic_block(self.fn_val, "if.then");
+                let merge_bb = self.ctx.append_basic_block(self.fn_val, "if.merge");
+
+                if let Some(else_expr) = else_branch {
+                    let else_bb = self.ctx.append_basic_block(self.fn_val, "if.else");
+                    self.builder
+                        .build_conditional_branch(cond_val, then_bb, else_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    // then branch
+                    self.builder.position_at_end(then_bb);
+                    let mut then_env = env.clone();
+                    let then_tail =
+                        self.lower_block(then_block, &mut then_env, loop_ctx)?;
+                    let then_exit_bb = self.builder.get_insert_block().unwrap();
+                    let then_flows = then_exit_bb.get_terminator().is_none();
+                    if then_flows {
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| e.to_string())?;
+                    }
+
+                    // else branch
+                    self.builder.position_at_end(else_bb);
+                    let else_env = env.clone();
+                    let else_val = self.lower_expr(else_expr, &else_env, loop_ctx)?;
+                    let else_exit_bb = self.builder.get_insert_block().unwrap();
+                    let else_flows = else_exit_bb.get_terminator().is_none();
+                    if else_flows {
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| e.to_string())?;
+                    }
+
+                    self.builder.position_at_end(merge_bb);
+
+                    // Unit if or both arms terminate early → no phi needed.
+                    if is_unit || (!then_flows && !else_flows) {
+                        return Ok(unit_value(self.ctx));
+                    }
+
+                    // Value-producing if/else: emit phi node.
+                    let llvm_ty = basic_type(if_ty.unwrap(), self.ctx)?;
+                    let phi = self
+                        .builder
+                        .build_phi(llvm_ty, "if.val")
+                        .map_err(|e| e.to_string())?;
+                    if then_flows {
+                        let tv = then_tail.unwrap_or_else(|| unit_value(self.ctx));
+                        phi.add_incoming(&[(&tv as &dyn BasicValue<'ctx>, then_exit_bb)]);
+                    }
+                    if else_flows {
+                        phi.add_incoming(&[(&else_val as &dyn BasicValue<'ctx>, else_exit_bb)]);
+                    }
+                    Ok(phi.as_basic_value())
+                } else {
+                    // No else branch → always Unit.
+                    self.builder
+                        .build_conditional_branch(cond_val, then_bb, merge_bb)
+                        .map_err(|e| e.to_string())?;
+                    self.builder.position_at_end(then_bb);
+                    let mut then_env = env.clone();
+                    self.lower_block(then_block, &mut then_env, loop_ctx)?;
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .and_then(|b| b.get_terminator())
+                        .is_none()
+                    {
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    self.builder.position_at_end(merge_bb);
+                    Ok(unit_value(self.ctx))
+                }
+            }
+
+            Expr::While { condition, body, .. } => {
+                let header_bb = self.ctx.append_basic_block(self.fn_val, "while.cond");
+                let body_bb = self.ctx.append_basic_block(self.fn_val, "while.body");
+                let exit_bb = self.ctx.append_basic_block(self.fn_val, "while.exit");
+
+                self.builder
+                    .build_unconditional_branch(header_bb)
+                    .map_err(|e| e.to_string())?;
+
+                self.builder.position_at_end(header_bb);
+                let cond_val = self
+                    .lower_expr(condition, env, loop_ctx)?
+                    .into_int_value();
+                self.builder
+                    .build_conditional_branch(cond_val, body_bb, exit_bb)
+                    .map_err(|e| e.to_string())?;
+
+                self.builder.position_at_end(body_bb);
+                let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: header_bb };
+                let mut body_env = env.clone();
+                self.lower_block(body, &mut body_env, Some(&inner_lctx))?;
+                if self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_terminator())
+                    .is_none()
+                {
+                    self.builder
+                        .build_unconditional_branch(header_bb)
+                        .map_err(|e| e.to_string())?;
+                }
+
+                self.builder.position_at_end(exit_bb);
+                Ok(unit_value(self.ctx))
+            }
+
+            Expr::Loop { body, .. } => {
+                let loop_bb = self.ctx.append_basic_block(self.fn_val, "loop.body");
+                let exit_bb = self.ctx.append_basic_block(self.fn_val, "loop.exit");
+
+                self.builder
+                    .build_unconditional_branch(loop_bb)
+                    .map_err(|e| e.to_string())?;
+                self.builder.position_at_end(loop_bb);
+
+                let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: loop_bb };
+                let mut body_env = env.clone();
+                self.lower_block(body, &mut body_env, Some(&inner_lctx))?;
+                if self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_terminator())
+                    .is_none()
+                {
+                    self.builder
+                        .build_unconditional_branch(loop_bb)
+                        .map_err(|e| e.to_string())?;
+                }
+
+                self.builder.position_at_end(exit_bb);
+                Ok(unit_value(self.ctx))
+            }
+
+            Expr::Block(block) => {
+                let mut block_env = env.clone();
+                match self.lower_block(block, &mut block_env, loop_ctx)? {
+                    Some(val) => Ok(val),
+                    None => Ok(unit_value(self.ctx)),
+                }
+            }
+
+            Expr::Call { callee, args, .. } => {
+                let Expr::Ident(name, _) = callee.as_ref() else {
+                    return Err(
+                        "only direct function calls supported in PR 32 (no closures or fn pointers)"
+                            .to_string(),
+                    );
+                };
+                let callee_fn = self.module.get_function(name).ok_or_else(|| {
+                    format!("undefined function `{name}` — declare it before calling")
+                })?;
+                let arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = args
+                    .iter()
+                    .map(|a| self.lower_expr(a, env, loop_ctx).map(Into::into))
+                    .collect::<Result<_, _>>()?;
+                let call_site = self
+                    .builder
+                    .build_call(callee_fn, &arg_vals, "call")
+                    .map_err(|e| e.to_string())?;
+                // Void calls return unit_value; value-returning calls return the result.
+                Ok(call_site.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
+            }
+
+            _ => Err(format!(
+                "expression not supported in PR 32 (at byte {}): \
+                 field access, method calls, match, for, cast, and borrow land in later PRs",
+                expr.span().start
+            )),
+        }
+    }
+
+    // ── Binary op lowering ────────────────────────────────────────────────────
+
+    fn lower_binary(
+        &self,
+        op: BinOp,
+        lv: BasicValueEnum<'ctx>,
+        rv: BasicValueEnum<'ctx>,
+        operand_ty: &Ty,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match operand_ty {
+            Ty::I32 => {
+                let l = lv.into_int_value();
+                let r = rv.into_int_value();
+                Ok(match op {
+                    BinOp::Add => self
+                        .builder
+                        .build_int_add(l, r, "add")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Sub => self
+                        .builder
+                        .build_int_sub(l, r, "sub")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Mul => self
+                        .builder
+                        .build_int_mul(l, r, "mul")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    // Div/Mod: runtime zero-divisor check → calls libc abort() (pillar 1).
+                    BinOp::Div => self.emit_int_div_or_rem(l, r, false)?,
+                    BinOp::Mod => self.emit_int_div_or_rem(l, r, true)?,
+                    BinOp::Eq => self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, l, r, "eq")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Ne => self
+                        .builder
+                        .build_int_compare(IntPredicate::NE, l, r, "ne")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Lt => self
+                        .builder
+                        .build_int_compare(IntPredicate::SLT, l, r, "lt")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Gt => self
+                        .builder
+                        .build_int_compare(IntPredicate::SGT, l, r, "gt")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Le => self
+                        .builder
+                        .build_int_compare(IntPredicate::SLE, l, r, "le")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Ge => self
+                        .builder
+                        .build_int_compare(IntPredicate::SGE, l, r, "ge")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    _ => return Err(format!("operator {op:?} not supported for i32")),
+                })
+            }
+            Ty::F64 => {
+                let l = lv.into_float_value();
+                let r = rv.into_float_value();
+                // f64 div/mod: IEEE 754 defines ÷0 as ±inf/NaN — not UB, no abort needed.
+                Ok(match op {
+                    BinOp::Add => self
+                        .builder
+                        .build_float_add(l, r, "fadd")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Sub => self
+                        .builder
+                        .build_float_sub(l, r, "fsub")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Mul => self
+                        .builder
+                        .build_float_mul(l, r, "fmul")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Div => self
+                        .builder
+                        .build_float_div(l, r, "fdiv")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Mod => self
+                        .builder
+                        .build_float_rem(l, r, "frem")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Eq => self
+                        .builder
+                        .build_float_compare(FloatPredicate::OEQ, l, r, "feq")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Ne => self
+                        .builder
+                        .build_float_compare(FloatPredicate::ONE, l, r, "fne")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Lt => self
+                        .builder
+                        .build_float_compare(FloatPredicate::OLT, l, r, "flt")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Gt => self
+                        .builder
+                        .build_float_compare(FloatPredicate::OGT, l, r, "fgt")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Le => self
+                        .builder
+                        .build_float_compare(FloatPredicate::OLE, l, r, "fle")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Ge => self
+                        .builder
+                        .build_float_compare(FloatPredicate::OGE, l, r, "fge")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    _ => return Err(format!("operator {op:?} not supported for f64")),
+                })
+            }
+            Ty::Bool => {
+                let l = lv.into_int_value();
+                let r = rv.into_int_value();
+                Ok(match op {
+                    BinOp::And => self
+                        .builder
+                        .build_and(l, r, "and")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    BinOp::Or => self
+                        .builder
+                        .build_or(l, r, "or")
+                        .map_err(|e| e.to_string())?
+                        .into(),
+                    _ => return Err(format!("operator {op:?} not supported for bool")),
+                })
+            }
+            ty => Err(format!("binary op on unsupported type: {ty}")),
+        }
+    }
+
+    /// Emit an i32 div or rem with a runtime zero-divisor check.
+    /// Zero divisor → calls libc `abort()` and marks the block unreachable.
+    /// Pillar 1: explicit runtime panic, never silent UB.
+    fn emit_int_div_or_rem(
+        &self,
+        l: IntValue<'ctx>,
+        r: IntValue<'ctx>,
+        is_rem: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let abort_fn = self.get_or_declare_abort();
+        // Guard 1: divide by zero.
+        let zero = self.ctx.i32_type().const_zero();
+        let is_zero = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, r, zero, "divz")
+            .map_err(|e| e.to_string())?;
+        // Guard 2: INT_MIN / -1 is signed overflow → LLVM poison.
+        // -1 as u64 gives the correct bit pattern for const_int on an i32 type.
+        let neg_one = self.ctx.i32_type().const_int(u64::MAX, false);
+        let int_min = self.ctx.i32_type().const_int(i32::MIN as u64, false);
+        let r_is_neg_one = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, r, neg_one, "neg1")
+            .map_err(|e| e.to_string())?;
+        let l_is_int_min = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, l, int_min, "minval")
+            .map_err(|e| e.to_string())?;
+        let is_overflow = self
+            .builder
+            .build_and(r_is_neg_one, l_is_int_min, "overflow")
+            .map_err(|e| e.to_string())?;
+        let is_bad = self
+            .builder
+            .build_or(is_zero, is_overflow, "divbad")
+            .map_err(|e| e.to_string())?;
+
+        let abort_bb = self.ctx.append_basic_block(self.fn_val, "div.abort");
+        let ok_bb = self.ctx.append_basic_block(self.fn_val, "div.ok");
+        self.builder
+            .build_conditional_branch(is_bad, abort_bb, ok_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(abort_bb);
+        self.builder.build_call(abort_fn, &[], "").map_err(|e| e.to_string())?;
+        self.builder.build_unreachable().map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(ok_bb);
+        if is_rem {
+            Ok(self
+                .builder
+                .build_int_signed_rem(l, r, "rem")
+                .map_err(|e| e.to_string())?
+                .into())
+        } else {
+            Ok(self
+                .builder
+                .build_int_signed_div(l, r, "div")
+                .map_err(|e| e.to_string())?
+                .into())
+        }
+    }
+
+    fn get_or_declare_abort(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("abort") {
+            return f;
+        }
+        let ty = self.ctx.void_type().fn_type(&[], false);
+        let f = self.module.add_function("abort", ty, Some(Linkage::External));
+        // Mark noreturn so LLVM knows code after the call is unreachable (not UB-shaped).
+        let noreturn =
+            self.ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
+        f.add_attribute(AttributeLoc::Function, noreturn);
+        f
+    }
+}
+
+// ─── Module-level orchestration ───────────────────────────────────────────────
+
 fn lower_to_module<'ctx>(
     ctx: &'ctx Context,
     ast: &Ast<'_>,
@@ -159,11 +883,12 @@ fn declare_function_sig<'ctx>(
     Ok(())
 }
 
-fn lower_function<'ctx, 'src>(
+/// Construct an `FnLower` for `func` and drive the lowering of its body.
+fn lower_function<'ctx, 'b, 'src>(
     func: &FunctionDef<'src>,
-    types: &InferResult,
+    types: &'b InferResult,
     ctx: &'ctx Context,
-    module: &Module<'ctx>,
+    module: &'b Module<'ctx>,
 ) -> Result<(), String> {
     // Retrieve the pre-declared LLVM function from pass 1.
     let fn_val = module
@@ -174,6 +899,7 @@ fn lower_function<'ctx, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
+    let lower = FnLower { builder, ctx, module, types, fn_val };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     // Phase 1: emit all allocas at the entry block top (canonical mem2reg form).
@@ -182,26 +908,28 @@ fn lower_function<'ctx, 'src>(
         Vec::new();
     for param in &func.params {
         let llvm_ty = basic_type_from_ast(&param.ty, ctx)?;
-        let ptr = builder
+        let ptr = lower
+            .builder
             .build_alloca(llvm_ty, param.name)
             .map_err(|e| e.to_string())?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
-    emit_allocas(&func.body.stmts, &builder, types, ctx, &mut env)?;
+    lower.emit_allocas(&func.body.stmts, &mut env)?;
 
     // Phase 2: store param values into their allocas (after all alloca instructions).
     for (i, (name, ptr, llvm_ty)) in param_alloca_entries.into_iter().enumerate() {
         let param_val = fn_val
             .get_nth_param(i as u32)
             .ok_or_else(|| format!("ICE: missing param {i} for `{}`", func.name))?;
-        builder.build_store(ptr, param_val).map_err(|e| e.to_string())?;
+        lower.builder.build_store(ptr, param_val).map_err(|e| e.to_string())?;
         env.insert(name, (ptr, llvm_ty));
     }
 
     // Phase 3: lower body statements.
     for stmt in &func.body.stmts {
-        lower_stmt(stmt, &builder, types, ctx, module, fn_val, &mut env, None)?;
-        if builder
+        lower.lower_stmt(stmt, &mut env, None)?;
+        if lower
+            .builder
             .get_insert_block()
             .and_then(|b| b.get_terminator())
             .is_some()
@@ -211,21 +939,19 @@ fn lower_function<'ctx, 'src>(
     }
 
     // Phase 4: tail expression → return instruction (only when no explicit terminator).
-    if builder
+    if lower
+        .builder
         .get_insert_block()
         .and_then(|b| b.get_terminator())
         .is_none()
     {
         if func.return_ty.is_none() {
-            builder.build_return(None).map_err(|e| e.to_string())?;
+            lower.builder.build_return(None).map_err(|e| e.to_string())?;
         } else {
             match &func.body.tail {
                 Some(tail) => {
-                    let val =
-                        lower_expr(tail, &builder, types, ctx, module, fn_val, &env, None)?;
-                    builder
-                        .build_return(Some(&val))
-                        .map_err(|e| e.to_string())?;
+                    let val = lower.lower_expr(tail, &env, None)?;
+                    lower.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
                 }
                 None => {
                     return Err(format!(
@@ -237,214 +963,6 @@ fn lower_function<'ctx, 'src>(
         }
     }
 
-    Ok(())
-}
-
-/// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT builder
-/// position.  Callers must ensure this is the function entry block for mem2reg eligibility.
-/// Recurses into block-like `Stmt::Expr` so nested lets inside if/while/loop bodies are
-/// also hoisted.  Shadowing (same name at multiple nesting depths) is deferred to PR 33:
-/// when a name collision is detected the inner binding falls back to inline alloca emission
-/// in `lower_stmt`.
-fn emit_allocas<'ctx, 'src>(
-    stmts: &[Stmt<'src>],
-    builder: &Builder<'ctx>,
-    types: &InferResult,
-    ctx: &'ctx Context,
-    env: &mut CodegenEnv<'ctx, 'src>,
-) -> Result<(), String> {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Let { name, init, .. } => {
-                if env.contains_key(*name) {
-                    // Known limitation (PR 33): shadowed bindings reuse the outer alloca.
-                    // A full scope-stack is needed to assign each shadow its own slot.
-                    continue;
-                }
-                let ty = types
-                    .type_of(init.span())
-                    .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                let llvm_ty = basic_type(ty, ctx)?;
-                let ptr = builder
-                    .build_alloca(llvm_ty, name)
-                    .map_err(|e| e.to_string())?;
-                env.insert(*name, (ptr, llvm_ty));
-            }
-            Stmt::Expr { expr, .. } => {
-                emit_allocas_in_expr(expr, builder, types, ctx, env)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Recurse into block-like expressions to hoist their nested `let` allocas.
-fn emit_allocas_in_expr<'ctx, 'src>(
-    expr: &Expr<'src>,
-    builder: &Builder<'ctx>,
-    types: &InferResult,
-    ctx: &'ctx Context,
-    env: &mut CodegenEnv<'ctx, 'src>,
-) -> Result<(), String> {
-    match expr {
-        Expr::If { then_block, else_branch, .. } => {
-            emit_allocas(&then_block.stmts, builder, types, ctx, env)?;
-            if let Some(tail) = &then_block.tail {
-                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
-            }
-            if let Some(else_expr) = else_branch {
-                emit_allocas_in_expr(else_expr, builder, types, ctx, env)?;
-            }
-        }
-        Expr::While { body, .. } | Expr::Loop { body, .. } => {
-            emit_allocas(&body.stmts, builder, types, ctx, env)?;
-            if let Some(tail) = &body.tail {
-                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
-            }
-        }
-        Expr::Block(block) => {
-            emit_allocas(&block.stmts, builder, types, ctx, env)?;
-            if let Some(tail) = &block.tail {
-                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Lower a braced block. Returns the tail expression value (if any); does NOT emit `ret`.
-#[allow(clippy::too_many_arguments)]
-fn lower_block<'ctx, 'src>(
-    block: &Block<'src>,
-    builder: &Builder<'ctx>,
-    types: &InferResult,
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    fn_val: FunctionValue<'ctx>,
-    env: &mut CodegenEnv<'ctx, 'src>,
-    loop_ctx: Option<&LoopCtx<'ctx>>,
-) -> Result<Option<BasicValueEnum<'ctx>>, String> {
-    for stmt in &block.stmts {
-        lower_stmt(stmt, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-        if builder
-            .get_insert_block()
-            .and_then(|b| b.get_terminator())
-            .is_some()
-        {
-            return Ok(None); // break / continue / return terminated this path
-        }
-    }
-    match &block.tail {
-        Some(tail) => {
-            lower_expr(tail, builder, types, ctx, module, fn_val, env, loop_ctx).map(Some)
-        }
-        None => Ok(None),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_stmt<'ctx, 'src>(
-    stmt: &Stmt<'src>,
-    builder: &Builder<'ctx>,
-    types: &InferResult,
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    fn_val: FunctionValue<'ctx>,
-    env: &mut CodegenEnv<'ctx, 'src>,
-    loop_ctx: Option<&LoopCtx<'ctx>>,
-) -> Result<(), String> {
-    match stmt {
-        Stmt::Let { name, init, .. } => {
-            let val = lower_expr(init, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            // Use the pre-hoisted alloca if available; otherwise emit inline (nested block).
-            let (ptr, _) = if let Some(&entry) = env.get(*name) {
-                entry
-            } else {
-                let ty = types
-                    .type_of(init.span())
-                    .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                let llvm_ty = basic_type(ty, ctx)?;
-                let ptr = builder
-                    .build_alloca(llvm_ty, name)
-                    .map_err(|e| e.to_string())?;
-                env.insert(*name, (ptr, llvm_ty));
-                (ptr, llvm_ty)
-            };
-            builder.build_store(ptr, val).map_err(|e| e.to_string())?;
-        }
-
-        Stmt::Assign { target, op, value, .. } => {
-            let Expr::Ident(name, _) = target.as_ref() else {
-                return Err(
-                    "assignment to non-identifier targets not supported in PR 32".to_string(),
-                );
-            };
-            let &(ptr, llvm_ty) = env
-                .get(*name)
-                .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
-            let rhs = lower_expr(value, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            let new_val = match op {
-                None => rhs,
-                Some(binop) => {
-                    let assign_ty = types.type_of(target.span()).ok_or_else(|| {
-                        format!("missing type for assignment target `{name}`")
-                    })?;
-                    let current = builder
-                        .build_load(llvm_ty, ptr, "load")
-                        .map_err(|e| e.to_string())?;
-                    lower_binary(*binop, current, rhs, assign_ty, builder, ctx, module, fn_val)?
-                }
-            };
-            builder.build_store(ptr, new_val).map_err(|e| e.to_string())?;
-        }
-
-        Stmt::Return { value: Some(expr), .. } => {
-            let val = lower_expr(expr, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            builder
-                .build_return(Some(&val))
-                .map_err(|e| e.to_string())?;
-        }
-        Stmt::Return { value: None, .. } => {
-            builder.build_return(None).map_err(|e| e.to_string())?;
-        }
-
-        Stmt::Break { value: Some(_), .. } => {
-            return Err(
-                "break with value not supported in PR 32 — assign to a variable before breaking"
-                    .to_string(),
-            );
-        }
-        Stmt::Break { value: None, .. } => {
-            let lctx = loop_ctx.ok_or_else(|| {
-                "ICE: break outside loop — should be caught by the typechecker".to_string()
-            })?;
-            builder
-                .build_unconditional_branch(lctx.break_bb)
-                .map_err(|e| e.to_string())?;
-        }
-        Stmt::Continue { .. } => {
-            let lctx = loop_ctx.ok_or_else(|| {
-                "ICE: continue outside loop — should be caught by the typechecker".to_string()
-            })?;
-            builder
-                .build_unconditional_branch(lctx.continue_bb)
-                .map_err(|e| e.to_string())?;
-        }
-
-        Stmt::Expr { expr, .. } => {
-            lower_expr(expr, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-        }
-
-        other => {
-            return Err(format!(
-                "statement not supported in PR 32 (at byte {}): \
-                 `const` and other forms land in a later PR",
-                stmt_span_start(other)
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -460,483 +978,6 @@ fn stmt_span_start(stmt: &Stmt<'_>) -> usize {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn lower_expr<'ctx, 'src>(
-    expr: &Expr<'src>,
-    builder: &Builder<'ctx>,
-    types: &InferResult,
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    fn_val: FunctionValue<'ctx>,
-    env: &CodegenEnv<'ctx, 'src>,
-    loop_ctx: Option<&LoopCtx<'ctx>>,
-) -> Result<BasicValueEnum<'ctx>, String> {
-    match expr {
-        Expr::Literal(lit, span) => {
-            let ty = types
-                .type_of(*span)
-                .ok_or_else(|| "missing type for literal".to_string())?;
-            match (lit, ty) {
-                (Literal::Integer(n), Ty::I32) => {
-                    if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                        return Err(format!(
-                            "integer literal {n} out of range for i32 at byte {}: \
-                             valid range {}..={} — annotate the wider type when it lands",
-                            span.start,
-                            i32::MIN,
-                            i32::MAX
-                        ));
-                    }
-                    Ok(ctx.i32_type().const_int(*n as u64, true).into())
-                }
-                (Literal::Float(f), Ty::F64) => Ok(ctx.f64_type().const_float(*f).into()),
-                (Literal::Bool(b), Ty::Bool) => {
-                    Ok(ctx.bool_type().const_int(*b as u64, false).into())
-                }
-                (lit, ty) => Err(format!("unsupported literal/type: {lit:?} : {ty}")),
-            }
-        }
-
-        Expr::Ident(name, _) => {
-            let &(ptr, llvm_ty) = env
-                .get(*name)
-                .ok_or_else(|| format!("undefined variable in codegen: `{name}`"))?;
-            builder
-                .build_load(llvm_ty, ptr, name)
-                .map_err(|e| e.to_string())
-        }
-
-        Expr::Binary { op, left, right, .. } => {
-            let lv = lower_expr(left, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            let rv = lower_expr(right, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            let operand_ty = types
-                .type_of(left.span())
-                .ok_or_else(|| "missing type for binary left operand".to_string())?;
-            lower_binary(*op, lv, rv, operand_ty, builder, ctx, module, fn_val)
-        }
-
-        Expr::Unary { op, expr: inner, .. } => {
-            let val = lower_expr(inner, builder, types, ctx, module, fn_val, env, loop_ctx)?;
-            let ty = types
-                .type_of(inner.span())
-                .ok_or_else(|| "missing type for unary operand".to_string())?;
-            match (op, ty) {
-                (UnaryOp::Neg, Ty::I32) => builder
-                    .build_int_neg(val.into_int_value(), "neg")
-                    .map_err(|e| e.to_string())
-                    .map(Into::into),
-                (UnaryOp::Neg, Ty::F64) => builder
-                    .build_float_neg(val.into_float_value(), "fneg")
-                    .map_err(|e| e.to_string())
-                    .map(Into::into),
-                (UnaryOp::Not, Ty::Bool) => builder
-                    .build_not(val.into_int_value(), "not")
-                    .map_err(|e| e.to_string())
-                    .map(Into::into),
-                (op, ty) => Err(format!("unsupported unary op: {op:?} on {ty}")),
-            }
-        }
-
-        Expr::If { condition, then_block, else_branch, span } => {
-            let cond_val = lower_expr(condition, builder, types, ctx, module, fn_val, env, loop_ctx)?
-                .into_int_value();
-
-            let if_ty = types.type_of(*span);
-            let is_unit = matches!(if_ty, None | Some(Ty::Unit));
-
-            let then_bb = ctx.append_basic_block(fn_val, "if.then");
-            let merge_bb = ctx.append_basic_block(fn_val, "if.merge");
-
-            if let Some(else_expr) = else_branch {
-                let else_bb = ctx.append_basic_block(fn_val, "if.else");
-                builder
-                    .build_conditional_branch(cond_val, then_bb, else_bb)
-                    .map_err(|e| e.to_string())?;
-
-                // then branch
-                builder.position_at_end(then_bb);
-                let mut then_env = env.clone();
-                let then_tail = lower_block(
-                    then_block,
-                    builder,
-                    types,
-                    ctx,
-                    module,
-                    fn_val,
-                    &mut then_env,
-                    loop_ctx,
-                )?;
-                let then_exit_bb = builder.get_insert_block().unwrap();
-                let then_flows = then_exit_bb.get_terminator().is_none();
-                if then_flows {
-                    builder
-                        .build_unconditional_branch(merge_bb)
-                        .map_err(|e| e.to_string())?;
-                }
-
-                // else branch
-                builder.position_at_end(else_bb);
-                let else_env = env.clone();
-                let else_val = lower_expr(
-                    else_expr,
-                    builder,
-                    types,
-                    ctx,
-                    module,
-                    fn_val,
-                    &else_env,
-                    loop_ctx,
-                )?;
-                let else_exit_bb = builder.get_insert_block().unwrap();
-                let else_flows = else_exit_bb.get_terminator().is_none();
-                if else_flows {
-                    builder
-                        .build_unconditional_branch(merge_bb)
-                        .map_err(|e| e.to_string())?;
-                }
-
-                builder.position_at_end(merge_bb);
-
-                // Unit if or both arms terminate early → no phi needed.
-                if is_unit || (!then_flows && !else_flows) {
-                    return Ok(unit_value(ctx));
-                }
-
-                // Value-producing if/else: emit phi node.
-                let llvm_ty = basic_type(if_ty.unwrap(), ctx)?;
-                let phi = builder
-                    .build_phi(llvm_ty, "if.val")
-                    .map_err(|e| e.to_string())?;
-                if then_flows {
-                    let tv = then_tail.unwrap_or_else(|| unit_value(ctx));
-                    phi.add_incoming(&[(&tv as &dyn BasicValue<'ctx>, then_exit_bb)]);
-                }
-                if else_flows {
-                    phi.add_incoming(&[(&else_val as &dyn BasicValue<'ctx>, else_exit_bb)]);
-                }
-                Ok(phi.as_basic_value())
-            } else {
-                // No else branch → always Unit.
-                builder
-                    .build_conditional_branch(cond_val, then_bb, merge_bb)
-                    .map_err(|e| e.to_string())?;
-                builder.position_at_end(then_bb);
-                let mut then_env = env.clone();
-                lower_block(
-                    then_block,
-                    builder,
-                    types,
-                    ctx,
-                    module,
-                    fn_val,
-                    &mut then_env,
-                    loop_ctx,
-                )?;
-                if builder
-                    .get_insert_block()
-                    .and_then(|b| b.get_terminator())
-                    .is_none()
-                {
-                    builder
-                        .build_unconditional_branch(merge_bb)
-                        .map_err(|e| e.to_string())?;
-                }
-                builder.position_at_end(merge_bb);
-                Ok(unit_value(ctx))
-            }
-        }
-
-        Expr::While { condition, body, .. } => {
-            let header_bb = ctx.append_basic_block(fn_val, "while.cond");
-            let body_bb = ctx.append_basic_block(fn_val, "while.body");
-            let exit_bb = ctx.append_basic_block(fn_val, "while.exit");
-
-            builder
-                .build_unconditional_branch(header_bb)
-                .map_err(|e| e.to_string())?;
-
-            builder.position_at_end(header_bb);
-            let cond_val =
-                lower_expr(condition, builder, types, ctx, module, fn_val, env, loop_ctx)?
-                    .into_int_value();
-            builder
-                .build_conditional_branch(cond_val, body_bb, exit_bb)
-                .map_err(|e| e.to_string())?;
-
-            builder.position_at_end(body_bb);
-            let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: header_bb };
-            let mut body_env = env.clone();
-            lower_block(body, builder, types, ctx, module, fn_val, &mut body_env, Some(&inner_lctx))?;
-            if builder
-                .get_insert_block()
-                .and_then(|b| b.get_terminator())
-                .is_none()
-            {
-                builder
-                    .build_unconditional_branch(header_bb)
-                    .map_err(|e| e.to_string())?;
-            }
-
-            builder.position_at_end(exit_bb);
-            Ok(unit_value(ctx))
-        }
-
-        Expr::Loop { body, .. } => {
-            let loop_bb = ctx.append_basic_block(fn_val, "loop.body");
-            let exit_bb = ctx.append_basic_block(fn_val, "loop.exit");
-
-            builder
-                .build_unconditional_branch(loop_bb)
-                .map_err(|e| e.to_string())?;
-            builder.position_at_end(loop_bb);
-
-            let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: loop_bb };
-            let mut body_env = env.clone();
-            lower_block(body, builder, types, ctx, module, fn_val, &mut body_env, Some(&inner_lctx))?;
-            if builder
-                .get_insert_block()
-                .and_then(|b| b.get_terminator())
-                .is_none()
-            {
-                builder
-                    .build_unconditional_branch(loop_bb)
-                    .map_err(|e| e.to_string())?;
-            }
-
-            builder.position_at_end(exit_bb);
-            Ok(unit_value(ctx))
-        }
-
-        Expr::Block(block) => {
-            let mut block_env = env.clone();
-            match lower_block(block, builder, types, ctx, module, fn_val, &mut block_env, loop_ctx)? {
-                Some(val) => Ok(val),
-                None => Ok(unit_value(ctx)),
-            }
-        }
-
-        Expr::Call { callee, args, .. } => {
-            let Expr::Ident(name, _) = callee.as_ref() else {
-                return Err(
-                    "only direct function calls supported in PR 32 (no closures or fn pointers)"
-                        .to_string(),
-                );
-            };
-            let callee_fn = module.get_function(name).ok_or_else(|| {
-                format!("undefined function `{name}` — declare it before calling")
-            })?;
-            let arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = args
-                .iter()
-                .map(|a| {
-                    lower_expr(a, builder, types, ctx, module, fn_val, env, loop_ctx)
-                        .map(Into::into)
-                })
-                .collect::<Result<_, _>>()?;
-            let call_site = builder
-                .build_call(callee_fn, &arg_vals, "call")
-                .map_err(|e| e.to_string())?;
-            // Void calls return unit_value; value-returning calls return the result.
-            Ok(call_site.try_as_basic_value().basic().unwrap_or_else(|| unit_value(ctx)))
-        }
-
-        _ => Err(format!(
-            "expression not supported in PR 32 (at byte {}): \
-             field access, method calls, match, for, cast, and borrow land in later PRs",
-            expr.span().start
-        )),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_binary<'ctx>(
-    op: BinOp,
-    lv: BasicValueEnum<'ctx>,
-    rv: BasicValueEnum<'ctx>,
-    operand_ty: &Ty,
-    builder: &Builder<'ctx>,
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    fn_val: FunctionValue<'ctx>,
-) -> Result<BasicValueEnum<'ctx>, String> {
-    match operand_ty {
-        Ty::I32 => {
-            let l = lv.into_int_value();
-            let r = rv.into_int_value();
-            Ok(match op {
-                BinOp::Add => {
-                    builder.build_int_add(l, r, "add").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Sub => {
-                    builder.build_int_sub(l, r, "sub").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Mul => {
-                    builder.build_int_mul(l, r, "mul").map_err(|e| e.to_string())?.into()
-                }
-                // Div/Mod: runtime zero-divisor check → calls libc abort() (pillar 1).
-                BinOp::Div => emit_int_div_or_rem(l, r, false, builder, ctx, module, fn_val)?,
-                BinOp::Mod => emit_int_div_or_rem(l, r, true, builder, ctx, module, fn_val)?,
-                BinOp::Eq => builder
-                    .build_int_compare(IntPredicate::EQ, l, r, "eq")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Ne => builder
-                    .build_int_compare(IntPredicate::NE, l, r, "ne")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Lt => builder
-                    .build_int_compare(IntPredicate::SLT, l, r, "lt")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Gt => builder
-                    .build_int_compare(IntPredicate::SGT, l, r, "gt")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Le => builder
-                    .build_int_compare(IntPredicate::SLE, l, r, "le")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Ge => builder
-                    .build_int_compare(IntPredicate::SGE, l, r, "ge")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                _ => return Err(format!("operator {op:?} not supported for i32")),
-            })
-        }
-        Ty::F64 => {
-            let l = lv.into_float_value();
-            let r = rv.into_float_value();
-            // f64 div/mod: IEEE 754 defines ÷0 as ±inf/NaN — not UB, no abort needed.
-            Ok(match op {
-                BinOp::Add => {
-                    builder.build_float_add(l, r, "fadd").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Sub => {
-                    builder.build_float_sub(l, r, "fsub").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Mul => {
-                    builder.build_float_mul(l, r, "fmul").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Div => {
-                    builder.build_float_div(l, r, "fdiv").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Mod => {
-                    builder.build_float_rem(l, r, "frem").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Eq => builder
-                    .build_float_compare(FloatPredicate::OEQ, l, r, "feq")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Ne => builder
-                    .build_float_compare(FloatPredicate::ONE, l, r, "fne")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Lt => builder
-                    .build_float_compare(FloatPredicate::OLT, l, r, "flt")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Gt => builder
-                    .build_float_compare(FloatPredicate::OGT, l, r, "fgt")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Le => builder
-                    .build_float_compare(FloatPredicate::OLE, l, r, "fle")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                BinOp::Ge => builder
-                    .build_float_compare(FloatPredicate::OGE, l, r, "fge")
-                    .map_err(|e| e.to_string())?
-                    .into(),
-                _ => return Err(format!("operator {op:?} not supported for f64")),
-            })
-        }
-        Ty::Bool => {
-            let l = lv.into_int_value();
-            let r = rv.into_int_value();
-            Ok(match op {
-                BinOp::And => {
-                    builder.build_and(l, r, "and").map_err(|e| e.to_string())?.into()
-                }
-                BinOp::Or => {
-                    builder.build_or(l, r, "or").map_err(|e| e.to_string())?.into()
-                }
-                _ => return Err(format!("operator {op:?} not supported for bool")),
-            })
-        }
-        ty => Err(format!("binary op on unsupported type: {ty}")),
-    }
-}
-
-/// Emit an i32 div or rem with a runtime zero-divisor check.
-/// Zero divisor → calls libc `abort()` and marks the block unreachable.
-/// Pillar 1: explicit runtime panic, never silent UB.
-fn emit_int_div_or_rem<'ctx>(
-    l: IntValue<'ctx>,
-    r: IntValue<'ctx>,
-    is_rem: bool,
-    builder: &Builder<'ctx>,
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    fn_val: FunctionValue<'ctx>,
-) -> Result<BasicValueEnum<'ctx>, String> {
-    let abort_fn = get_or_declare_abort(module, ctx);
-    // Guard 1: divide by zero.
-    let zero = ctx.i32_type().const_zero();
-    let is_zero = builder
-        .build_int_compare(IntPredicate::EQ, r, zero, "divz")
-        .map_err(|e| e.to_string())?;
-    // Guard 2: INT_MIN / -1 is signed overflow → LLVM poison.
-    // -1 as u64 gives the correct bit pattern for const_int on an i32 type.
-    let neg_one = ctx.i32_type().const_int(u64::MAX, false);
-    let int_min = ctx.i32_type().const_int(i32::MIN as u64, false);
-    let r_is_neg_one = builder
-        .build_int_compare(IntPredicate::EQ, r, neg_one, "neg1")
-        .map_err(|e| e.to_string())?;
-    let l_is_int_min = builder
-        .build_int_compare(IntPredicate::EQ, l, int_min, "minval")
-        .map_err(|e| e.to_string())?;
-    let is_overflow = builder
-        .build_and(r_is_neg_one, l_is_int_min, "overflow")
-        .map_err(|e| e.to_string())?;
-    let is_bad = builder
-        .build_or(is_zero, is_overflow, "divbad")
-        .map_err(|e| e.to_string())?;
-
-    let abort_bb = ctx.append_basic_block(fn_val, "div.abort");
-    let ok_bb = ctx.append_basic_block(fn_val, "div.ok");
-    builder
-        .build_conditional_branch(is_bad, abort_bb, ok_bb)
-        .map_err(|e| e.to_string())?;
-
-    builder.position_at_end(abort_bb);
-    builder.build_call(abort_fn, &[], "").map_err(|e| e.to_string())?;
-    builder.build_unreachable().map_err(|e| e.to_string())?;
-
-    builder.position_at_end(ok_bb);
-    if is_rem {
-        Ok(builder
-            .build_int_signed_rem(l, r, "rem")
-            .map_err(|e| e.to_string())?
-            .into())
-    } else {
-        Ok(builder
-            .build_int_signed_div(l, r, "div")
-            .map_err(|e| e.to_string())?
-            .into())
-    }
-}
-
-fn get_or_declare_abort<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) -> FunctionValue<'ctx> {
-    if let Some(f) = module.get_function("abort") {
-        return f;
-    }
-    let ty = ctx.void_type().fn_type(&[], false);
-    let f = module.add_function("abort", ty, Some(Linkage::External));
-    // Mark noreturn so LLVM knows code after the call is unreachable (not UB-shaped).
-    let noreturn = ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
-    f.add_attribute(AttributeLoc::Function, noreturn);
-    f
-}
-
 // ─── Type helpers ─────────────────────────────────────────────────────────────
 
 fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, String> {
@@ -948,7 +989,10 @@ fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, 
     }
 }
 
-fn basic_type_from_ast<'ctx>(ty: &Type<'_>, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, String> {
+fn basic_type_from_ast<'ctx>(
+    ty: &Type<'_>,
+    ctx: &'ctx Context,
+) -> Result<BasicTypeEnum<'ctx>, String> {
     match ty {
         Type::Named { name: "i32", .. } => Ok(ctx.i32_type().into()),
         Type::Named { name: "f64", .. } => Ok(ctx.f64_type().into()),
