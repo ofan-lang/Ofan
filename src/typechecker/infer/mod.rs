@@ -4,7 +4,7 @@ mod ops;
 mod convert;
 mod self_access;
 
-use crate::ast::{Ast, Block, CopyMove, Expr, FunctionDef, ImplBlock, Item, StructDef, Type};
+use crate::ast::{Ast, Block, CopyMove, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx, StructInfo};
 use crate::typechecker::error::TypeError;
@@ -194,7 +194,12 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     // `return` statements are checked individually as they are encountered.
     // Suppress ReturnMismatch when FieldOwnNonCopy already fired — the ownership
     // error is the root cause; the type error is noise on top of it.
+    // Also suppress when the body has no tail but ends with an explicit `return` — the
+    // block's Unit tail type is spurious because control flow never reaches the end.
+    let ends_with_return = f.body.tail.is_none()
+        && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
     if !tail_owns_non_copy
+        && !ends_with_return
         && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
@@ -271,7 +276,10 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
     let tail_owns_non_copy = f.body.tail.as_ref()
         .is_some_and(|tail| check_tail_field_own_non_copy(tail, ctx));
 
+    let ends_with_return = f.body.tail.is_none()
+        && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
     if !tail_owns_non_copy
+        && !ends_with_return
         && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
@@ -487,6 +495,15 @@ mod tests {
     #[test]
     fn infer_i32_literal_return() {
         assert_eq!(check_fn("fn answer() -> i32 { 42 }").unwrap(), Ty::I32);
+    }
+
+    #[test]
+    fn explicit_return_satisfies_declared_return_type() {
+        // `fn main() -> i32 { return 42; }` — block has no tail, but the explicit
+        // `return 42` satisfies the declared return type. Must not fire ReturnMismatch.
+        assert!(check_fn_errors("fn main() -> i32 { return 42; }").is_empty());
+        // Same for methods: `fn add(a: i32, b: i32) -> i32 { return a; }`
+        assert!(check_fn_errors("fn add(a: i32, b: i32) -> i32 { return a; }").is_empty());
     }
 
     #[test]
