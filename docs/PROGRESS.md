@@ -3,6 +3,123 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-19 — codegen PR 31 real AST lowering
+
+**What was done:**
+
+Replaced the PR 30 hardcoded stub with a full AST lowering pipeline. PR #31
+(`feat/codegen-pr31-expr-lowering`, merged `d5f2684` fast-forward).
+
+**`src/codegen/llvm.rs`** — full rewrite:
+
+`LlvmContext::emit(&self, ast, types, out)` — new public entry point replacing
+`emit_hardcoded_main`. Internal pipeline:
+- `lower_to_module`: iterates `Ast::items`, dispatches `Item::Function` to `lower_function`.
+  `Item::Struct`/`Item::Impl` skipped with comment; PR 32+ will lower these.
+- `lower_function`: resolves return type via `basic_type_from_ast` (void when no annotation),
+  builds LLVM function, pre-scans stmts via `emit_allocas`, lowers stmts, emits tail return.
+- `emit_allocas` (pre-scan): walks all stmts before any arithmetic; emits one `build_alloca`
+  per `Stmt::Let` at the top of the entry block → mem2reg-eligible (LLVM idiom).
+- `lower_stmt`: `Let` (lower init + `build_store`), `Return` (`build_return`), `Expr` (discard);
+  `_` arm returns explicit `Err` naming PR 32 for control flow and assignment.
+- `lower_expr`: `Literal` (i32/f64/bool), `Ident` (load from env alloca), `Binary` (dispatch
+  to `lower_binary`), `Unary` (neg/not); `_` arm returns explicit `Err` with byte offset.
+- `lower_binary`: three arms — `Ty::I32` (sdiv/srem with PR-32-deferred zero-divisor note),
+  `Ty::F64` (fdiv/frem with IEEE-754 note), `Ty::Bool` (and/or). `IntPredicate::SLT` etc.
+  for signed comparisons; `FloatPredicate::OEQ` etc. for ordered float comparisons.
+- `basic_type(Ty)` + `basic_type_from_ast(Type<'_>)` helpers for type mapping.
+- Dead-code-after-return detection: `builder.get_insert_block().get_terminator().is_some()`
+  breaks the stmt loop — semantic IR-level check, cannot be bypassed by syntactic wrapping.
+- `emit_module` extracted from the old hardcoded method (target machine + link + .o cleanup
+  — unchanged from PR 30).
+
+**i32 literal range check (pillar-1 fix flagged by `pillars-reviewer`):**
+
+`Literal::Integer(n)` lowering now range-checks `i32::MIN ≤ n ≤ i32::MAX` before
+`const_int(*n as u64, true)`. Without this: `fn main() -> i32 { 3_000_000_000 }` lexes and
+typechecks with no error but silently produces a wrong binary. Fix: explicit codegen error
+with byte offset and range hint; no silent truncation.
+
+Root source: `infer/expr.rs:132` types all `Literal::Integer(_)` as `Ty::I32` without a range
+check. Typechecker-level fix (emit `Mismatch` at infer time with proper span + suggestion)
+deferred to PR 32 where multi-width integers land.
+
+**`src/typechecker/infer/mod.rs`** — typechecker fix for `ends_with_return`:
+
+`fn main() -> i32 { return 42; }` was incorrectly rejected. Root cause: `infer_fn` (and
+`infer_method`) compare the block's tail type (`Ty::Unit` when `Block::tail.is_none()`) against
+the declared return type, without accounting for blocks that terminate via explicit `return` with
+no tail. Fix: added `ends_with_return = body.tail.is_none() && last stmt is Stmt::Return` guard
+suppressing the spurious `ReturnMismatch`. The `return` statement is independently type-checked in
+`infer_stmt`. New test `explicit_return_satisfies_declared_return_type` covers both free functions
+and methods.
+
+**`src/main.rs`** — two-character change: `emit_hardcoded_main` → `emit` with `ast` and
+`result` threaded through.
+
+**JIT tests (T4, T5) — inkwell `ExecutionEngine`:**
+
+`test_f64_arithmetic_jit`: source `fn f64_add() -> f64 { 1.5 + 2.5 }`, JIT-calls, asserts
+result == `4.0_f64`.
+`test_comparison_jit`: source `fn bool_cmp() -> bool { let a = 3; let b = 4; a < b }`,
+JIT-calls as `unsafe extern "C" fn() -> u8` (LLVM `i1` zero-extends to low byte of `rax` on
+x86-64 ABI), asserts result == `1u8`. No Cargo.toml change — `ExecutionEngine` always available
+in inkwell 0.9.
+
+**Manual binary tests:**
+
+- T1: `fn main() -> i32 { 1 + 2 * 3 }` → exit **7** ✓
+- T2: `fn main() -> i32 { let x = 10; let y = 3; x - y }` → exit **7** ✓
+- T3: `fn main() -> i32 { return 42; }` → exit **42** ✓
+
+**Review:**
+
+- `pillars-reviewer`: initially NOT APPROVED — found silent i32 truncation (no range check on
+  `Literal::Integer`). Fixed before PR merge: explicit codegen error for out-of-range literals.
+  Div/mod-by-zero accepted as disclosed loud-crash (SIGFPE on x86-64), not silent UB — deferred
+  to PR 32. Dead-code-after-return check confirmed semantic (IR-level, not syntactic — cannot be
+  bypassed by wrapping). Approved after fixes.
+- `rust-idiom-reviewer`: one structural note (not blocking) — `Result<T, String>` throughout
+  codegen should become a typed `CodegenError` enum (already TODO'd at `llvm.rs:26`).
+  `block_terminated` helper could DRY up the double `get_insert_block().and_then(...)` pattern.
+
+**Test and lint state:** 207 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**Known open items — added this session:**
+
+4. **i32 literal range check is in codegen, not typechecker.** `fn main() -> i32 { 3_000_000_000 }`
+   now fails at codegen with a byte-offset error, but the typechecker passes it silently. A proper
+   `Mismatch` at infer time (with span + suggestion to use a wider type when it lands) goes in with
+   multi-integer-type support in PR 32+.
+
+5. **`CodegenError` enum deferred.** `Result<T, String>` throughout `src/codegen/llvm.rs` should
+   become a typed enum: at minimum `Unsupported { feature: &'static str, span: Span }`, `Internal(String)`,
+   `Backend(String)`. Needed to carry span to `main.rs` for pillar-5-quality diagnostics. TODO comment
+   at `llvm.rs:26`. Deferred to avoid scope creep.
+
+**Known open items — carried forward (renumbered):**
+
+1. Pre-existing `cargo clippy --all-targets` issues in `numbers.rs` — not in lint gate.
+2. `Expr::Match` arms not yet covered by `check_tail_field_own_non_copy` — `NB` comment at
+   wildcard arm; blocked on §21 typechecker support.
+3. **LLVM dev build targets X86+AMDGPU only** (carried from 2026-07-16 — see that entry for detail).
+   Additionally: release build fails to link (WebAssembly target symbols missing from the local
+   `(x86)` LLVM install). Dev builds use `profile.dev lto = "thin"` workaround.
+
+**Known open item — div/mod by zero (disclosed):**
+
+Integer division/modulo (`sdiv`/`srem`) trap on zero divisor as SIGFPE on x86-64 — loud crash, not
+silent UB. `f64` division by zero yields IEEE 754 ±∞ (by spec, no trap). Runtime zero-divisor check
+(icmp + branch to `abort`) deferred to PR 32 where control-flow lowering lands.
+
+**Pending / next steps:**
+
+- **PR 32** — control flow (`if`/`while`/`loop`) + function calls + runtime zero-divisor check.
+- **`CodegenError` enum** — see open item 5; can land independently of PR 32.
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser + typechecker.
+
+---
+
 ## Last session: 2026-07-17 — codegen PR 30 infrastructure (first binary)
 
 **What was done:**
