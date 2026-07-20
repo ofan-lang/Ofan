@@ -123,6 +123,31 @@ impl<'src> Parser<'src> {
             return Ok(Stmt::Assign { target: Box::new(expr), op, value, span: Span { start, end } });
         }
 
+        // Block-like expressions (if/while/loop/for/match/block) don't require a
+        // trailing `;` — consistent with Rust and most expression-oriented languages.
+        let is_block_like = matches!(
+            expr,
+            Expr::If { .. }
+                | Expr::While { .. }
+                | Expr::Loop { .. }
+                | Expr::For { .. }
+                | Expr::Match { .. }
+                | Expr::Block(..)
+        );
+        if is_block_like {
+            // Explicit `;` means "discard value" — the expression is a statement, never the tail.
+            // No `;` promotes to tail only when the next token is `}` (the enclosing block close).
+            let explicit_semi = if matches!(self.peek(), Token::Semicolon) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let has_semicolon = explicit_semi || !matches!(self.peek(), Token::RBrace | Token::Eof);
+            let end = expr.span().end;
+            return Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon, span: Span { start, end } });
+        }
+
         // Tail position: expression immediately before `}` — no `;` needed.
         if matches!(self.peek(), Token::RBrace | Token::Eof) {
             let end = expr.span().end;
@@ -230,3 +255,4 @@ mod tests {
         assert!(matches!(stmt, Stmt::Assign { op: Some(BinOp::Add), .. }));
     }
 }
+
