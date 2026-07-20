@@ -1,5 +1,6 @@
 use inkwell::{
     FloatPredicate, IntPredicate, OptimizationLevel,
+    attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
@@ -119,13 +120,43 @@ fn lower_to_module<'ctx>(
     types: &InferResult,
 ) -> Result<Module<'ctx>, String> {
     let module = ctx.create_module("main");
+
+    // Pass 1: declare all function signatures before lowering any body.
+    // Required for forward calls (callee defined after caller) and recursive calls.
+    for item in &ast.items {
+        if let Item::Function(func) = item {
+            declare_function_sig(func, ctx, &module)?;
+        }
+        // Item::Struct / Item::Impl: out of scope for PR 32.
+    }
+
+    // Pass 2: lower function bodies (all callees already visible in module).
     for item in &ast.items {
         if let Item::Function(func) = item {
             lower_function(func, types, ctx, &module)?;
         }
-        // Item::Struct / Item::Impl: out of scope for PR 32.
     }
+
     Ok(module)
+}
+
+/// Pass 1 helper: add the LLVM function declaration (signature only, no body).
+fn declare_function_sig<'ctx>(
+    func: &FunctionDef<'_>,
+    ctx: &'ctx Context,
+    module: &Module<'ctx>,
+) -> Result<(), String> {
+    let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = func
+        .params
+        .iter()
+        .map(|p| basic_type_from_ast(&p.ty, ctx).map(Into::into))
+        .collect::<Result<_, _>>()?;
+    let fn_type = match func.return_ty.as_ref() {
+        None => ctx.void_type().fn_type(&param_types, false),
+        Some(ty) => basic_type_from_ast(ty, ctx)?.fn_type(&param_types, false),
+    };
+    module.add_function(func.name, fn_type, None);
+    Ok(())
 }
 
 fn lower_function<'ctx, 'src>(
@@ -134,18 +165,10 @@ fn lower_function<'ctx, 'src>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
 ) -> Result<(), String> {
-    // Build LLVM function type with real parameter types.
-    let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = func
-        .params
-        .iter()
-        .map(|p| basic_type_from_ast(&p.ty, ctx).map(Into::into))
-        .collect::<Result<_, _>>()?;
-
-    let fn_type = match func.return_ty.as_ref() {
-        None => ctx.void_type().fn_type(&param_types, false),
-        Some(ty) => basic_type_from_ast(ty, ctx)?.fn_type(&param_types, false),
-    };
-    let fn_val = module.add_function(func.name, fn_type, None);
+    // Retrieve the pre-declared LLVM function from pass 1.
+    let fn_val = module
+        .get_function(func.name)
+        .ok_or_else(|| format!("ICE: `{}` not pre-declared in pass 1", func.name))?;
 
     let entry = ctx.append_basic_block(fn_val, "entry");
     let builder = ctx.create_builder();
@@ -219,6 +242,10 @@ fn lower_function<'ctx, 'src>(
 
 /// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT builder
 /// position.  Callers must ensure this is the function entry block for mem2reg eligibility.
+/// Recurses into block-like `Stmt::Expr` so nested lets inside if/while/loop bodies are
+/// also hoisted.  Shadowing (same name at multiple nesting depths) is deferred to PR 33:
+/// when a name collision is detected the inner binding falls back to inline alloca emission
+/// in `lower_stmt`.
 fn emit_allocas<'ctx, 'src>(
     stmts: &[Stmt<'src>],
     builder: &Builder<'ctx>,
@@ -227,16 +254,62 @@ fn emit_allocas<'ctx, 'src>(
     env: &mut CodegenEnv<'ctx, 'src>,
 ) -> Result<(), String> {
     for stmt in stmts {
-        if let Stmt::Let { name, init, .. } = stmt {
-            let ty = types
-                .type_of(init.span())
-                .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-            let llvm_ty = basic_type(ty, ctx)?;
-            let ptr = builder
-                .build_alloca(llvm_ty, name)
-                .map_err(|e| e.to_string())?;
-            env.insert(*name, (ptr, llvm_ty));
+        match stmt {
+            Stmt::Let { name, init, .. } => {
+                if env.contains_key(*name) {
+                    // Known limitation (PR 33): shadowed bindings reuse the outer alloca.
+                    // A full scope-stack is needed to assign each shadow its own slot.
+                    continue;
+                }
+                let ty = types
+                    .type_of(init.span())
+                    .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
+                let llvm_ty = basic_type(ty, ctx)?;
+                let ptr = builder
+                    .build_alloca(llvm_ty, name)
+                    .map_err(|e| e.to_string())?;
+                env.insert(*name, (ptr, llvm_ty));
+            }
+            Stmt::Expr { expr, .. } => {
+                emit_allocas_in_expr(expr, builder, types, ctx, env)?;
+            }
+            _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Recurse into block-like expressions to hoist their nested `let` allocas.
+fn emit_allocas_in_expr<'ctx, 'src>(
+    expr: &Expr<'src>,
+    builder: &Builder<'ctx>,
+    types: &InferResult,
+    ctx: &'ctx Context,
+    env: &mut CodegenEnv<'ctx, 'src>,
+) -> Result<(), String> {
+    match expr {
+        Expr::If { then_block, else_branch, .. } => {
+            emit_allocas(&then_block.stmts, builder, types, ctx, env)?;
+            if let Some(tail) = &then_block.tail {
+                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
+            }
+            if let Some(else_expr) = else_branch {
+                emit_allocas_in_expr(else_expr, builder, types, ctx, env)?;
+            }
+        }
+        Expr::While { body, .. } | Expr::Loop { body, .. } => {
+            emit_allocas(&body.stmts, builder, types, ctx, env)?;
+            if let Some(tail) = &body.tail {
+                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
+            }
+        }
+        Expr::Block(block) => {
+            emit_allocas(&block.stmts, builder, types, ctx, env)?;
+            if let Some(tail) = &block.tail {
+                emit_allocas_in_expr(tail, builder, types, ctx, env)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -853,10 +926,15 @@ fn emit_int_div_or_rem<'ctx>(
 }
 
 fn get_or_declare_abort<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) -> FunctionValue<'ctx> {
-    module.get_function("abort").unwrap_or_else(|| {
-        let ty = ctx.void_type().fn_type(&[], false);
-        module.add_function("abort", ty, Some(Linkage::External))
-    })
+    if let Some(f) = module.get_function("abort") {
+        return f;
+    }
+    let ty = ctx.void_type().fn_type(&[], false);
+    let f = module.add_function("abort", ty, Some(Linkage::External));
+    // Mark noreturn so LLVM knows code after the call is unreachable (not UB-shaped).
+    let noreturn = ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
+    f.add_attribute(AttributeLoc::Function, noreturn);
+    f
 }
 
 // ─── Type helpers ─────────────────────────────────────────────────────────────
@@ -1016,5 +1094,31 @@ mod tests {
             ir.contains("call void @abort"),
             "expected abort call in IR for division by zero literal, IR:\n{ir}"
         );
+    }
+
+    /// T11 — forward call + iterative factorial: fact(5) == 120.
+    /// `fact5` is declared BEFORE `fact` in source — exercises two-pass function
+    /// declaration (single-pass would fail: `fact` not yet visible when `fact5` is lowered).
+    #[test]
+    fn test_forward_call_factorial_jit() {
+        let ctx = Context::create();
+        let src = "fn fact5() -> i32 { fact(5) } \
+                   fn fact(n: i32) -> i32 { \
+                       let mut acc = 1; \
+                       let mut i = 1; \
+                       while i <= n { acc = acc * i; i = i + 1; } \
+                       acc \
+                   }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("fact5")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 120, "expected fact(5) == 120, got {result}");
     }
 }
