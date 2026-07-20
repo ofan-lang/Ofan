@@ -3,6 +3,136 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-19 — codegen PR 32 (branch + fixes, PR open for review)
+
+**What was done:**
+
+PR 32 code had been committed directly to `origin/main` without a branch or GitHub PR (workflow
+gap from previous session). This session:
+1. Force-reverted `origin/main` to `a4bbdb5` (pre-PR32 state).
+2. Created branch `feat/codegen-pr32-control-flow-calls` and cherry-picked the two original commits.
+3. Fixed three gaps identified by `pillars-reviewer` and `rust-idiom-reviewer`:
+
+**Gap 1 — Two-pass function declaration (`lower_to_module`):**
+- Added `declare_function_sig` to emit all LLVM function signatures (pass 1) before lowering any body (pass 2).
+- Single-pass implementation broke any call where the callee appeared later in source order.
+- T11 added to prove it: `fn fact5() -> i32 { fact(5) }` defined *before* `fn fact(n: i32) -> i32 { … }`. `fact(5) == 120`.
+
+**Gap 2 — Recursive `emit_allocas`:**
+- Added `emit_allocas_in_expr` which recurses into `If`/`While`/`Loop`/`Block` subtrees.
+- Nested `let` allocas inside control-flow bodies are now hoisted to the entry block → mem2reg-eligible.
+- Known limitation: shadowed names (same identifier at multiple nesting depths) reuse the outer alloca. Full scope-stack deferred to PR 33.
+
+**Gap 3 — `@abort` `noreturn` attribute:**
+- `get_or_declare_abort` now decorates the LLVM function with `AttributeLoc::Function + noreturn`.
+- Without it, the `unreachable` instruction after `call @abort` was UB-shaped (LLVM could assume abort returns). Advisory finding from `pillars-reviewer`.
+
+**All commits on branch; PR open, DO NOT MERGE — awaiting user review.**
+
+**Test and lint state:** 213 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**Reviewer findings (post-fix):**
+- `pillars-reviewer`: no blocking issues. Advisory: `fn abort()` user-name collision with div-zero guard — not user-reachable via CLI yet; fix before codegen is wired. Both advisories addressed (`noreturn` done; name-collision noted for PR 33).
+- `rust-idiom-reviewer`: finding B (shadowing skip-guard is a latent aliasing bug, comment was misleading) — comment corrected, limitation documented; full fix is PR 33. Finding A (`FnLower` struct to replace `#[allow(too_many_arguments)]`) and check 6 (`Result<_, String>` → `CodegenError` enum) both deferred to PR 33.
+
+**Pending / next steps (post-merge):**
+
+- **PR 33 scope (next):**
+  - Shadowed `let` bindings: scope-stack needed so inner shadows get their own alloca.
+  - `FnLower<'ctx, 'src>` struct to eliminate `#[allow(clippy::too_many_arguments)]`.
+  - `CodegenError` enum replacing `Result<_, String>` — needed for pillar 5 span-aware diagnostics.
+  - `@abort` name-collision fix: use a reserved internal symbol (e.g. `__ofan_abort` or `llvm.trap`).
+  - `loop { break value; }` (break with a value, loop-as-expression).
+  - `Stmt::Assign` on non-ident targets (field write, index).
+- **Slice 2 (structs/methods/fields):** follows slice 1 merge.
+- **i32 literal range check in typechecker** (pillar 1 advisory from PR 31 review).
+- **Integer overflow policy** — document wrapping/panic decision in PHILOSOPHY.md.
+
+---
+
+## Session: 2026-07-19 — codegen PR 32 control flow, calls, assignment, zero-divisor guard
+
+**What was done:**
+
+Landed PR 32 directly on `main` (commit `4041034`). Changed files: `src/codegen/llvm.rs` (full
+extension), `src/parser/stmt.rs` (block-like semicolon elision).
+
+**`src/codegen/llvm.rs` — new constructs lowered:**
+
+- `CodegenEnv` now stores `(PointerValue, BasicTypeEnum)` pairs — eliminates re-querying
+  `InferResult` on every load; required for compound assignment (`+=` etc.).
+- `LoopCtx<'ctx>` struct (`break_bb`, `continue_bb`) threaded through `lower_stmt`/`lower_expr`.
+- `unit_value(ctx) -> BasicValueEnum` sentinel for Ofan's `()` (typechecker guarantees no
+  caller uses this in a value position).
+- `lower_block` helper — stmt loop + tail-value return, used by `if`/`while`/`loop` arms.
+- **Function parameters**: `lower_function` now builds `fn_type` with real param types; emits
+  param allocas at entry-block top, stores `fn_val.get_nth_param(i)` after all alloca instructions.
+- **`Stmt::Assign`** (plain `=` and compound `+=`/`-=`/`*=`/`/=`/`%=`): ident target only;
+  compound loads via stored `BasicTypeEnum` then calls `lower_binary`.
+- **`Stmt::Break`/`Stmt::Continue`**: unconditional branch to `LoopCtx::{break,continue}_bb`.
+  `break` with a value returns a clear `Err` (deferred to later PR).
+- **`Expr::If`**: cond branch → then_bb/else_bb → merge_bb. Value-producing if/else emits a
+  phi node; Unit if omits it. `else_branch` is `Expr::Block` or `Expr::If` (else-if chains),
+  both handled by recursive `lower_expr`.
+- **`Expr::While`**: header_bb (cond) → body_bb/exit_bb. `LoopCtx` wires break → exit, continue
+  → header. Env cloned for body scope so inner lets don't pollute outer.
+- **`Expr::Loop`**: loop_bb ↔ exit_bb via `LoopCtx`. Implicit `build_unconditional_branch(loop_bb)`
+  at body end if no explicit terminator.
+- **`Expr::Block`**: inline `lower_block` with cloned env.
+- **`Expr::Call` (Ident callee)**: `module.get_function(name)` + `build_call`; void calls return
+  `unit_value`. Non-ident callees (closures, fn pointers) return explicit `Err` naming the
+  PR they land in.
+- **Zero-divisor guard for i32 div/mod** — two conditions, both route to `abort_bb`:
+  1. `r == 0`: divide by zero.
+  2. `l == INT_MIN && r == -1`: signed overflow → LLVM poison (pillar 1 — same standard as zero-div).
+  Guard: `or(icmp eq r, 0, and(icmp eq r, -1, icmp eq l, INT_MIN))` → `abort_bb` or `ok_bb`.
+  `abort_bb`: `call void @abort()` (libc `abort`, declared `external`), then `unreachable`.
+  f64 div/mod: IEEE 754 defines behavior (±inf/NaN); no abort needed.
+
+**`src/parser/stmt.rs` — block-like semicolon elision:**
+
+Block-like expressions (`if`/`while`/`loop`/`for`/`match`/block) no longer require trailing `;`
+as statements (consistent with Rust). Pillar-3 fix from `pillars-reviewer`: explicit `;` forces
+`has_semicolon = true` (value discarded, expression stays in `stmts`); only semicolon-less
+placement immediately before `}` promotes to block tail. The two forms now have distinct,
+unambiguous semantics.
+
+**JIT tests T6–T10:**
+
+- T6: `fn add(a: i32, b: i32) -> i32 { a + b }` + `call_add()` → 8
+- T7: `fn pick() -> i32 { if 1 < 2 { 10 } else { 20 } }` → 10
+- T8: `fn countdown() -> i32 { let mut n = 3; while n > 0 { n = n - 1; } n }` → 0
+- T9: `fn loop_break() -> i32 { let mut x = 0; loop { x = x+1; if x==5 { break; } } x }` → 5
+- T10: IR-level: `fn divz() -> i32 { 10 / 0 }` LLVM IR contains `call void @abort` ✓
+
+**Review:**
+
+`pillars-reviewer` found two blocking issues before commit:
+1. **Pillar 1**: `INT_MIN / -1` unsigned overflow missing from initial guard → fixed with two-condition
+   check above.
+2. **Pillar 3**: initial semicolon-elision consumed optional `;` but still promoted to tail —
+   two spellings with identical semantics → fixed with `explicit_semi` flag.
+Non-blocking noted: integer add/sub/mul wraparound policy should be documented in PHILOSOPHY.md
+(wrapping is defined, not UB, but the design decision should be explicit); bare internal codegen
+error strings get context when `CodegenError` enum lands (PR 33+).
+
+**Test and lint state:** 212 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**Pending / next steps:**
+
+- **Nested let scopes**: allocas for lets inside `while`/`loop` bodies are emitted inline
+  (not at entry block top) — correct but not mem2reg-eligible. Full recursive hoisting + scoped
+  env (push/pop) is a future optimization pass PR.
+- **`loop { break value; }`** (break with a value) not lowered — deferred to a future PR when
+  `loop` as an expression returning a concrete type is supported.
+- **`Stmt::Assign` on non-ident targets** (field write, index) — deferred.
+- **`CodegenError` enum** — `Result<T, String>` → typed enum, see open item 5 below.
+- **i32 literal range check in typechecker** — see open item 4.
+- **Struct literal construction** (`Point { x: 1.0, y: 2.0 }`) — parser + typechecker.
+- **Integer overflow policy** — document wrapping/panic decision in PHILOSOPHY.md.
+
+---
+
 ## Last session: 2026-07-19 — codegen PR 31 real AST lowering
 
 **What was done:**
