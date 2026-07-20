@@ -3,7 +3,54 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-19 — codegen PR 32 control flow, calls, assignment, zero-divisor guard
+## Last session: 2026-07-19 — codegen PR 32 (branch + fixes, PR open for review)
+
+**What was done:**
+
+PR 32 code had been committed directly to `origin/main` without a branch or GitHub PR (workflow
+gap from previous session). This session:
+1. Force-reverted `origin/main` to `a4bbdb5` (pre-PR32 state).
+2. Created branch `feat/codegen-pr32-control-flow-calls` and cherry-picked the two original commits.
+3. Fixed three gaps identified by `pillars-reviewer` and `rust-idiom-reviewer`:
+
+**Gap 1 — Two-pass function declaration (`lower_to_module`):**
+- Added `declare_function_sig` to emit all LLVM function signatures (pass 1) before lowering any body (pass 2).
+- Single-pass implementation broke any call where the callee appeared later in source order.
+- T11 added to prove it: `fn fact5() -> i32 { fact(5) }` defined *before* `fn fact(n: i32) -> i32 { … }`. `fact(5) == 120`.
+
+**Gap 2 — Recursive `emit_allocas`:**
+- Added `emit_allocas_in_expr` which recurses into `If`/`While`/`Loop`/`Block` subtrees.
+- Nested `let` allocas inside control-flow bodies are now hoisted to the entry block → mem2reg-eligible.
+- Known limitation: shadowed names (same identifier at multiple nesting depths) reuse the outer alloca. Full scope-stack deferred to PR 33.
+
+**Gap 3 — `@abort` `noreturn` attribute:**
+- `get_or_declare_abort` now decorates the LLVM function with `AttributeLoc::Function + noreturn`.
+- Without it, the `unreachable` instruction after `call @abort` was UB-shaped (LLVM could assume abort returns). Advisory finding from `pillars-reviewer`.
+
+**All commits on branch; PR open, DO NOT MERGE — awaiting user review.**
+
+**Test and lint state:** 213 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**Reviewer findings (post-fix):**
+- `pillars-reviewer`: no blocking issues. Advisory: `fn abort()` user-name collision with div-zero guard — not user-reachable via CLI yet; fix before codegen is wired. Both advisories addressed (`noreturn` done; name-collision noted for PR 33).
+- `rust-idiom-reviewer`: finding B (shadowing skip-guard is a latent aliasing bug, comment was misleading) — comment corrected, limitation documented; full fix is PR 33. Finding A (`FnLower` struct to replace `#[allow(too_many_arguments)]`) and check 6 (`Result<_, String>` → `CodegenError` enum) both deferred to PR 33.
+
+**Pending / next steps (post-merge):**
+
+- **PR 33 scope (next):**
+  - Shadowed `let` bindings: scope-stack needed so inner shadows get their own alloca.
+  - `FnLower<'ctx, 'src>` struct to eliminate `#[allow(clippy::too_many_arguments)]`.
+  - `CodegenError` enum replacing `Result<_, String>` — needed for pillar 5 span-aware diagnostics.
+  - `@abort` name-collision fix: use a reserved internal symbol (e.g. `__ofan_abort` or `llvm.trap`).
+  - `loop { break value; }` (break with a value, loop-as-expression).
+  - `Stmt::Assign` on non-ident targets (field write, index).
+- **Slice 2 (structs/methods/fields):** follows slice 1 merge.
+- **i32 literal range check in typechecker** (pillar 1 advisory from PR 31 review).
+- **Integer overflow policy** — document wrapping/panic decision in PHILOSOPHY.md.
+
+---
+
+## Session: 2026-07-19 — codegen PR 32 control flow, calls, assignment, zero-divisor guard
 
 **What was done:**
 
