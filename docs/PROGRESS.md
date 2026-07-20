@@ -3,7 +3,47 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-19 — codegen PR 32 (branch + fixes, PR open for review)
+## Last session: 2026-07-19 — codegen PR 33 (FnLower struct refactor, merged)
+
+**What was done:**
+
+PR 33: pure mechanical refactor — eliminated parameter-threading problem in `src/codegen/llvm.rs`.
+
+**Change:** Added `FnLower<'ctx, 'b>` struct holding 5 invariant lowering params (`builder`,
+`ctx`, `module`, `types`, `fn_val`). Converted 8 free functions to methods. All 4
+`#[allow(clippy::too_many_arguments)]` suppressions removed.
+
+**Lifetime params:** `'ctx` = LLVM context (all inkwell types). `'b` = borrow lifetime for
+`&'b Module<'ctx>` and `&'b InferResult`. `'src` (source text) stays as method-level generic,
+not a struct field. No `'b: 'ctx` bound needed — `'ctx: 'b` is an implied bound the compiler
+derives.
+
+**Not in struct:** `env: &mut CodegenEnv` (cloned per branch scope) and `loop_ctx:
+Option<&LoopCtx>` (changes at every loop boundary). Both stay as method args.
+
+**Test and lint state:** 213 passed, 0 failed. `cargo clippy --features codegen -- -D warnings`
+clean. `git diff --stat main` — 1 file.
+
+**Reviewer findings:** Both `pillars-reviewer` and `rust-idiom-reviewer` clean. All pillar-1
+guards (abort, noreturn, INT_MIN/-1 overflow, i32 range check) confirmed present. Lifetimes
+and receivers (`&self`) correct. No new clippy anti-patterns.
+
+**PR 33 merged.** Branch `refactor/codegen-fn-lower-struct` deleted.
+
+**Pending / next steps (post-PR 33):**
+
+- **Shadowed `let` bindings**: scope-stack needed so inner shadows get own alloca (known limitation, comment in code at `emit_allocas`).
+- **`CodegenError` enum**: replace `Result<_, String>` with typed enum for pillar-5 span-aware diagnostics.
+- **`@abort` name-collision**: use reserved internal symbol (`__ofan_abort` or `llvm.trap`) before codegen is wired to CLI.
+- **`loop { break value; }`**: break with value, loop-as-expression.
+- **`Stmt::Assign` on non-ident targets**: field write, index.
+- **Slice 2 (structs/methods/fields)**: follows slice 1 (PRs 30–33) being complete.
+- **i32 literal range check in typechecker** (pillar 1 advisory from PR 31).
+- **Integer overflow policy**: document wrapping/panic decision in PHILOSOPHY.md.
+
+---
+
+## Session: 2026-07-19 — codegen PR 32 (branch + fixes, merged)
 
 **What was done:**
 
