@@ -6,7 +6,10 @@ impl<'src> Parser<'src> {
     pub(crate) fn parse_match_expr(&mut self) -> Result<Expr<'src>, ParseError> {
         let start = self.peek_span().start;
         self.eat(&Token::Match)?;
+        let prev = self.no_struct_lit;
+        self.no_struct_lit = true;
         let subject = Box::new(self.parse_expr()?);
+        self.no_struct_lit = prev;
         self.eat(&Token::LBrace)?;
 
         let mut arms = Vec::new();
@@ -30,7 +33,11 @@ impl<'src> Parser<'src> {
 
         let guard = if matches!(self.peek(), Token::If) {
             self.advance();
-            Some(Box::new(self.parse_expr()?))
+            let prev = self.no_struct_lit;
+            self.no_struct_lit = true;
+            let g = self.parse_expr()?;
+            self.no_struct_lit = prev;
+            Some(Box::new(g))
         } else {
             None
         };

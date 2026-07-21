@@ -1102,4 +1102,81 @@ mod tests {
         let errs = infer_program_errors(src);
         assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateStruct { name, .. } if name == "Foo")));
     }
+
+    // ── Struct literals ───────────────────────────────────────────────────────
+
+    const POINT_DEF: &str = "struct Point { x: f64, y: f64 }";
+
+    #[test]
+    fn struct_lit_valid() {
+        let src = &format!("{POINT_DEF} fn f() -> Point {{ Point {{ x = 1.0, y = 2.0 }} }}");
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn struct_lit_valid_any_field_order() {
+        let src = &format!("{POINT_DEF} fn f() -> Point {{ Point {{ y = 2.0, x = 1.0 }} }}");
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn struct_lit_trailing_comma() {
+        let src = &format!("{POINT_DEF} fn f() -> Point {{ Point {{ x = 1.0, y = 2.0, }} }}");
+        assert!(infer_program(src).is_ok());
+    }
+
+    #[test]
+    fn struct_lit_undefined_struct() {
+        let src = "fn f() { let _ = Unknown { x = 1 }; }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::UndefinedStruct { name, .. } if name == "Unknown")));
+    }
+
+    #[test]
+    fn struct_lit_unknown_field() {
+        let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0, z = 2.0 }}; }}");
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldNotFound { field_name, .. } if field_name == "z")));
+    }
+
+    #[test]
+    fn struct_lit_wrong_field_type() {
+        let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = true, y = 2.0 }}; }}");
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::Mismatch { expected: Ty::F64, .. })));
+    }
+
+    #[test]
+    fn struct_lit_missing_field() {
+        let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0 }}; }}");
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::MissingStructFields { missing, .. } if missing.contains(&"y".to_string()))));
+    }
+
+    #[test]
+    fn struct_lit_duplicate_field() {
+        let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0, x = 2.0, y = 0.0 }}; }}");
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateStructField { field_name, .. } if field_name == "x")),
+            "expected DuplicateStructField for x, got: {:?}", errs);
+    }
+
+    #[test]
+    fn struct_lit_as_call_arg() {
+        let src = &format!("{POINT_DEF} fn consume(_p: Point) {{}} fn f() {{ consume(Point {{ x = 1.0, y = 2.0 }}); }}");
+        assert!(infer_program_errors(src).is_empty());
+    }
+
+    #[test]
+    fn struct_lit_as_return_value() {
+        let src = &format!("{POINT_DEF} fn f() -> Point {{ return Point {{ x = 0.0, y = 0.0 }}; }}");
+        assert!(infer_program_errors(src).is_empty());
+    }
+
+    #[test]
+    fn struct_lit_deferred_for_generic_struct() {
+        let src = "struct Wrap<T> { val: T } fn f() { let _ = Wrap { val = 1 }; }";
+        let result = infer_program(src).expect("no fatal errors");
+        assert!(result.deferred.iter().any(|e| matches!(e, TypeError::Deferred { feature, .. } if feature.contains("generic struct"))));
+    }
 }

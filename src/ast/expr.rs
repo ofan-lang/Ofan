@@ -87,6 +87,13 @@ pub enum Expr<'src> {
         span: Span,
     },
     Match { subject: Box<Expr<'src>>, arms: Vec<MatchArm<'src>>, span: Span },
+    /// `Name { field = expr, ... }` — struct literal (§10)
+    StructLit {
+        name: &'src str,
+        name_span: Span,
+        fields: Vec<StructFieldInit<'src>>,
+        span: Span,
+    },
 }
 
 impl Expr<'_> {
@@ -107,8 +114,16 @@ impl Expr<'_> {
             Expr::Loop { span, .. } => *span,
             Expr::For { span, .. } => *span,
             Expr::Match { span, .. } => *span,
+            Expr::StructLit { span, .. } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructFieldInit<'src> {
+    pub name: &'src str,
+    pub name_span: Span,
+    pub value: Box<Expr<'src>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

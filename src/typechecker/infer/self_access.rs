@@ -184,6 +184,9 @@ fn scan_expr(expr: &Expr<'_>, scan: &mut SelfUsageScan) {
                 if let Some(g) = &arm.guard { scan_expr(g, scan); }
             }
         }
+        Expr::StructLit { fields, .. } => {
+            for f in fields { scan_expr(&f.value, scan); }
+        }
     }
 }
 
