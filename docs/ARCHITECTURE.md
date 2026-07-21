@@ -302,6 +302,40 @@ ever needed.
 declaration order (settled in PR #34 — see `docs/SYNTAX_SPEC.md` §10). The order fields
 appear in a literal has no bearing on in-memory layout.
 
+### Self-receiver calling convention — always pointer
+
+`self` receivers are **always passed as a pointer** in LLVM IR, regardless of the
+struct's Copy/Move status or size. No C-ABI-style by-value register passing for small
+Copy structs.
+
+**Why this is independent of C-ABI compatibility.** The already-decided v1 C interop
+scope is *calling into C only* — `extern` blocks expose C functions to Ofan; Ofan is
+never called from C in v1. Self-receiver method calls are always Ofan-calling-Ofan and
+never cross the extern boundary. Struct *layout* must match C's (already decided above —
+a struct value can be passed to an extern C function and read by raw field offset), but
+the internal method *calling convention* only needs to match C's ABI at the actual
+extern call site — a separate, narrower, and currently-unimplemented concern.
+
+**Uniform with existing codegen.** Locals are already modeled as alloca → pointer (the
+standard LLVM pattern). Passing `self` as a pointer fits this model without branching on
+struct size or Copy-eligibility. The alternative — by-value passing for "small enough"
+Copy structs — requires implementing ABI-specific size thresholds (SysV x64 and Windows
+x64 differ on what fits in registers), which is real, currently-unnecessary complexity.
+
+**Performance is substantially mitigated by the optimizer.** LLVM's SROA + mem2reg
+passes promote non-escaping pointer arguments into registers at `-O1`+. A small Copy
+struct passed as a pointer and never escaping the callee typically compiles to the same
+machine code as a by-value pass. The unoptimized/debug-build cost is an extra
+indirection — real, but narrow.
+
+**Consistent with pillar 3** (single canonical convention). There is no second category
+of "small Copy struct calling convention" to design, teach, or maintain alongside the
+general rule.
+
+**Future:** when Ofan supports being called *from* C (a later interop phase, not v1),
+that requires matching the C ABI at the extern boundary specifically — a narrow,
+targeted decision at that call site, not a change to internal method-calling convention.
+
 ### Ty::Error / Deferred gate
 
 Codegen is gated behind a hard structural check in `main.rs`: if `typechecker::infer()`
