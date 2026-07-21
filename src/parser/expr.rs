@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, Literal, UnaryOp};
+use crate::ast::{BinOp, Expr, Literal, StructFieldInit, UnaryOp};
 use crate::lexer::token::{Span, Token};
 use crate::parser::{ParseError, Parser};
 
@@ -160,7 +160,13 @@ impl<'src> Parser<'src> {
             return Ok(args);
         }
         loop {
-            args.push(self.parse_expr()?);
+            // Argument expressions re-enable struct literals regardless of outer context,
+            // so `if foo(Point { x=1 }) { }` works as expected.
+            let prev = self.no_struct_lit;
+            self.no_struct_lit = false;
+            let result = self.parse_expr();
+            self.no_struct_lit = prev;
+            args.push(result?);
             match self.peek() {
                 Token::Comma => { self.advance(); }
                 Token::RParen => break,
@@ -196,8 +202,11 @@ impl<'src> Parser<'src> {
                 else { unreachable!() }
             }
             Token::Ident(_) => {
-                let (name, s) = self.eat_ident()?;
-                Ok(Expr::Ident(name, s))
+                let (name, name_span) = self.eat_ident()?;
+                if matches!(self.peek(), Token::LBrace) && !self.no_struct_lit {
+                    return self.parse_struct_lit(name, name_span, span);
+                }
+                Ok(Expr::Ident(name, name_span))
             }
             Token::SelfKw => {
                 let s = self.advance().1;
@@ -205,7 +214,12 @@ impl<'src> Parser<'src> {
             }
             Token::LParen => {
                 self.advance();
+                // Parentheses re-enable struct literals inside regardless of outer context,
+                // mirroring Rust's restricted-expression design: `if (Foo { x=1 }) { }` is valid.
+                let prev = self.no_struct_lit;
+                self.no_struct_lit = false;
                 let expr = self.parse_expr()?;
+                self.no_struct_lit = prev;
                 self.eat(&Token::RParen)?;
                 Ok(expr)
             }
@@ -220,6 +234,33 @@ impl<'src> Parser<'src> {
             Token::Match => self.parse_match_expr(),
             _ => Err(self.error_expected("an expression", Some("expressions can start with a literal, identifier, `(`, or a keyword like `if`/`match`/`loop`"))),
         }
+    }
+
+    fn parse_struct_lit(
+        &mut self,
+        name: &'src str,
+        name_span: Span,
+        start: Span,
+    ) -> Result<Expr<'src>, ParseError> {
+        self.eat(&Token::LBrace)?;
+        let mut fields: Vec<StructFieldInit<'src>> = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            let (field_name, field_name_span) = self.eat_ident()?;
+            self.eat(&Token::Equals)?;
+            let value = Box::new(self.parse_expr()?);
+            fields.push(StructFieldInit { name: field_name, name_span: field_name_span, value });
+            match self.peek() {
+                Token::Comma => { self.advance(); }
+                Token::RBrace => break,
+                _ => return Err(self.error_expected(
+                    "`,` or `}`",
+                    Some("add `,` to separate fields or `}` to close the struct literal"),
+                )),
+            }
+        }
+        let end = self.eat(&Token::RBrace)?;
+        let span = Span { start: start.start, end: end.end };
+        Ok(Expr::StructLit { name, name_span, fields, span })
     }
 }
 
@@ -372,5 +413,83 @@ mod tests {
         if let Expr::Field { object, .. } = &expr {
             assert!(matches!(**object, Expr::Propagate { .. }));
         } else { panic!("expected Field at top"); }
+    }
+
+    // --- Struct literals ---
+
+    #[test]
+    fn parse_struct_lit_basic() {
+        let expr = parse_expr("Point { x = 1.0, y = 2.0 }").unwrap();
+        if let Expr::StructLit { name, fields, .. } = expr {
+            assert_eq!(name, "Point");
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "x");
+            assert_eq!(fields[1].name, "y");
+        } else { panic!("expected StructLit"); }
+    }
+
+    #[test]
+    fn parse_struct_lit_trailing_comma() {
+        let expr = parse_expr("Point { x = 1.0, y = 2.0, }").unwrap();
+        if let Expr::StructLit { name, fields, .. } = expr {
+            assert_eq!(name, "Point");
+            assert_eq!(fields.len(), 2);
+        } else { panic!("expected StructLit"); }
+    }
+
+    #[test]
+    fn parse_struct_lit_empty() {
+        let expr = parse_expr("Empty {}").unwrap();
+        if let Expr::StructLit { name, fields, .. } = expr {
+            assert_eq!(name, "Empty");
+            assert!(fields.is_empty());
+        } else { panic!("expected StructLit"); }
+    }
+
+    #[test]
+    fn parse_struct_lit_nested() {
+        let expr = parse_expr("Outer { a = Inner { b = 1 } }").unwrap();
+        if let Expr::StructLit { name, fields, .. } = expr {
+            assert_eq!(name, "Outer");
+            assert_eq!(fields.len(), 1);
+            assert!(matches!(*fields[0].value, Expr::StructLit { name: "Inner", .. }));
+        } else { panic!("expected StructLit"); }
+    }
+
+    #[test]
+    fn struct_lit_in_if_condition_parses_as_ident_condition() {
+        let expr = parse_expr("if Point { 1 }").unwrap();
+        if let Expr::If { condition, .. } = expr {
+            assert!(matches!(*condition, Expr::Ident("Point", _)));
+        } else { panic!("expected If"); }
+    }
+
+    // Struct literals are also allowed inside function call arguments even in restricted contexts.
+    #[test]
+    fn struct_lit_in_call_arg_in_if_condition_allowed() {
+        // `foo(Point { x = 1.0 })` — the `Point {` inside call args re-enables struct lits.
+        let expr = parse_expr("if foo(Point { x = 1.0 }) { 1 }").unwrap();
+        if let Expr::If { condition, .. } = expr {
+            if let Expr::Call { args, .. } = *condition {
+                assert!(matches!(args[0], Expr::StructLit { name: "Point", .. }));
+            } else { panic!("expected Call"); }
+        } else { panic!("expected If"); }
+    }
+
+    // Parens re-enable struct literals in restricted positions, same as Rust.
+    #[test]
+    fn struct_lit_in_if_paren_condition_allowed() {
+        let expr = parse_expr("if (Point { x = 1.0, y = 2.0 }) { 1 }").unwrap();
+        if let Expr::If { condition, .. } = expr {
+            assert!(matches!(*condition, Expr::StructLit { name: "Point", .. }));
+        } else { panic!("expected If"); }
+    }
+
+    #[test]
+    fn regression_if_ident_condition() {
+        let expr = parse_expr("if flag { 1 }").unwrap();
+        if let Expr::If { condition, .. } = expr {
+            assert!(matches!(*condition, Expr::Ident("flag", _)));
+        } else { panic!("expected If"); }
     }
 }

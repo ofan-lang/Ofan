@@ -18,11 +18,12 @@ use crate::lexer::Lexer;
 pub struct Parser<'src> {
     pub(crate) tokens: Vec<(Token<'src>, Span)>,
     pub(crate) pos: usize,
+    pub(crate) no_struct_lit: bool,
 }
 
 impl<'src> Parser<'src> {
     pub fn new(tokens: Vec<(Token<'src>, Span)>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, no_struct_lit: false }
     }
 
     // --- Cursor primitives ---

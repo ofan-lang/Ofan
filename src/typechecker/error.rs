@@ -147,6 +147,30 @@ pub enum TypeError {
         duplicate_span: Span,
     },
 
+    /// Struct name used in a struct literal is not defined.
+    #[error("unknown struct `{name}` at byte {} — no struct with this name is defined\n\
+        suggestion: check the struct name or add a `struct {name}` declaration",
+        span.start)]
+    UndefinedStruct { name: String, span: Span },
+
+    /// A field name appears more than once in a struct literal.
+    #[error("struct `{struct_name}` initialized with duplicate field `{field_name}` at byte {} \
+        (first use at byte {})\n\
+        suggestion: remove the duplicate `{field_name}` initializer",
+        duplicate_span.start, first_span.start)]
+    DuplicateStructField {
+        struct_name: String,
+        field_name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
+    /// One or more fields of a struct are not initialized in a struct literal.
+    #[error("struct `{struct_name}` is missing fields at byte {}: {}\n\
+        suggestion: add initializers for the missing fields",
+        span.start, missing.join(", "))]
+    MissingStructFields { struct_name: String, missing: Vec<String>, span: Span },
+
     /// Field name not found in the struct's field table (§23).
     /// Emitted for `obj.field` when the struct has no field named `field`.
     #[error("field `{field_name}` not found on type `{type_name}` at byte {}{}\n\

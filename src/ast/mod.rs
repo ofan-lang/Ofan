@@ -8,7 +8,7 @@ mod item;
 
 pub use ty::{Type, RefRegion};
 pub use pattern::Pattern;
-pub use expr::{Expr, MatchArm, BinOp, UnaryOp, BorrowKind};
+pub use expr::{Expr, MatchArm, StructFieldInit, BinOp, UnaryOp, BorrowKind};
 pub use stmt::Stmt;
 pub use item::{Ast, Item, FunctionDef, ImplBlock, Param, StructDef, StructField, CopyMove};
 

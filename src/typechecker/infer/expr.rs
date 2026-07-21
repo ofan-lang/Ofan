@@ -1,4 +1,5 @@
-use crate::ast::{Expr, Literal};
+use std::collections::HashMap;
+use crate::ast::{Expr, Literal, StructFieldInit};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
@@ -122,6 +123,10 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
 
         // PHASE2: pattern variable binding + exhaustiveness
         Expr::Match { span, .. } => super::defer(ctx, "match expressions", *span),
+
+        Expr::StructLit { name, name_span, fields, span } => {
+            infer_struct_lit(name, *name_span, fields, *span, ctx, env)
+        }
     }
 }
 
@@ -427,4 +432,89 @@ fn infer_call(
     }
 
     if any_error { Ty::Error } else { sig.return_ty.clone() }
+}
+
+// ─── Struct literal inference ─────────────────────────────────────────────────
+
+fn infer_struct_lit(
+    name: &str,
+    name_span: Span,
+    fields: &[StructFieldInit<'_>],
+    span: Span,
+    ctx: &mut InferCtx,
+    env: &mut Env,
+) -> Ty {
+    // Extract what we need from the borrow before any &mut ctx calls.
+    let (field_order, field_types, is_generic) = match ctx.struct_defs.get(name) {
+        None => {
+            ctx.error(TypeError::UndefinedStruct { name: name.to_string(), span: name_span });
+            return Ty::Error;
+        }
+        Some(info) => {
+            if info.is_generic {
+                return super::defer(
+                    ctx,
+                    "struct literal of generic struct — requires type instantiation",
+                    span,
+                );
+            }
+            (info.field_order.clone(), info.fields.clone(), info.is_generic)
+        }
+    };
+    let _ = is_generic; // extracted for symmetry; used as early-return guard above
+
+    let available = field_order.clone();
+    let mut seen: HashMap<&str, Span> = HashMap::new();
+
+    for field_init in fields {
+        if let Some(&first_span) = seen.get(field_init.name) {
+            ctx.error(TypeError::DuplicateStructField {
+                struct_name: name.to_string(),
+                field_name: field_init.name.to_string(),
+                first_span,
+                duplicate_span: field_init.name_span,
+            });
+            infer_expr(&field_init.value, ctx, env);
+            continue;
+        }
+        seen.insert(field_init.name, field_init.name_span);
+
+        let val_ty = infer_expr(&field_init.value, ctx, env);
+
+        match field_types.get(field_init.name) {
+            None => ctx.error(TypeError::FieldNotFound {
+                type_name: name.to_string(),
+                field_name: field_init.name.to_string(),
+                span: field_init.name_span,
+                available: available.clone(),
+            }),
+            Some(expected_ty) => {
+                if val_ty != Ty::Error && *expected_ty != val_ty {
+                    ctx.error(TypeError::Mismatch {
+                        expected: expected_ty.clone(),
+                        found: val_ty,
+                        span: field_init.value.span(),
+                        suggestion: Some(format!(
+                            "field `{}` of `{}` expects `{:?}`",
+                            field_init.name, name, expected_ty
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
+    let missing: Vec<String> = field_order.iter()
+        .filter(|f| !seen.contains_key(f.as_str()))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        ctx.error(TypeError::MissingStructFields {
+            struct_name: name.to_string(),
+            missing,
+            span,
+        });
+    }
+
+    Ty::Named(name.to_string())
 }

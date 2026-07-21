@@ -6,7 +6,10 @@ impl<'src> Parser<'src> {
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr<'src>, ParseError> {
         let start = self.peek_span().start;
         self.eat(&Token::If)?;
+        let prev = self.no_struct_lit;
+        self.no_struct_lit = true;
         let condition = Box::new(self.parse_expr()?);
+        self.no_struct_lit = prev;
         let then_block = Box::new(self.parse_block()?);
 
         let else_branch = if matches!(self.peek(), Token::Else) {
@@ -30,7 +33,10 @@ impl<'src> Parser<'src> {
     pub(crate) fn parse_while_expr(&mut self) -> Result<Expr<'src>, ParseError> {
         let start = self.peek_span().start;
         self.eat(&Token::While)?;
+        let prev = self.no_struct_lit;
+        self.no_struct_lit = true;
         let condition = Box::new(self.parse_expr()?);
+        self.no_struct_lit = prev;
         let body = Box::new(self.parse_block()?);
         let end = body.span.end;
         Ok(Expr::While { condition, body, span: Span { start, end } })
@@ -58,7 +64,10 @@ impl<'src> Parser<'src> {
             None
         };
 
+        let prev = self.no_struct_lit;
+        self.no_struct_lit = true;
         let iterable = Box::new(self.parse_expr()?);
+        self.no_struct_lit = prev;
         let body = Box::new(self.parse_block()?);
         let end = body.span.end;
         Ok(Expr::For { binding, binding_span, borrow, iterable, body, span: Span { start, end } })
