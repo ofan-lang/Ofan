@@ -265,6 +265,43 @@ field reads and writes.
 This boundary maps cleanly to what the typechecker already phase-1-checks vs. what it
 defers: slice 1 consists entirely of constructs the typechecker fully resolves today.
 
+### Struct memory layout — declaration order, LLVM natural alignment
+
+Ofan structs use **declaration-order layout**: fields appear in memory in exactly the
+order written in the struct definition. LLVM's natural alignment rules apply — each field
+is aligned to its own type's alignment requirement, with padding inserted automatically
+between fields. No manual padding computation is required from the compiler.
+
+This is the C struct / `repr(C)` layout rule. The concrete reasons to use it:
+
+- **C interop compatibility.** The already-decided v1 C interop design (`extern` blocks,
+  call-into-C only — see `PHILOSOPHY.md`) requires that structs crossing the FFI boundary
+  have the layout C expects. Declaration-order + natural alignment satisfies that
+  requirement without a separate `repr` concept. Choosing a reordering layout now would
+  require either a breaking layout change at interop time or a two-repr design
+  (declaration-order for extern, reordered for "pure Ofan") — both violate pillar 3
+  (single canonical form).
+
+- **Deterministic layout for embedded / microcontroller targets.** Memory-mapped I/O and
+  hardware register structs require exact, known field offsets at compile time. Reordering
+  makes Ofan unsuitable for this niche without a secondary repr opt-in — which reintroduces
+  the two-repr problem above.
+
+- **Consistency with pillar 1** (no silent surprising behavior). Declaration-order layout
+  means a programmer who reads a struct definition can predict exactly where each field
+  lives in memory without tooling assistance or additional attributes.
+
+**Tradeoff acknowledged:** declaration-order layout can waste bytes to alignment padding
+versus an optimizing reorder (Rust's `repr(Rust)` reorders to minimize padding). This is
+accepted as the right tradeoff at this stage: predictability and C-interop compatibility
+outweigh a modest padding optimization that can be revisited as an explicit opt-in if
+ever needed.
+
+**Field order in struct literals is a separate concern.** A struct literal
+(`Point { y = 1.0, x = 0.0 }`) matches fields by name and is fully independent of
+declaration order (settled in PR #34 — see `docs/SYNTAX_SPEC.md` §10). The order fields
+appear in a literal has no bearing on in-memory layout.
+
 ### Ty::Error / Deferred gate
 
 Codegen is gated behind a hard structural check in `main.rs`: if `typechecker::infer()`
@@ -368,7 +405,8 @@ When assessing future candidates, ask: "can I name the subsystem as a domain con
 
 See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 
-- Struct literal construction (`Point { x: 1.0, y: 2.0 }`) — parser not yet written
+- Struct literal codegen — `Expr::StructLit` is fully typed (AST + parser + typechecker
+  complete, PR #34); codegen lowering to alloca/GEP/store is the next step (slice 2)
 - Enum typechecking — AST + parser complete; typechecker deferred
 - Traits / trait bounds
 - Modules / namespaces (`mod`, `use`)

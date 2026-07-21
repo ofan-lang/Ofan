@@ -379,6 +379,12 @@ Ok(Stats { mean = mean, min = min, max = max })
 symbol. `=` already means "a value is being bound" everywhere else (`let x = 5`). Using `=`
 here is consistency, not novelty, and closes a genuine ambiguity rather than a cosmetic one.
 
+**Field order in literals is independent of declaration order.** Fields are matched by
+name, not position — `Point { y = 1.0, x = 0.0 }` is identical to
+`Point { x = 0.0, y = 1.0 }`. This is a typechecking rule, not a layout rule; the
+in-memory layout is always declaration order (see `docs/ARCHITECTURE.md` —
+Struct memory layout).
+
 ---
 
 ## §11 Type aliasing
