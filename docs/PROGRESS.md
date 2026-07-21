@@ -53,7 +53,7 @@ This is consistent with the Rust restricted-expression approach.
   re-enable struct lits), `#[derive(Clone)]` removed from `StructInfo` (granular field clones instead),
   `HashMap` justified by `first_span` in `DuplicateStructField` diagnostic, call-arg re-enable added.
 
-**PR #34 open, DO NOT MERGE — awaiting user review.**
+**PR #34 merged 2026-07-21** (commit `da76545`). Struct literals are fully typed but **not yet lowerable** — codegen lowering blocked on the still-open struct-layout decision (field ordering in memory, alignment, padding policy). No codegen changes were made in this PR.
 
 **Pending / next steps (post-merge):**
 
