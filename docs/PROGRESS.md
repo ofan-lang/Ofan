@@ -3,6 +3,69 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-20 — slice 2 prerequisite: struct literal AST + parser + typechecker (PR #34)
+
+**What was done:**
+
+PR #34 (`feat/struct-lit-ast-parser-typecheck`): `Expr::StructLit` implemented end-to-end through
+the front half of the compiler. Struct literals are **fully typed but not yet lowerable** to codegen
+— blocked on the struct-layout design decision (still open).
+
+**Semantics settled in this PR:**
+- All fields required at the call-site (no partial initialization in phase 1; missing fields are
+  a hard error listing each omitted name).
+- Field order in the literal is independent of declaration order (matched by name, consistent with
+  `StructInfo.fields: HashMap<String, Ty>`).
+
+**Disambiguation (`no_struct_lit` flag on `Parser`):**
+Struct literals are suppressed in `if`/`while`/`for` conditions, `match` subjects, and arm guards
+(same restricted-expression design as Rust). Parentheses and call-argument positions re-enable them:
+`if (Point { x=1 }) { }` and `if foo(Point { x=1 }) { }` both parse correctly.
+
+Note: `if Foo { field = 1 } { body }` silently parses `Foo` as the condition and `{ field = 1 }`
+as the body — no parse error, but the typechecker immediately fires because `Foo` is not `bool`.
+This is consistent with the Rust restricted-expression approach.
+
+**New AST nodes:**
+- `src/ast/expr.rs`: `StructFieldInit<'src>` helper struct; `Expr::StructLit { name, name_span, fields, span }`
+
+**New parser code (`src/parser/`):**
+- `mod.rs`: `no_struct_lit: bool` field on `Parser`
+- `expr.rs`: `parse_struct_lit` method; `Ident` arm in `parse_primary` checks the flag; `LParen` arm
+  and `parse_call_args` reset the flag so parens and call args always allow struct literals
+- `control_flow.rs`: save/restore `no_struct_lit` around if/while/for condition + for iterable
+- `pattern.rs`: save/restore around match subject and arm guard
+
+**New typechecker code:**
+- `src/typechecker/error.rs`: `UndefinedStruct`, `DuplicateStructField` (first + duplicate byte
+  offsets), `MissingStructFields`
+- `src/typechecker/infer/expr.rs`: `infer_struct_lit`; uses granular field clones (not full
+  `StructInfo` clone) to avoid borrow-checker conflict; `HashMap<&str, Span>` for `seen` so
+  duplicate errors cite both source positions
+- `src/typechecker/infer/self_access.rs`: `scan_expr` arm for `Expr::StructLit`
+
+**Test state:** 224 passed, 0 failed. `cargo clippy -- -D warnings` clean.
+
+**Reviewer findings:**
+- `pillars-reviewer`: no violations on any of the 5 pillars. Non-blocking: `no_struct_lit` leaks
+  `true` on `?`-propagated parse error (harmless — whole parse aborts; latent smell, no fix needed now).
+- `rust-idiom-reviewer`: all actionable findings addressed in-session — LParen gap fixed (parens
+  re-enable struct lits), `#[derive(Clone)]` removed from `StructInfo` (granular field clones instead),
+  `HashMap` justified by `first_span` in `DuplicateStructField` diagnostic, call-arg re-enable added.
+
+**PR #34 open, DO NOT MERGE — awaiting user review.**
+
+**Pending / next steps (post-merge):**
+
+- **Struct layout decision (open):** decide struct memory layout (field ordering, alignment, padding
+  policy) before codegen lowering of `Expr::StructLit` is possible. This is the next design decision
+  needed to unblock slice 2 codegen.
+- **Struct literal codegen** (slice 2, after layout decision): lower `Expr::StructLit` to LLVM
+  alloca + GEP + store sequence in `src/codegen/`.
+- All pre-existing pending items from PR 33 session still apply (see below).
+
+---
+
 ## Last session: 2026-07-19 — codegen PR 33 (FnLower struct refactor, merged)
 
 **What was done:**
