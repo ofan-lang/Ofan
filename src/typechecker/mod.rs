@@ -2,19 +2,20 @@ pub mod error;
 pub use error::TypeError;
 
 pub mod ty;
-pub use ty::Ty;
+pub use ty::{FnSig, Ty};
 
 pub(crate) mod env;
 pub(crate) mod infer;
 
 use crate::ast::Ast;
 use crate::lexer::token::Span;
+use env::StructInfo;
 use std::collections::HashMap;
 
 /// Opaque result returned by a successful inference pass.
 ///
 /// Internal representation can grow (new fields, region solutions, etc.) without
-/// changing the public type — callers access it through `type_of` and `deferred`.
+/// changing the public type — callers access it through the provided accessor methods.
 pub struct InferResult {
     #[allow(dead_code)] // used by codegen in PR 31+
     pub(crate) type_map: HashMap<Span, Ty>,
@@ -24,6 +25,9 @@ pub struct InferResult {
     /// callers and the driver can warn the user — lowering a `Ty::Error`-typed
     /// node to codegen without this signal would violate pillar 1.
     pub deferred: Vec<TypeError>,
+    pub(crate) struct_defs: HashMap<String, StructInfo>,
+    #[allow(dead_code)] // reserved for future method/associated-fn lookup in codegen
+    pub(crate) impl_sigs: HashMap<String, HashMap<String, (FnSig, Span)>>,
     // PHASE2: pub(crate) region_solution: RegionSolution,
 }
 
@@ -39,6 +43,21 @@ impl InferResult {
     /// Codegen should refuse to lower nodes typed `Ty::Error`.
     pub fn has_deferred(&self) -> bool {
         !self.deferred.is_empty()
+    }
+
+    /// GEP index for `field_name` in `type_name`, in source declaration order.
+    pub fn struct_field_index(&self, type_name: &str, field_name: &str) -> Option<usize> {
+        self.struct_defs.get(type_name)?.field_order.iter().position(|f| f == field_name)
+    }
+
+    /// Resolved `Ty` of `field_name` inside `type_name`.
+    pub fn struct_field_type(&self, type_name: &str, field_name: &str) -> Option<&Ty> {
+        self.struct_defs.get(type_name)?.fields.get(field_name)
+    }
+
+    /// Field names in source declaration order.
+    pub fn struct_field_names(&self, type_name: &str) -> Option<&[String]> {
+        self.struct_defs.get(type_name).map(|info| info.field_order.as_slice())
     }
 }
 

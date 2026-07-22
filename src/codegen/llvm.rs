@@ -1,18 +1,19 @@
 use inkwell::{
     FloatPredicate, IntPredicate, OptimizationLevel,
+    AddressSpace,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
-    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
+    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType},
     values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue},
 };
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, Stmt, Type, UnaryOp};
+use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, Stmt, StructFieldInit, Type, UnaryOp};
 use crate::typechecker::{InferResult, Ty};
 
 /// LLVM compilation context for one compiler invocation.
@@ -135,6 +136,8 @@ struct FnLower<'ctx, 'b> {
     types: &'b InferResult,
     /// The LLVM function currently being populated; `Copy`.
     fn_val: FunctionValue<'ctx>,
+    /// LLVM named struct types, keyed by Ofan struct name. Built in Pass 0.
+    struct_types: &'b HashMap<String, StructType<'ctx>>,
 }
 
 impl<'ctx, 'b> FnLower<'ctx, 'b> {
@@ -165,7 +168,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .types
                         .type_of(init.span())
                         .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                    let llvm_ty = basic_type(ty, self.ctx)?;
+                    let llvm_ty = self.llvm_ty(ty)?;
                     let ptr = self
                         .builder
                         .build_alloca(llvm_ty, name)
@@ -214,6 +217,142 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         Ok(())
     }
 
+    // ── Type helpers ──────────────────────────────────────────────────────────
+
+    /// Resolve `ty` to an LLVM `BasicTypeEnum`, including named struct types.
+    fn llvm_ty(&self, ty: &Ty) -> Result<BasicTypeEnum<'ctx>, String> {
+        match ty {
+            Ty::Named(name) => self
+                .struct_types
+                .get(name.as_str())
+                .map(|st| BasicTypeEnum::StructType(*st))
+                .ok_or_else(|| format!("ICE: unknown struct type `{name}` in codegen")),
+            other => basic_type(other, self.ctx),
+        }
+    }
+
+    /// Extract the struct name from the type recorded for `span`.
+    ///
+    /// Handles both bare `Named` (value-position struct) and `Ref { inner: Named }`
+    /// (reference-receiver — the typechecker wraps non-consuming method receivers in Ref).
+    /// Both map to the same LLVM `%StructType*` pointer.
+    fn struct_name_of(&self, span: crate::lexer::token::Span) -> Result<&str, String> {
+        match self.types.type_of(span) {
+            Some(Ty::Named(n)) => Ok(n.as_str()),
+            Some(Ty::Ref { inner, .. }) => match inner.as_ref() {
+                Ty::Named(n) => Ok(n.as_str()),
+                other => Err(format!(
+                    "ICE: Ref inner type is not Named at byte {}: {other:?}",
+                    span.start
+                )),
+            },
+            other => Err(format!(
+                "ICE: expected Named or Ref<Named> type at byte {}, got {:?}",
+                span.start, other
+            )),
+        }
+    }
+
+    // ── Pointer-producing receiver helpers ────────────────────────────────────
+
+    /// Lower `expr` to a pointer suitable for use as a method self-receiver or
+    /// field-assignment target.
+    ///
+    /// - `Expr::Ident` → the pre-allocated variable alloca (already a pointer).
+    /// - `Expr::StructLit` → fresh alloca filled by `lower_struct_lit_into`, pointer returned.
+    /// - `Expr::Field` → GEP into the parent struct without a load (field pointer).
+    /// - Anything else → lower to value, spill to a fresh alloca, return that pointer.
+    fn lower_as_ptr<'src>(
+        &self,
+        expr: &Expr<'src>,
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        match expr {
+            Expr::Ident(name, _) => {
+                let &(ptr, _) = env
+                    .get(*name)
+                    .ok_or_else(|| format!("ICE: undefined variable `{name}` in lower_as_ptr"))?;
+                Ok(ptr)
+            }
+            Expr::StructLit { name, fields, .. } => {
+                let struct_ty = *self
+                    .struct_types
+                    .get(*name)
+                    .ok_or_else(|| format!("ICE: unknown struct `{name}` in lower_as_ptr"))?;
+                let ptr = self
+                    .builder
+                    .build_alloca(struct_ty, "recv_tmp")
+                    .map_err(|e| e.to_string())?;
+                self.lower_struct_lit_into(ptr, struct_ty, name, fields, env, loop_ctx)?;
+                Ok(ptr)
+            }
+            Expr::Field { object, field, .. } => {
+                let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
+                let struct_name = self.struct_name_of(object.span())?;
+                let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
+                    format!("ICE: struct `{struct_name}` not in struct_types")
+                })?;
+                let idx = self
+                    .types
+                    .struct_field_index(struct_name, field)
+                    .ok_or_else(|| {
+                        format!("ICE: field `{field}` not found in struct `{struct_name}`")
+                    })? as u32;
+                self.builder
+                    .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
+                    .map_err(|e| e.to_string())
+            }
+            other => {
+                let val = self.lower_expr(other, env, loop_ctx)?;
+                // lower_expr returns a PointerValue (struct alloca) for Expr::StructLit and any
+                // transparent wrapper (Block, If) around one. Return it directly — building a
+                // new alloca and storing the pointer would produce a pointer-to-pointer.
+                if let BasicValueEnum::PointerValue(ptr) = val {
+                    if matches!(self.types.type_of(other.span()), Some(Ty::Named(_))) {
+                        return Ok(ptr);
+                    }
+                }
+                let ty = val.get_type();
+                let ptr = self.builder.build_alloca(ty, "spill").map_err(|e| e.to_string())?;
+                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                Ok(ptr)
+            }
+        }
+    }
+
+    /// Store struct literal fields into `dest` in declaration order.
+    ///
+    /// The literal fields may appear in any order; this always writes them in
+    /// `field_order` (struct declaration order) to match the LLVM struct layout.
+    fn lower_struct_lit_into<'src>(
+        &self,
+        dest: PointerValue<'ctx>,
+        struct_ty: StructType<'ctx>,
+        type_name: &str,
+        fields: &[StructFieldInit<'src>],
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<(), String> {
+        let field_names = self
+            .types
+            .struct_field_names(type_name)
+            .ok_or_else(|| format!("ICE: struct `{type_name}` not in InferResult"))?;
+        for (i, fname) in field_names.iter().enumerate() {
+            let init_expr = fields
+                .iter()
+                .find(|f| f.name == fname)
+                .ok_or_else(|| format!("ICE: missing field `{fname}` in struct literal"))?;
+            let val = self.lower_expr(&init_expr.value, env, loop_ctx)?;
+            let gep = self
+                .builder
+                .build_struct_gep(struct_ty, dest, i as u32, "field_init")
+                .map_err(|e| e.to_string())?;
+            self.builder.build_store(gep, val).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     // ── Block / statement lowering ────────────────────────────────────────────
 
     /// Lower a braced block. Returns the tail expression value (if any); does NOT emit `ret`.
@@ -248,16 +387,15 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     ) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, init, .. } => {
-                let val = self.lower_expr(init, env, loop_ctx)?;
                 // Use the pre-hoisted alloca if available; otherwise emit inline (nested block).
-                let (ptr, _) = if let Some(&entry) = env.get(*name) {
+                let (ptr, llvm_ty) = if let Some(&entry) = env.get(*name) {
                     entry
                 } else {
                     let ty = self
                         .types
                         .type_of(init.span())
                         .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                    let llvm_ty = basic_type(ty, self.ctx)?;
+                    let llvm_ty = self.llvm_ty(ty)?;
                     let ptr = self
                         .builder
                         .build_alloca(llvm_ty, name)
@@ -265,34 +403,114 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     env.insert(*name, (ptr, llvm_ty));
                     (ptr, llvm_ty)
                 };
-                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                // Struct literals are lowered field-by-field directly into the destination
+                // alloca; other expressions are lowered to a value and stored normally.
+                match init.as_ref() {
+                    Expr::StructLit { name: sname, fields, .. } => {
+                        let struct_ty = llvm_ty.into_struct_type();
+                        self.lower_struct_lit_into(ptr, struct_ty, sname, fields, env, loop_ctx)?;
+                    }
+                    _ => {
+                        let val = self.lower_expr(init, env, loop_ctx)?;
+                        // Struct-typed inits flowing through a Block or If wrapper: lower_expr
+                        // returns a PointerValue (temp struct alloca). Load the struct value
+                        // from that pointer and store into the pre-hoisted dest alloca, rather
+                        // than storing the pointer bits into the struct slot.
+                        match (val, self.types.type_of(init.span())) {
+                            (BasicValueEnum::PointerValue(src_ptr), Some(Ty::Named(sname))) => {
+                                let struct_ty =
+                                    *self.struct_types.get(sname.as_str()).ok_or_else(|| {
+                                        format!("ICE: struct `{sname}` not in struct_types")
+                                    })?;
+                                let struct_val = self
+                                    .builder
+                                    .build_load(struct_ty, src_ptr, "struct_tmp")
+                                    .map_err(|e| e.to_string())?;
+                                self.builder
+                                    .build_store(ptr, struct_val)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            (other_val, _) => {
+                                self.builder
+                                    .build_store(ptr, other_val)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
             }
 
             Stmt::Assign { target, op, value, .. } => {
-                let Expr::Ident(name, _) = target.as_ref() else {
-                    return Err(
-                        "assignment to non-identifier targets not supported in PR 32".to_string(),
-                    );
-                };
-                let &(ptr, llvm_ty) = env
-                    .get(*name)
-                    .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
-                let rhs = self.lower_expr(value, env, loop_ctx)?;
-                let new_val = match op {
-                    None => rhs,
-                    Some(binop) => {
-                        let assign_ty =
-                            self.types.type_of(target.span()).ok_or_else(|| {
-                                format!("missing type for assignment target `{name}`")
-                            })?;
-                        let current = self
-                            .builder
-                            .build_load(llvm_ty, ptr, "load")
-                            .map_err(|e| e.to_string())?;
-                        self.lower_binary(*binop, current, rhs, assign_ty)?
+                match target.as_ref() {
+                    Expr::Ident(name, _) => {
+                        let &(ptr, llvm_ty) = env
+                            .get(*name)
+                            .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
+                        let rhs = self.lower_expr(value, env, loop_ctx)?;
+                        let new_val = match op {
+                            None => rhs,
+                            Some(binop) => {
+                                let assign_ty =
+                                    self.types.type_of(target.span()).ok_or_else(|| {
+                                        format!("missing type for assignment target `{name}`")
+                                    })?;
+                                let current = self
+                                    .builder
+                                    .build_load(llvm_ty, ptr, "load")
+                                    .map_err(|e| e.to_string())?;
+                                self.lower_binary(*binop, current, rhs, assign_ty)?
+                            }
+                        };
+                        self.builder.build_store(ptr, new_val).map_err(|e| e.to_string())?;
                     }
-                };
-                self.builder.build_store(ptr, new_val).map_err(|e| e.to_string())?;
+                    Expr::Field { object, field, .. } => {
+                        let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
+                        let struct_name = self.struct_name_of(object.span())?;
+                        let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
+                            format!("ICE: struct `{struct_name}` not in struct_types")
+                        })?;
+                        let idx = self
+                            .types
+                            .struct_field_index(struct_name, field)
+                            .ok_or_else(|| {
+                                format!(
+                                    "ICE: field `{field}` not found in struct `{struct_name}`"
+                                )
+                            })? as u32;
+                        let gep = self
+                            .builder
+                            .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
+                            .map_err(|e| e.to_string())?;
+                        let rhs = self.lower_expr(value, env, loop_ctx)?;
+                        let new_val = match op {
+                            None => rhs,
+                            Some(binop) => {
+                                let field_ty = self.llvm_ty(
+                                    self.types.struct_field_type(struct_name, field).ok_or_else(
+                                        || {
+                                            format!("ICE: field `{field}` type not found in struct `{struct_name}`")
+                                        },
+                                    )?,
+                                )?;
+                                let current = self
+                                    .builder
+                                    .build_load(field_ty, gep, "field_cur")
+                                    .map_err(|e| e.to_string())?;
+                                let assign_ty = self
+                                    .types
+                                    .type_of(target.span())
+                                    .ok_or_else(|| "missing type for field assign target".to_string())?;
+                                self.lower_binary(*binop, current, rhs, assign_ty)?
+                            }
+                        };
+                        self.builder.build_store(gep, new_val).map_err(|e| e.to_string())?;
+                    }
+                    _ => {
+                        return Err(
+                            "assignment to non-identifier/field targets not yet supported".to_string(),
+                        )
+                    }
+                }
             }
 
             Stmt::Return { value: Some(expr), .. } => {
@@ -473,7 +691,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
 
                     // Value-producing if/else: emit phi node.
-                    let llvm_ty = basic_type(if_ty.unwrap(), self.ctx)?;
+                    // Struct-typed branches produce PointerValues (their alloca ptrs),
+                    // so the phi type must be `ptr`, not the struct type itself.
+                    let if_ty_resolved = if_ty.unwrap();
+                    let llvm_ty: BasicTypeEnum<'ctx> = if matches!(if_ty_resolved, Ty::Named(_)) {
+                        self.ctx.ptr_type(AddressSpace::default()).into()
+                    } else {
+                        self.llvm_ty(if_ty_resolved)?
+                    };
                     let phi = self
                         .builder
                         .build_phi(llvm_ty, "if.val")
@@ -602,9 +827,70 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 Ok(call_site.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
             }
 
+            Expr::StructLit { name, fields, .. } => {
+                let struct_ty = *self.struct_types.get(*name).ok_or_else(|| {
+                    format!("ICE: unknown struct `{name}` in lower_expr")
+                })?;
+                let ptr = self
+                    .builder
+                    .build_alloca(struct_ty, "struct_tmp")
+                    .map_err(|e| e.to_string())?;
+                self.lower_struct_lit_into(ptr, struct_ty, name, fields, env, loop_ctx)?;
+                Ok(ptr.into())
+            }
+
+            Expr::Field { object, field, .. } => {
+                let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
+                let struct_name = self.struct_name_of(object.span())?;
+                let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
+                    format!("ICE: struct `{struct_name}` not in struct_types")
+                })?;
+                let idx = self
+                    .types
+                    .struct_field_index(struct_name, field)
+                    .ok_or_else(|| {
+                        format!("ICE: field `{field}` not found in struct `{struct_name}`")
+                    })? as u32;
+                let field_ty = self.llvm_ty(
+                    self.types
+                        .struct_field_type(struct_name, field)
+                        .ok_or_else(|| {
+                            format!(
+                                "ICE: field `{field}` type not found in struct `{struct_name}`"
+                            )
+                        })?,
+                )?;
+                let gep = self
+                    .builder
+                    .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
+                    .map_err(|e| e.to_string())?;
+                self.builder
+                    .build_load(field_ty, gep, "field")
+                    .map_err(|e| e.to_string())
+            }
+
+            Expr::MethodCall { object, method, args, .. } => {
+                let struct_name = self.struct_name_of(object.span())?;
+                let mangled = format!("{struct_name}_{method}");
+                let callee = self.module.get_function(&mangled).ok_or_else(|| {
+                    format!("ICE: method `{mangled}` not declared in module")
+                })?;
+                let self_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
+                let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> =
+                    vec![self_ptr.into()];
+                for a in args {
+                    call_args.push(self.lower_expr(a, env, loop_ctx)?.into());
+                }
+                let call = self
+                    .builder
+                    .build_call(callee, &call_args, "method_call")
+                    .map_err(|e| e.to_string())?;
+                Ok(call.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
+            }
+
             _ => Err(format!(
-                "expression not supported in PR 32 (at byte {}): \
-                 field access, method calls, match, for, cast, and borrow land in later PRs",
+                "expression not supported in this PR (at byte {}): \
+                 match, for, cast, borrow, and closures land in later PRs",
                 expr.span().start
             )),
         }
@@ -845,19 +1131,60 @@ fn lower_to_module<'ctx>(
 ) -> Result<Module<'ctx>, String> {
     let module = ctx.create_module("main");
 
-    // Pass 1: declare all function signatures before lowering any body.
-    // Required for forward calls (callee defined after caller) and recursive calls.
+    // Pass 0: register LLVM named struct types.
+    // Sub-pass 0a: create opaque types so forward references resolve.
+    let mut struct_types: HashMap<String, StructType<'ctx>> = HashMap::new();
     for item in &ast.items {
-        if let Item::Function(func) = item {
-            declare_function_sig(func, ctx, &module)?;
+        if let Item::Struct(def) = item {
+            struct_types.insert(def.name.to_string(), ctx.opaque_struct_type(def.name));
         }
-        // Item::Struct / Item::Impl: out of scope for PR 32.
+    }
+    // Sub-pass 0b: set struct bodies (all names now registered).
+    for item in &ast.items {
+        if let Item::Struct(def) = item {
+            let field_names = types
+                .struct_field_names(def.name)
+                .ok_or_else(|| format!("ICE: struct `{}` not in InferResult", def.name))?;
+            let field_tys: Vec<BasicTypeEnum<'ctx>> = field_names
+                .iter()
+                .map(|fname| {
+                    let ty = types.struct_field_type(def.name, fname).ok_or_else(|| {
+                        format!(
+                            "ICE: field `{fname}` type not found in struct `{}`",
+                            def.name
+                        )
+                    })?;
+                    basic_type(ty, ctx)
+                })
+                .collect::<Result<_, _>>()?;
+            struct_types[def.name].set_body(&field_tys, false);
+        }
     }
 
-    // Pass 2: lower function bodies (all callees already visible in module).
+    // Pass 1: declare all function and method signatures before lowering any body.
+    // Required for forward calls and mutual recursion.
     for item in &ast.items {
-        if let Item::Function(func) = item {
-            lower_function(func, types, ctx, &module)?;
+        match item {
+            Item::Function(func) => declare_function_sig(func, ctx, &module, &struct_types)?,
+            Item::Impl(block) => {
+                for method in &block.methods {
+                    declare_method_sig(block.type_name, method, ctx, &module, &struct_types)?;
+                }
+            }
+            Item::Struct(_) => {}
+        }
+    }
+
+    // Pass 2: lower function and method bodies (all callees already visible in module).
+    for item in &ast.items {
+        match item {
+            Item::Function(func) => lower_function(func, types, ctx, &module, &struct_types)?,
+            Item::Impl(block) => {
+                for method in &block.methods {
+                    lower_method(block.type_name, method, types, ctx, &module, &struct_types)?;
+                }
+            }
+            Item::Struct(_) => {}
         }
     }
 
@@ -869,17 +1196,56 @@ fn declare_function_sig<'ctx>(
     func: &FunctionDef<'_>,
     ctx: &'ctx Context,
     module: &Module<'ctx>,
+    struct_types: &HashMap<String, StructType<'ctx>>,
 ) -> Result<(), String> {
     let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = func
         .params
         .iter()
-        .map(|p| basic_type_from_ast(&p.ty, ctx).map(Into::into))
+        .map(|p| basic_type_from_ast(&p.ty, ctx, struct_types).map(Into::into))
         .collect::<Result<_, _>>()?;
     let fn_type = match func.return_ty.as_ref() {
         None => ctx.void_type().fn_type(&param_types, false),
-        Some(ty) => basic_type_from_ast(ty, ctx)?.fn_type(&param_types, false),
+        Some(ty) => basic_type_from_ast(ty, ctx, struct_types)?.fn_type(&param_types, false),
     };
     module.add_function(func.name, fn_type, None);
+    Ok(())
+}
+
+/// Pass 1 helper: declare a method from an impl block with a mangled name.
+///
+/// Mangling: `{TypeName}_{method_name}` (e.g. `Point_length`).
+/// Self receiver (first param with `Type::SelfTy`) is replaced by a pointer to the struct.
+/// Associated functions (no SelfTy receiver) are handled like free functions.
+fn declare_method_sig<'ctx>(
+    type_name: &str,
+    method: &FunctionDef<'_>,
+    ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    struct_types: &HashMap<String, StructType<'ctx>>,
+) -> Result<(), String> {
+    let mangled = format!("{type_name}_{}", method.name);
+    let has_self = method
+        .params
+        .first()
+        .is_some_and(|p| matches!(p.ty, Type::SelfTy(_)));
+
+    let mut param_types: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+    if has_self {
+        if !struct_types.contains_key(type_name) {
+            return Err(format!("ICE: struct `{type_name}` not found for method declaration"));
+        }
+        param_types.push(ctx.ptr_type(AddressSpace::default()).into());
+    }
+    let explicit_params = if has_self { &method.params[1..] } else { &method.params[..] };
+    for p in explicit_params {
+        param_types.push(basic_type_from_ast(&p.ty, ctx, struct_types).map(Into::into)?);
+    }
+
+    let fn_type = match method.return_ty.as_ref() {
+        None => ctx.void_type().fn_type(&param_types, false),
+        Some(ty) => basic_type_from_ast(ty, ctx, struct_types)?.fn_type(&param_types, false),
+    };
+    module.add_function(&mangled, fn_type, None);
     Ok(())
 }
 
@@ -889,6 +1255,7 @@ fn lower_function<'ctx, 'b, 'src>(
     types: &'b InferResult,
     ctx: &'ctx Context,
     module: &'b Module<'ctx>,
+    struct_types: &'b HashMap<String, StructType<'ctx>>,
 ) -> Result<(), String> {
     // Retrieve the pre-declared LLVM function from pass 1.
     let fn_val = module
@@ -899,7 +1266,7 @@ fn lower_function<'ctx, 'b, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
-    let lower = FnLower { builder, ctx, module, types, fn_val };
+    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     // Phase 1: emit all allocas at the entry block top (canonical mem2reg form).
@@ -907,7 +1274,7 @@ fn lower_function<'ctx, 'b, 'src>(
     let mut param_alloca_entries: Vec<(&'src str, PointerValue<'ctx>, BasicTypeEnum<'ctx>)> =
         Vec::new();
     for param in &func.params {
-        let llvm_ty = basic_type_from_ast(&param.ty, ctx)?;
+        let llvm_ty = basic_type_from_ast(&param.ty, ctx, struct_types)?;
         let ptr = lower
             .builder
             .build_alloca(llvm_ty, param.name)
@@ -966,6 +1333,119 @@ fn lower_function<'ctx, 'b, 'src>(
     Ok(())
 }
 
+/// Drive lowering of a method body. Mirrors `lower_function` but:
+/// - Uses the mangled name to look up the pre-declared LLVM function.
+/// - Inserts the self pointer as the first environment entry under `"self"`.
+fn lower_method<'ctx, 'b, 'src>(
+    type_name: &str,
+    method: &FunctionDef<'src>,
+    types: &'b InferResult,
+    ctx: &'ctx Context,
+    module: &'b Module<'ctx>,
+    struct_types: &'b HashMap<String, StructType<'ctx>>,
+) -> Result<(), String> {
+    let mangled = format!("{type_name}_{}", method.name);
+    let fn_val = module
+        .get_function(&mangled)
+        .ok_or_else(|| format!("ICE: `{mangled}` not pre-declared in pass 1"))?;
+
+    let entry = ctx.append_basic_block(fn_val, "entry");
+    let builder = ctx.create_builder();
+    builder.position_at_end(entry);
+
+    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
+    let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
+
+    let has_self = method
+        .params
+        .first()
+        .is_some_and(|p| matches!(p.ty, Type::SelfTy(_)));
+
+    // Track how many LLVM params have been consumed so far.
+    let mut llvm_param_idx: u32 = 0;
+
+    // Phase 1: register self and allocas.
+    //
+    // The self receiver is a %StructType* pointer passed as LLVM param 0.
+    // We insert it directly into env so that `lower_as_ptr(Ident("self"))` returns
+    // the pointer itself — no intermediate alloca needed. The BasicTypeEnum entry
+    // is the struct type so that any load of "self" (e.g. a tail `self` expression)
+    // would load the full struct value.
+    if has_self {
+        let struct_ty = *struct_types
+            .get(type_name)
+            .ok_or_else(|| format!("ICE: struct `{type_name}` not in struct_types"))?;
+        let self_llvm_param = fn_val
+            .get_nth_param(0)
+            .ok_or_else(|| "ICE: missing self param".to_string())?
+            .into_pointer_value();
+        env.insert("self", (self_llvm_param, struct_ty.into()));
+        llvm_param_idx = 1;
+    }
+
+    let explicit_params = if has_self { &method.params[1..] } else { &method.params[..] };
+    let mut param_alloca_entries: Vec<(&'src str, PointerValue<'ctx>, BasicTypeEnum<'ctx>)> =
+        Vec::new();
+    for param in explicit_params {
+        let llvm_ty = basic_type_from_ast(&param.ty, ctx, struct_types)?;
+        let ptr = lower
+            .builder
+            .build_alloca(llvm_ty, param.name)
+            .map_err(|e| e.to_string())?;
+        param_alloca_entries.push((param.name, ptr, llvm_ty));
+    }
+    lower.emit_allocas(&method.body.stmts, &mut env)?;
+
+    // Phase 2: store explicit param values.
+    for (name, ptr, llvm_ty) in param_alloca_entries {
+        let param_val = fn_val
+            .get_nth_param(llvm_param_idx)
+            .ok_or_else(|| format!("ICE: missing param {llvm_param_idx} for `{mangled}`"))?;
+        lower.builder.build_store(ptr, param_val).map_err(|e| e.to_string())?;
+        env.insert(name, (ptr, llvm_ty));
+        llvm_param_idx += 1;
+    }
+
+    // Phase 3: lower body statements.
+    for stmt in &method.body.stmts {
+        lower.lower_stmt(stmt, &mut env, None)?;
+        if lower
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_some()
+        {
+            break;
+        }
+    }
+
+    // Phase 4: tail expression → return.
+    if lower
+        .builder
+        .get_insert_block()
+        .and_then(|b| b.get_terminator())
+        .is_none()
+    {
+        if method.return_ty.is_none() {
+            lower.builder.build_return(None).map_err(|e| e.to_string())?;
+        } else {
+            match &method.body.tail {
+                Some(tail) => {
+                    let val = lower.lower_expr(tail, &env, None)?;
+                    lower.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
+                }
+                None => {
+                    return Err(format!(
+                        "method `{mangled}`: body has no terminator and no tail expression"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn stmt_span_start(stmt: &Stmt<'_>) -> usize {
     match stmt {
         Stmt::Let { span, .. }
@@ -985,19 +1465,28 @@ fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, 
         Ty::I32 => Ok(ctx.i32_type().into()),
         Ty::F64 => Ok(ctx.f64_type().into()),
         Ty::Bool => Ok(ctx.bool_type().into()),
-        other => Err(format!("type not supported in PR 32 codegen: {other}")),
+        other => Err(format!(
+            "type `{other}` is not yet lowerable; only i32, f64, bool, and struct types are \
+             supported — consider filing a feature request or using a supported type"
+        )),
     }
 }
 
 fn basic_type_from_ast<'ctx>(
     ty: &Type<'_>,
     ctx: &'ctx Context,
+    struct_types: &HashMap<String, StructType<'ctx>>,
 ) -> Result<BasicTypeEnum<'ctx>, String> {
     match ty {
         Type::Named { name: "i32", .. } => Ok(ctx.i32_type().into()),
         Type::Named { name: "f64", .. } => Ok(ctx.f64_type().into()),
         Type::Named { name: "bool", .. } => Ok(ctx.bool_type().into()),
-        other => Err(format!("return type not supported in PR 32 codegen: {other:?}")),
+        Type::Named { name, .. } => struct_types
+            .get(*name)
+            .map(|st| BasicTypeEnum::StructType(*st))
+            .ok_or_else(|| format!("unknown type `{name}` in codegen")),
+        // SelfTy is only valid as a receiver, never as a value-type param in declare
+        other => Err(format!("type not supported in codegen: {other:?}")),
     }
 }
 
@@ -1140,6 +1629,121 @@ mod tests {
         );
     }
 
+    // ── Struct / method tests ─────────────────────────────────────────────────
+
+    /// T12 — struct instantiation + field read: `Point { x=3, y=4 }.x == 3` (JIT).
+    /// Fields are stored in declaration order; literal order is independent.
+    #[test]
+    fn test_struct_field_read_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { let p = Point { x = 3, y = 4 }; p.x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 3, "expected p.x == 3, got {result}");
+    }
+
+    /// T13 — struct literal in reverse field order: `Point { y=4, x=3 }.x == 3` (JIT).
+    /// Proves GEP uses declaration order (not literal order).
+    #[test]
+    fn test_struct_lit_reverse_order_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { let p = Point { y = 4, x = 3 }; p.x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 3, "expected p.x == 3 (declaration order), got {result}");
+    }
+
+    /// T14 — method dispatch: `Counter_inc` mutates the caller's struct via self pointer (JIT).
+    /// Proves the self-as-pointer calling convention: writes inside the method are visible
+    /// in the caller after the call returns.
+    #[test]
+    fn test_method_self_pointer_mutation_jit() {
+        let ctx = Context::create();
+        let src = "struct Counter { value: i32 } \
+                   impl Counter { fn inc(self) { self.value = self.value + 1; } } \
+                   fn f() -> i32 { let c = Counter { value = 0 }; c.inc(); c.value }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 1, "expected c.value == 1 after c.inc(), got {result}");
+    }
+
+    /// T15 — same-name methods on two types: `Point_sum` and `Vec2_sum` must not collide (JIT).
+    /// Proves that the `{TypeName}_{method_name}` mangling scheme isolates method namespaces.
+    #[test]
+    fn test_same_name_methods_different_types_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   struct Vec2 { x: i32, y: i32 } \
+                   impl Point { fn sum(self) -> i32 { self.x + self.y } } \
+                   impl Vec2  { fn sum(self) -> i32 { self.x * self.y } } \
+                   fn f() -> i32 { \
+                       let p = Point { x = 3, y = 4 }; \
+                       let v = Vec2  { x = 3, y = 4 }; \
+                       p.sum() + v.sum() \
+                   }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        // Point: 3+4=7, Vec2: 3*4=12, total=19
+        assert_eq!(result, 19, "expected Point.sum()+Vec2.sum() == 19, got {result}");
+    }
+
+    /// T16 — struct literal as direct method receiver (no intermediate `let`): JIT.
+    /// Exercises the `lower_as_ptr(StructLit)` → fresh alloca → self pointer path.
+    #[test]
+    fn test_struct_lit_direct_method_receiver_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   impl Point { fn sum(self) -> i32 { self.x + self.y } } \
+                   fn f() -> i32 { Point { x = 1, y = 2 }.sum() }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 3, "expected Point{{1,2}}.sum() == 3, got {result}");
+    }
+
+    /// T17 — method returns struct field: `get_x` reads self.x through the self pointer (JIT).
+    #[test]
+    fn test_method_field_read_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   impl Point { fn get_x(self) -> i32 { self.x } } \
+                   fn f() -> i32 { let p = Point { x = 42, y = 0 }; p.get_x() }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 42, "expected p.get_x() == 42, got {result}");
+    }
+
     /// T11 — forward call + iterative factorial: fact(5) == 120.
     /// `fact5` is declared BEFORE `fact` in source — exercises two-pass function
     /// declaration (single-pass would fail: `fact` not yet visible when `fact5` is lowered).
@@ -1164,5 +1768,80 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 120, "expected fact(5) == 120, got {result}");
+    }
+
+    /// T18 — block-wrapped struct lit in let binding: tail-position transparency.
+    /// `let p = { Point { x=7, y=9 } }; p.x` must lower correctly — the Block wrapper
+    /// must not cause pointer bits to be stored into the struct alloca.
+    #[test]
+    fn test_block_wrapped_struct_let_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { let p = { Point { x = 7, y = 9 } }; p.x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 7, "expected block-wrapped struct let p.x == 7, got {result}");
+    }
+
+    /// T19 — block-wrapped struct lit as field access receiver: tail-position transparency.
+    /// `{ Point { x=7, y=9 } }.x` — the Block wrapper must not produce a pointer-to-pointer.
+    #[test]
+    fn test_block_wrapped_struct_field_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { { Point { x = 7, y = 9 } }.x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 7, "expected {{ Point {{x=7,y=9}} }}.x == 7, got {result}");
+    }
+
+    /// T20 — block-wrapped struct lit as method receiver: tail-position transparency.
+    /// `{ Point { x=7, y=9 } }.sum()` — self pointer must point to a real struct, not a
+    /// pointer-to-pointer.
+    #[test]
+    fn test_block_wrapped_struct_method_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   impl Point { fn sum(self) -> i32 { self.x + self.y } } \
+                   fn f() -> i32 { { Point { x = 7, y = 9 } }.sum() }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 16, "expected {{ Point{{7,9}} }}.sum() == 16, got {result}");
+    }
+
+    /// T21 — if/else producing a struct value, stored in let binding.
+    /// `let p = if true { Point{x=7,y=9} } else { Point{x=0,y=0} }; p.x` must
+    /// use a phi over pointer type, then load+copy into the dest alloca.
+    #[test]
+    fn test_if_else_struct_value_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { \
+                       let p = if true { Point { x = 7, y = 9 } } else { Point { x = 0, y = 0 } }; \
+                       p.x \
+                   }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+        };
+        assert_eq!(result, 7, "expected if/else struct p.x == 7, got {result}");
     }
 }
