@@ -3,6 +3,93 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-21 — slice-2 codegen: struct instantiation, field access, method dispatch (PR #35)
+
+**What was done:**
+
+PR #35 (`feat/struct-codegen`): closes the slice-2 codegen gap — the compiler could parse and
+typecheck structs but `lower_to_module` silently skipped all `Item::Struct` and `Item::Impl`
+items, and `lower_expr` returned an error for `Expr::StructLit`, `Expr::Field`, and
+`Expr::MethodCall`.
+
+**Architecture decisions settled:**
+- Struct memory layout: **declaration order, LLVM natural alignment** (C repr). Decided because
+  Ofan's v1 C interop requires struct layouts that C can read by raw field offset; a reordering
+  layout would either break interop or require a two-repr design that violates pillar 3.
+- Self receiver: **always pointer** in LLVM IR, regardless of struct size or Copy status. LLVM's
+  SROA+mem2reg promotes non-escaping pointer arguments to registers at -O1+. Uniform with existing
+  alloca-as-pointer model; avoids ABI-specific register-size thresholds (SysV x64 vs Win x64 differ).
+- Method mangling: **`{TypeName}_{method_name}`** (e.g. `Point_length`). Flat LLVM namespace
+  requires disambiguation. Scheme is stable (documented in ARCHITECTURE.md).
+- All three decisions documented in `docs/ARCHITECTURE.md` Codegen section.
+
+**New `InferResult` accessors** (`src/typechecker/mod.rs`):
+- `struct_field_index(type_name, field_name) -> Option<usize>` — GEP index in declaration order
+- `struct_field_type(type_name, field_name) -> Option<&Ty>` — resolved field type
+- `struct_field_names(type_name) -> Option<&[String]>` — field names in declaration order
+- `struct_defs` and `impl_sigs` now propagated into `InferResult` from `InferCtx` in `run()`.
+  Codegen never accesses `struct_defs` directly — enforced by `pub(crate)` + no re-export.
+
+**Three-pass `lower_to_module`** (`src/codegen/llvm.rs`):
+- Pass 0a: register opaque LLVM named struct types (forward-ref safe)
+- Pass 0b: set struct bodies using `struct_field_names` + `struct_field_type` accessors
+- Pass 1: declare fn sigs + method sigs (`declare_method_sig`, mangled names)
+- Pass 2: lower fn bodies + method bodies (`lower_method`)
+
+**Struct instantiation** (`Expr::StructLit`):
+- `lower_struct_lit_into`: iterates `struct_field_names` (declaration order, NOT literal order),
+  finds each field's init by name in the literal, GEPs + stores. Handles any literal order.
+- `Stmt::Let { init: StructLit }`: writes directly into pre-hoisted alloca (no temp alloca round-trip).
+
+**Field access** (`Expr::Field`):
+- Read: `lower_as_ptr` + `build_struct_gep` + `build_load`
+- Write (`Stmt::Assign { target: Field }`): GEP + store, with compound-assign support
+  (GEP + load current + `lower_binary` + store)
+
+**Method dispatch** (`Expr::MethodCall`):
+- `struct_name_of(span)` unwraps `Ty::Named` OR `Ty::Ref { inner: Named }` (the typechecker
+  wraps non-consuming receivers in a `Ref` — critical fix; would have been ICE in T14-T17 without it)
+- Mangled lookup + `lower_as_ptr(self)` + arg collection + `build_call`
+
+**`lower_method`**: LLVM param 0 (the `%Struct*` self pointer) is inserted directly into env as
+`"self"` — no intermediate `**Struct` alloca. `lower_as_ptr(Ident("self"))` returns it directly.
+
+**Tail-position transparency bug (Pillar 1 — found by pillars-reviewer, fixed before commit):**
+Block- or If-wrapped struct expressions were silently miscompiled. Root cause: `lower_expr`
+returns a `PointerValue` (struct alloca ptr) for `Expr::StructLit` and any transparent wrapper
+(Block evaluates to tail). Three call sites mishandled this:
+1. `Stmt::Let` `_ =>` arm: `build_store(dest_alloca, pointer_val)` stored pointer bits into struct
+2. `lower_as_ptr` `other` arm: spilled the pointer into a fresh alloca → pointer-to-pointer
+3. `Expr::If` phi: `basic_type` rejected `Ty::Named` → loud `Err` but with stale "PR 32" message
+Fixed by: (a) `lower_as_ptr` returns struct `PointerValue` directly, (b) `Stmt::Let` detects
+struct-typed `PointerValue` inits and does load+store, (c) `Expr::If` phi uses `ptr` type for
+struct-typed branches. Covered by T18-T21.
+
+**Reviewer findings and fixes:**
+- `rust-idiom-reviewer`: `.unwrap()` on `struct_field_index`/`struct_field_type`/`struct_types.get`
+  in all three lowering paths replaced with `ok_or_else(|| "ICE: ...")`. Redundant `'a` on
+  `struct_field_type` elided (sibling methods have no annotation; pillar 2 signal that the compiler
+  itself should model the ergonomics it promises to the language).
+- `pillars-reviewer`: found the tail-position transparency bug (case study of ARCHITECTURE.md §3 pattern);
+  all three silent-UB paths fixed and covered by regression tests. Also flagged stale "PR 32" error
+  message in `basic_type` — updated to a suggestion-bearing pillar-5-compliant message.
+
+**Test state:** 242 passed, 0 failed (+10 from 232: T12-T17 struct-codegen, T18-T21 tail-position).
+`cargo clippy --features codegen -- -D warnings` clean.
+
+**PR #35 open** at https://github.com/ofan-lang/Ofan/pull/35, targeting main. Not yet merged.
+
+**What's next (after PR #35 merges):**
+
+- Structs-as-fields: field type `Ty::Named` in `basic_type` currently errors; will need `self.llvm_ty`
+  threading into `lower_struct_lit_into` and Pass 0b.
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Method calls that return struct values used in expression position (currently returns `StructValue`
+  from `build_call`, not a `PointerValue`; `lower_as_ptr` would spill correctly but haven't tested).
+- Standard library prelude / `Option<T>` / `Checked<T, E>`.
+
+---
+
 ## Last session: 2026-07-20 — slice 2 prerequisite: struct literal AST + parser + typechecker (PR #34)
 
 **What was done:**
