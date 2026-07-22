@@ -55,7 +55,12 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
         Err(ctx.errors.into_iter().filter(TypeError::is_fatal).collect())
     } else {
         let deferred = ctx.errors; // only Deferred remain when no fatals
-        Ok(InferResult { type_map: ctx.type_map, deferred })
+        Ok(InferResult {
+            type_map: ctx.type_map,
+            deferred,
+            struct_defs: ctx.struct_defs,
+            impl_sigs: ctx.impl_sigs,
+        })
     }
 }
 

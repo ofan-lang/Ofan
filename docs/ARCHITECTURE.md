@@ -211,10 +211,10 @@ Placeholder variants already exist in `TypeError` and `Ty` for API stability.
 
 ## Codegen  (`src/codegen/`)
 
-**Current status:** skeleton only. `src/codegen/mod.rs` feature-gates `pub mod llvm`;
-`src/codegen/llvm.rs` contains `LlvmContext` wrapping `inkwell::context::Context` with
-no lowering logic. `main.rs` prints `"ofan: codegen not yet implemented"` and exits 1
-after a successful typechecking pass.
+**Current status:** slice 1 + slice 2 complete. `src/codegen/mod.rs` feature-gates
+`pub mod llvm`; `src/codegen/llvm.rs` contains the full lowering pipeline.
+Slice 1 covers primitives, arithmetic, free function calls, if/while/loop, let/return.
+Slice 2 adds struct instantiation, field read/write, and method dispatch.
 
 **Planned backend:** LLVM via inkwell (decided 2026-06-24; rationale in `PROGRESS.md` —
 multi-platform reach without per-arch codegen; Cranelift evaluated and rejected).
@@ -336,6 +336,31 @@ general rule.
 that requires matching the C ABI at the extern boundary specifically — a narrow,
 targeted decision at that call site, not a change to internal method-calling convention.
 
+### Method name mangling
+
+Methods are emitted as free LLVM functions with name **`{TypeName}_{method_name}`**
+(e.g., `Point_length`, `Counter_inc`). Associated functions (no self receiver) use the
+same scheme.
+
+**Why:** LLVM symbol namespaces are flat; two types sharing a method name (`Point::sum`
+and `Vec2::sum`) would collide without mangling. The `_` separator is safe because Ofan
+identifiers may not contain `_` as a prefix/suffix in user-visible names (reserved for
+compiler-generated symbols per §1 of SYNTAX_SPEC).
+
+**Scheme is stable.** Any future `extern`/linking story targeting Ofan methods from
+another language will see these names. Changing the scheme later would be an ABI break,
+so it is documented here and not treated as an implementation detail.
+
+**Exactly two places generate the mangled name** — consistency is enforced by symmetry,
+not a helper function:
+
+| Where | Code |
+|---|---|
+| Pass 1 declare | `format!("{type_name}_{}", method.name)` in `declare_method_sig` |
+| Call site | `format!("{struct_name}_{method}")` in `Expr::MethodCall` arm |
+
+If either side drifts, the module lookup returns `None` and an ICE fires immediately.
+
 ### Ty::Error / Deferred gate
 
 Codegen is gated behind a hard structural check in `main.rs`: if `typechecker::infer()`
@@ -439,8 +464,6 @@ When assessing future candidates, ask: "can I name the subsystem as a domain con
 
 See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 
-- Struct literal codegen — `Expr::StructLit` is fully typed (AST + parser + typechecker
-  complete, PR #34); codegen lowering to alloca/GEP/store is the next step (slice 2)
 - Enum typechecking — AST + parser complete; typechecker deferred
 - Traits / trait bounds
 - Modules / namespaces (`mod`, `use`)
@@ -449,7 +472,7 @@ See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 - Standard library / prelude (`Option<T>`, `Checked<T, E>` constructors)
 - C interop (explicit `extern` blocks — call-into-C only; decided in `PHILOSOPHY.md`)
 - `for` / `for-in`, `match`, cast (`as`), `?` operator (parser complete; typechecker deferred)
-- Codegen (any of it)
+- Codegen: slice 3+ (generics, enums, traits, closures, C interop ABI)
 
 ---
 
@@ -466,6 +489,9 @@ See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 | Add a new syntax construct | `src/parser/<appropriate-submodule>.rs` |
 | Add a new `TypeError` variant | `src/typechecker/error.rs` |
 | Add a type inference rule | `src/typechecker/infer/expr.rs` or `stmt.rs` |
+| Add a new expr lowering arm | `lower_expr` in `src/codegen/llvm.rs` |
+| Add a new stmt lowering arm | `lower_stmt` in `src/codegen/llvm.rs` |
+| Understand method mangling | Architecture §Codegen — Method name mangling |
 | Add a pass-1 declaration check | `src/typechecker/infer/mod.rs` (`collect_*` fns) |
 | Check Copy-eligibility for a type | `is_copy()` in `src/typechecker/infer/mod.rs` |
 | Understand the tail-position transparency pattern | `check_tail_field_own_non_copy` in `src/typechecker/infer/mod.rs` |
