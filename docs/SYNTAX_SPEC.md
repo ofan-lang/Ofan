@@ -1817,7 +1817,6 @@ need a follow-up pass once the parser/typechecker-relevant items above are resol
 
 ---
 
-*Source: content migrated from `docs/prds/2026-06-26-lexer.md` during the 2026-06-26
-documentation reorganization. Extended in a follow-up session the same day to resolve
-§1, §2, and the §7/§13 sub-items, and to add §14 (numeric literals) and §15 (string/char
-literals).*
+*Content originally migrated from an early lexer PRD (2026-06-26), since removed.
+Extended in a follow-up session the same day to resolve §1, §2, and the §7/§13
+sub-items, and to add §14 (numeric literals) and §15 (string/char literals).*
