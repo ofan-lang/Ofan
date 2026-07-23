@@ -51,10 +51,11 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
 
         // ── Block expression ──────────────────────────────────────────────────
         Expr::Block(block) => {
-            // Use Ty::Unit as return_ty placeholder — nested blocks don't carry a
-            // function return type; `return` in a block expression is handled by the
-            // enclosing function context (passed down through infer_stmt).
-            super::infer_block(block, &Ty::Unit, ctx, env)
+            // Thread the enclosing function's declared return type so that `return`
+            // statements inside block expressions type-check against the right type.
+            // The return type is stored on ctx.current_return_ty (a stack — see env.rs).
+            let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
+            super::infer_block(block, &ret, ctx, env)
         }
 
         // ── If expression ─────────────────────────────────────────────────────
@@ -63,7 +64,8 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
             if !matches!(cond_ty, Ty::Bool | Ty::Error) {
                 ctx.error(TypeError::NonBoolCondition { found: cond_ty, span: *span });
             }
-            let then_ty = super::infer_block(then_block, &Ty::Unit, ctx, env);
+            let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
+            let then_ty = super::infer_block(then_block, &ret, ctx, env);
             match else_branch {
                 Some(else_expr) => {
                     let else_ty = infer_expr(else_expr, ctx, env);
@@ -89,14 +91,16 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
             if !matches!(cond_ty, Ty::Bool | Ty::Error) {
                 ctx.error(TypeError::NonBoolCondition { found: cond_ty, span: *span });
             }
-            super::infer_block(body, &Ty::Unit, ctx, env);
+            let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
+            super::infer_block(body, &ret, ctx, env);
             Ty::Unit
         }
 
         // ── Loop expression ───────────────────────────────────────────────────
         Expr::Loop { body, span: _ } => {
             // Phase 1: treat as unit. Break-value type inference is deferred.
-            super::infer_block(body, &Ty::Unit, ctx, env);
+            let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
+            super::infer_block(body, &ret, ctx, env);
             Ty::Unit
         }
 
