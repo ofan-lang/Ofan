@@ -1,0 +1,153 @@
+# Ofan smoke test -- exercises full slice 1 + slice 2 compiler surface.
+# Each feature contributes a known value; main sums them into a checksum.
+# Expected exit code: 242
+
+struct Point { x: i32, y: i32 }
+
+impl Point {
+    # Inferred immutable borrow: body reads fields only.
+    fn score(self) -> i32 { self.x * 10 + self.y }
+
+    # Inferred mutable borrow: body assigns fields.
+    fn shift(self, dx: i32, dy: i32) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+
+struct Ring { value: i32, step: i32 }
+
+impl Ring {
+    # Same method name "score" as Point.
+    # Mangled to Ring_score vs Point_score -- must dispatch correctly.
+    fn score(self) -> i32 { self.value * self.step }
+
+    fn advance(self) { self.value = self.value + self.step; }
+}
+
+# Recursive free function -- exercises call stack, base case, recursion.
+fn fib(n: i32) -> i32 {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+# Exercises "return" inside if bodies -- demonstrates Bug 1 is fixed.
+# Demonstrates all six comparison operators across the two branches.
+fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
+    if v < lo { return lo; }
+    if v > hi { return hi; }
+    v
+}
+
+fn main() -> i32 {
+    # -- Struct instantiation: field-order independent (y before x) ----------
+    let mut p = Point { y = 7, x = 3 };
+    # p.x = 3, p.y = 7
+
+    let v1: i32 = p.score();
+    # v1 = 3*10 + 7 = 37
+
+    # -- Method mutation + field read/write ----------------------------------
+    p.shift(2, -3);
+    # p.x = 5, p.y = 4
+
+    let v2 = p.score();
+    # v2 = 5*10 + 4 = 54
+
+    p.x = p.x + p.y;
+    # p.x = 9
+
+    let v3 = p.x;
+    # v3 = 9
+
+    # -- Same method name on second type: mangling correctness ---------------
+    let mut r = Ring { value = 1, step = 3 };
+    r.advance();
+    # value = 4
+    r.advance();
+    # value = 7
+
+    let v4 = r.score();
+    # v4 = 7 * 3 = 21
+
+    # -- Direct struct field write (not inside a method) ---------------------
+    r.step = r.step * 2;
+    # step = 6
+    r.advance();
+    # value = 13
+
+    let v5 = r.value;
+    # v5 = 13
+
+    # -- Recursive free function ---------------------------------------------
+    let v6 = fib(7);
+    # fib(7) = 13
+
+    # -- Nested if/else as a value (all comparison operators) ----------------
+    let v7 = clamp(v6, 5, 10);
+    # v6 = 13 > hi = 10  ->  v7 = 10
+
+    # -- Arithmetic: + - * / % -----------------------------------------------
+    let v8 = (v7 + 3) * 2 - 4;
+    # (10+3)*2-4 = 22
+
+    let v9 = v8 / 4 + v8 % 5;
+    # 22/4=5, 22%5=2  ->  v9 = 7
+
+    # -- Logical operators: && || ! ------------------------------------------
+    let b1 = v9 == 7 && v6 >= 13;
+    # true && true = true
+    let v10 = if b1 { 1 } else { 0 };
+    # v10 = 1
+
+    let b2 = v9 != 7 || v7 <= 10;
+    # false || true = true
+    let v11 = if b2 { 2 } else { 0 };
+    # v11 = 2
+
+    let b3 = !(v10 > 5);
+    # !(1 > 5) = true
+    let v12 = if b3 { 4 } else { 0 };
+    # v12 = 4
+
+    # -- while loop (compound assignment += exercises Bug 2 fix) -------------
+    let mut wsum = 0;
+    let mut wi: i32 = 1;
+    while wi <= 4 {
+        wsum += wi;
+        wi += 1;
+    }
+    let v13 = wsum;
+    # v13 = 1+2+3+4 = 10
+
+    # -- loop + break --------------------------------------------------------
+    let mut lval = 0;
+    let mut li = 0;
+    loop {
+        li += 1;
+        lval += li * li;
+        if li >= 3 { break; }
+    }
+    let v14 = lval;
+    # v14 = 1+4+9 = 14
+
+    # -- if/else as statement (discarded value) ------------------------------
+    let mut v15 = 0;
+    if v14 > 10 {
+        v15 = v14 - 10;
+    } else {
+        v15 = 0;
+    }
+    # v14 = 14 > 10  ->  v15 = 4
+
+    # -- Block-wrapped struct literal (tail-position transparency, PR #35) ---
+    let p2 = { Point { x = 2, y = 1 } };
+    let v16 = p2.score();
+    # v16 = 2*10 + 1 = 21
+
+    # -- Explicit return from the top-level function body --------------------
+    # (Exercises "return" directly in a function body -- not inside if/while)
+    # 37+54+9+21+13+13+10+22+7+1+2+4+10+14+4+21 = 242
+    let result = v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9
+               + v10 + v11 + v12 + v13 + v14 + v15 + v16;
+    return result;
+}
