@@ -1,5 +1,7 @@
 # Ofan
 
+[![CI](https://github.com/ofan-lang/Ofan/actions/workflows/ci.yml/badge.svg)](https://github.com/ofan-lang/Ofan/actions/workflows/ci.yml)
+
 A systems programming language with compile-time memory safety and a low learning curve.
 Built in Rust, targeting LLVM.
 
