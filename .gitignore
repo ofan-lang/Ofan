@@ -32,6 +32,9 @@ desktop.ini
 # Logs
 *.log
 
+# Cargo — machine-local config (LLVM paths, env vars); use .cargo/config.toml.example as template
+.cargo/config.toml
+
 # Claude Code — local-only overrides (not shared project context)
 # CLAUDE.md and .claude/agents/ are intentionally tracked; don't add them here.
 .claude/settings.local.json

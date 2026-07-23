@@ -18,6 +18,32 @@ cargo build            # debug
 cargo build --release  # optimized
 ```
 
+### Building with the `codegen` feature (LLVM required)
+
+The `codegen` feature compiles the LLVM backend (JIT tests, end-to-end compilation):
+
+```sh
+cargo build --features codegen
+cargo test  --features codegen
+```
+
+**Windows path-with-spaces workaround:** if your LLVM install is under a path that
+contains spaces (e.g. `C:\Program Files (x86)\LLVM-18.1.8\`), the `cc-rs` build
+script inside `llvm-sys` splits the path at the space and produces a broken `-I` flag.
+Fix: install LLVM to a space-free path and set `LLVM_SYS_181_PREFIX` before building:
+
+```powershell
+$env:LLVM_SYS_181_PREFIX = "C:\LLVM18"   # adjust to your actual install
+cargo build --features codegen
+```
+
+To persist this automatically for the project, copy the provided template and adjust
+the path for your machine:
+
+```sh
+cp .cargo/config.toml.example .cargo/config.toml   # gitignored — machine-local
+```
+
 ## Test
 
 ```sh

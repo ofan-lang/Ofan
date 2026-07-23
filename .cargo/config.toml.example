@@ -1,0 +1,9 @@
+# Machine-local LLVM configuration for the `codegen` feature.
+#
+# Copy this file to .cargo/config.toml (gitignored) and adjust the path
+# to match your LLVM 18 install.  The path must NOT contain spaces —
+# see CONTRIBUTING.md for the reason.
+#
+# Windows example:
+[env]
+LLVM_SYS_181_PREFIX = "C:/LLVM18"
