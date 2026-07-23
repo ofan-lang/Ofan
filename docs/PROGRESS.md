@@ -3,6 +3,75 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-23 — repo made public; GitHub hardening, README rewrite, PRD cleanup
+
+**Branch:** direct to main (docs: commits)
+
+**What was done:**
+
+No compiler changes this session — focused on making the newly-public repo presentable
+and secure.
+
+### GitHub settings (repo went public this session)
+
+Applied via `gh` CLI and the GitHub REST API:
+
+**Security features enabled:**
+- Secret scanning + push protection (were disabled; free for public repos)
+- Dependabot vulnerability alerts + automatic security-update PRs
+- CodeQL intentionally skipped — limited Rust support, low signal
+
+**Branch ruleset `main-protection` created:**
+- Rules: require PR before merging, require 1 approval, block force push, block branch deletion
+- Bypass actor: `RepositoryRole` admin, mode `always` — MYS158 retains direct-push to main for `docs:`/`chore:` commits per `GIT_WORKFLOW.md`. Bypass confirmed working: first push after ruleset creation emitted `remote: Bypassed rule violations for refs/heads/main: Changes must be made through a pull request.` and landed cleanly.
+- Classic branch protection (`require PR + no bypassing`) was explicitly rejected — would break the docs/chore direct-push workflow that has been used throughout the project.
+
+**Community health files added:**
+- `SECURITY.md` — uses GitHub private advisory reporting; no formal SLA (pre-1.0, single-maintainer). Community health score 50% → 75%.
+- `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1 verbatim.
+
+**Collaborator status confirmed:**
+- KonorRC: read-only intentional (artist testing the language, not a code contributor).
+
+**Note on two undone security features:** `secret_scanning_non_provider_patterns` and `secret_scanning_validity_checks` were attempted but silently rejected by the API — these require GitHub Advanced Security (paid tier). Not a gap in the free-plan setup.
+
+### docs/prds/ — stale PRD removed
+
+`docs/prds/2026-06-26-lexer.md` was the only file in the directory. Classified as superseded: its content was migrated to `SYNTAX_SPEC.md` on the day it was written (the file's own header said so), but it had since accumulated misleading staleness — all 7 checklist items still marked open `[ ]`, code examples using `//` instead of Ofan's `#` comment syntax, and "deferred" constructs now fully implemented.
+
+Deleted the file and `docs/prds/` directory. Updated the trailing footnote in `SYNTAX_SPEC.md` (line 1820) from a live link to a past-tense provenance note: *"Content originally migrated from an early lexer PRD (2026-06-26), since removed."*
+
+### README rewrite
+
+README was critically stale: status line said *"Pre-code — documentation and tooling phase. No working compiler yet."* — false since PR #30 (2026-07-17). Rewrote entirely:
+
+- Status: pre-1.0, actively developed, core pipeline complete end-to-end
+- Real code example: `Point` struct + impl block + method calls (adapted from `examples/smoke_test.ofn`)
+- CLI section: `ofan build / run / check` with one-line descriptions
+- Build section: surfaces real friction up front (LLVM 18 required, `--features codegen`, `LLVM_SYS_181_PREFIX`, Windows path-with-spaces caveat)
+- Doc table: links to PHILOSOPHY.md, SYNTAX_SPEC.md, ARCHITECTURE.md (was missing), PROGRESS.md, GIT_WORKFLOW.md
+- "What's not built yet" section: enum typechecking, structs-as-fields, generics in codegen, stdlib, `for`/`match`/`?`/`as`, traits, modules, C interop, lifetime annotations
+
+### ARCHITECTURE.md — label fix
+
+`**Planned backend:** LLVM via inkwell` → `**Backend:** LLVM via inkwell`. "Planned" was stale since PR #30; the backend is implemented and working.
+
+**Commits:**
+- `6589c91` — docs: add SECURITY.md and CODE_OF_CONDUCT.md
+- `9fb4ee0` — docs: remove stale lexer PRD, update SYNTAX_SPEC.md footnote
+- `f9d1429` — docs: rewrite README for public repo, fix stale ARCHITECTURE.md label
+
+**Test state:** 251 passed, 0 failed (no code changes).
+
+**What's next:**
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named`; need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values in expression position (not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (pre-existing debt).
+- Standard library prelude / `Option<T>` / `Checked<T, E>`.
+
+---
+
 ## Last session: 2026-07-22 — CLI subcommands: build / run / check (PR #37)
 
 **Branch:** `feat/cli-subcommands` (PR #37, merged)
