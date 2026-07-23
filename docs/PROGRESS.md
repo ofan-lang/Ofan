@@ -77,16 +77,157 @@ struct-typed branches. Covered by T18-T21.
 **Test state:** 242 passed, 0 failed (+10 from 232: T12-T17 struct-codegen, T18-T21 tail-position).
 `cargo clippy --features codegen -- -D warnings` clean.
 
-**PR #35 open** at https://github.com/ofan-lang/Ofan/pull/35, targeting main. Not yet merged.
+**PR #35 merged** (end of 2026-07-21 session).
 
-**What's next (after PR #35 merges):**
+---
 
-- Structs-as-fields: field type `Ty::Named` in `basic_type` currently errors; will need `self.llvm_ty`
-  threading into `lower_struct_lit_into` and Pass 0b.
+## Session 2026-07-22 — fix two typechecker bugs found in smoke test
+
+**Branch:** `fix/typechecker-return-ty-and-compound-assign` (PR open)
+
+### Bug 1 — return_ty propagation into if/while/loop sub-blocks (FIXED)
+
+**Root cause:** `infer_expr_inner` called `infer_block` for if/while/loop bodies with a
+hard-coded `&Ty::Unit` as `return_ty`, so any `return VALUE;` nested inside those bodies
+fired a false `ReturnMismatch("expected Unit, found I32")`.
+
+**Fix:** Added `current_return_ty: Vec<Ty>` to `InferCtx` (a stack — see env.rs). `infer_fn`
+and `infer_method` push the declared return type before calling `infer_block` on the
+function body, pop after. The four `infer_block` call sites in `infer_expr_inner` (Block,
+If then_block, While body, Loop body) now read from the stack instead of `&Ty::Unit`. The
+else-branch nested case is handled automatically via recursive `infer_expr`.
+
+Why a stack: Ofan has no nested `fn` today, but a flat field would silently misbehave the
+moment that changes. The stack costs almost nothing and documents the intent.
+
+**Five regression tests:** return-in-if-then, return-in-if-else, return-in-while,
+return-in-loop, nested else { if ... } chain.
+
+### Bug 2 — compound assignment deferred (FIXED)
+
+**Root cause:** `Stmt::Assign { op: Some(_) }` emitted `TypeError::Deferred` immediately,
+blocking the entire codegen pipeline. No type checking was performed — `x += true` would
+have silently gone to codegen if not for the deferred gate.
+
+**Fix:** Removed the early-return defer path. Restructured `Stmt::Assign` so the
+`FieldWriteViaSharedRef` guard runs for both plain and compound assignments. After both
+operand types are inferred, dispatch on `op`:
+- `None` → existing `check_types` path (plain assignment)
+- `Some(op)` → new `ops::check_binary_op_types` helper
+
+`check_binary_op_types` applies the same operator-specific rules as `infer_binary`:
+arithmetic ops require matched numeric types, bitwise ops require I32+I32.
+
+**Four regression tests:** valid `x += 1`, invalid `x += true` (real Mismatch not Deferred),
+compound assign on a field (`p.x += 5`), compound assign through shared ref
+(FieldWriteViaSharedRef takes precedence, no secondary Mismatch).
+
+### Smoke test (examples/smoke_test.ofn) — workarounds removed
+
+- `fn clamp` converted from nested if/else value to explicit `return lo;` / `return hi;`
+  inside if bodies — exercises Bug 1 fix.
+- `while`/`loop` bodies converted from `x = x + y` to `x += y` — exercises Bug 2 fix.
+- "Known pre-existing limitations" comment block removed.
+- Exit code confirmed: **242** (behavior identical, only syntax changed).
+
+### Build friction fix (direct to main)
+
+- `CONTRIBUTING.md`: "Building with codegen feature" section added (LLVM path-with-spaces
+  workaround, `LLVM_SYS_181_PREFIX`, `config.toml.example` workflow).
+- `.cargo/config.toml.example`: new tracked template file.
+- `.gitignore`: `.cargo/config.toml` added (machine-specific, must not be committed).
+
+### Test state
+
+251 passed (242 + 9 new), 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+### What's next
+
 - Enum typechecking — AST + parser complete, typechecker not started.
-- Method calls that return struct values used in expression position (currently returns `StructValue`
-  from `build_call`, not a `PointerValue`; `lower_as_ptr` would spill correctly but haven't tested).
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named` when used as a field type;
+  need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values used in expression position (not yet tested end-to-end).
 - Standard library prelude / `Option<T>` / `Checked<T, E>`.
+
+---
+
+## Addendum 2026-07-21 — end-to-end smoke test + two compiler bugs found
+
+After PR #35 merged, wrote `examples/smoke_test.ofn`: a single Ofan program exercising the
+full slice-1 + slice-2 surface (structs, methods, field access, recursion, loops, arithmetic,
+logic, if/else as value, block-wrapped struct literals). Main returns an integer checksum that
+can only equal 242 if every exercised feature behaves correctly.
+
+**Two pre-existing compiler bugs discovered:**
+
+**Bug 1 — if-branch `return_ty` propagation** (`src/typechecker/infer/expr.rs`):
+`infer_expr(Expr::If)` calls `infer_block(then_block, &Ty::Unit, ctx, env)` — always passes
+`Ty::Unit` as the `return_ty` regardless of the enclosing function's declared return type.
+Any `return VALUE;` statement inside an if/while/loop body inside a non-Unit function gets
+the wrong expected type and fails with "expected Unit, found I32".
+Smallest repro: `fn f() -> i32 { if true { return 1; } 0 }`.
+**Workaround used in smoke test:** replaced `return VALUE;` inside if blocks with nested
+`if/else` value expressions. This is correct Ofan style — explicit return is only needed when
+exiting mid-function, which these cases weren't actually doing.
+
+**Bug 2 — compound assignment deferred** (`src/typechecker/infer/stmt.rs`):
+`Stmt::Assign { op: Some(_) }` emits `TypeError::Deferred` for all compound assignments
+(`+=`, `-=`, etc.), which sets `has_deferred()=true` and blocks the entire codegen pipeline.
+Smallest repro: `fn f() -> i32 { let mut x = 0; x += 1; x }`.
+**Workaround used in smoke test:** replaced all `x += y` with `x = x + y` form.
+
+**Smoke test result:**
+- Predicted exit code: **242** (hand-verified before running)
+- Actual exit code: **242** ✓
+
+Features verified end-to-end by the smoke test:
+- Struct instantiation (field-order-independent literals)
+- Method dispatch (same method name on two types: `Point_score` vs `Ring_score`)
+- Method mutation (field write via self pointer)
+- Direct struct field read/write from call sites
+- Recursive free functions (`fib(7) = 13`)
+- if/else as a value expression (nested for `clamp` logic)
+- Arithmetic operators: `+`, `-`, `*`, `/`, `%`
+- All six comparison operators: `<`, `>`, `<=`, `>=`, `==`, `!=`
+- Logical operators: `&&`, `||`, `!`
+- `while` loop with plain assignment counter
+- `loop` + `break`
+- if/else as statement (side-effecting branch, not a value)
+- Block-wrapped struct literal (tail-position transparency, regression of PR #35 fix)
+- Explicit `return` from top-level function body (not inside if/while)
+- Implicit tail return (all helper functions)
+
+**Build toolchain note (LLVM path issue):**
+On this Windows machine, LLVM 18 is installed at `C:\Program Files (x86)\LLVM-18.1.8\`.
+The `cc-rs` crate in `llvm-sys`'s build script splits that path at the space, producing a
+broken `-I` flag. Workaround: set `LLVM_SYS_181_PREFIX=C:\LLVM18` before building with the
+`codegen` feature — `C:\LLVM18` is a separate space-free LLVM 18 install. This is required for
+every `cargo build/test --features codegen` invocation. **This env var is not persisted
+anywhere in the repo** — add a `.cargo/config.toml` `[env]` entry if this becomes a friction
+point. Note: the debug build of the `ofan` binary links fine; the release binary currently
+fails to link due to missing WebAssembly target libs in `C:\LLVM18` (those are in the `Program
+Files` install but unreachable due to the path bug). The JIT test suite uses debug artifacts
+and is unaffected.
+
+**__chkstk linker warning:** the debug binary emits a cosmetic warning
+`undefined reference to '__chkstk'` from MSYS2/MinGW ld (LLVM MSVC libs + MinGW ABI mismatch).
+The binary runs correctly — this is a link-time warning, not a fatal error.
+
+**What's next:**
+
+- Fix Bug 1 (if-branch return_ty): thread enclosing function's return type into
+  `infer_block` calls inside `infer_expr(Expr::If)`, `Expr::While`, `Expr::Loop`.
+  This is a signature change to the internal `infer_block` helper — check how many
+  call sites need updating.
+- Fix Bug 2 (compound assignment deferred): implement `Stmt::Assign { op: Some(_) }`
+  type checking in the typechecker (currently all deferred). After fixing, rewrite the
+  smoke test `wsum = wsum + wi;` → `wsum += wi;` as a regression check.
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named` when used as a field type;
+  need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values used in expression position (not yet tested end-to-end).
+- Standard library prelude / `Option<T>` / `Checked<T, E>`.
+- Resolve `LLVM_SYS_181_PREFIX` / `.cargo/config.toml` setup so release builds work.
 
 ---
 
