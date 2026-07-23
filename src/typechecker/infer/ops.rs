@@ -4,6 +4,57 @@ use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::Ty;
 
+// ─── Compound assignment op checking ─────────────────────────────────────────
+
+/// Type-check a compound assignment `target op= value`.
+/// Applies the same operator rules as `infer_binary` but without re-inferring
+/// the operand expressions (already inferred by the caller).
+/// Cascade-suppressed when either operand is `Ty::Error`.
+pub(super) fn check_binary_op_types(
+    op: BinOp,
+    lhs_ty: &Ty,
+    rhs_ty: &Ty,
+    span: Span,
+    ctx: &mut InferCtx,
+) {
+    if matches!(lhs_ty, Ty::Error) || matches!(rhs_ty, Ty::Error) {
+        return;
+    }
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+            match (lhs_ty, rhs_ty) {
+                (Ty::I32, Ty::I32) | (Ty::F64, Ty::F64) => {}
+                _ => ctx.error(TypeError::Mismatch {
+                    expected: lhs_ty.clone(),
+                    found: rhs_ty.clone(),
+                    span,
+                    suggestion: Some(
+                        "compound arithmetic assignment requires both sides to be the \
+                         same numeric type (`i32` or `f64`)"
+                            .to_string(),
+                    ),
+                }),
+            }
+        }
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            match (lhs_ty, rhs_ty) {
+                (Ty::I32, Ty::I32) => {}
+                _ => ctx.error(TypeError::Mismatch {
+                    expected: Ty::I32,
+                    found: if lhs_ty != &Ty::I32 { lhs_ty.clone() } else { rhs_ty.clone() },
+                    span,
+                    suggestion: Some(
+                        "compound bitwise assignment requires `i32` operands".to_string(),
+                    ),
+                }),
+            }
+        }
+        // Only arithmetic and bitwise ops are valid compound-assignment operators;
+        // comparison, logical, and fallback ops cannot appear here from the parser.
+        _ => {}
+    }
+}
+
 // ─── Unary op typing ─────────────────────────────────────────────────────────
 
 pub(super) fn infer_unary(

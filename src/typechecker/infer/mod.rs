@@ -189,7 +189,9 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
         .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, None, f.span, ctx))
         .unwrap_or(Ty::Unit);
 
+    ctx.current_return_ty.push(declared_return.clone());
     let body_ty = infer_block(&f.body, &declared_return, ctx, env);
+    ctx.current_return_ty.pop();
 
     // FieldOwnNonCopy: detect partial moves in implicit function return (tail expr, §23).
     let tail_owns_non_copy = f.body.tail.as_ref()
@@ -275,7 +277,9 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
         .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, Some(impl_type_name), f.span, ctx))
         .unwrap_or(Ty::Unit);
 
+    ctx.current_return_ty.push(declared_return.clone());
     let body_ty = infer_block(&f.body, &declared_return, ctx, env);
+    ctx.current_return_ty.pop();
 
     // FieldOwnNonCopy: detect partial moves in implicit method return (tail expr, §23).
     let tail_owns_non_copy = f.body.tail.as_ref()
@@ -1183,5 +1187,93 @@ mod tests {
         let src = "struct Wrap<T> { val: T } fn f() { let _ = Wrap { val = 1 }; }";
         let result = infer_program(src).expect("no fatal errors");
         assert!(result.deferred.iter().any(|e| matches!(e, TypeError::Deferred { feature, .. } if feature.contains("generic struct"))));
+    }
+
+    // ── Bug 1 regression: return_ty propagation into if/while/loop blocks ────
+
+    #[test]
+    fn return_inside_if_then() {
+        // Bug 1: `return 42` inside an if-then body saw Ty::Unit as the expected
+        // return type and fired a false ReturnMismatch("expected Unit, found I32").
+        assert!(check_fn_errors("fn f(b: bool) -> i32 { if b { return 42; } 0 }").is_empty());
+    }
+
+    #[test]
+    fn return_inside_if_else() {
+        // Same bug in the else branch.
+        assert!(check_fn_errors(
+            "fn f(b: bool) -> i32 { if b { let _ = 1; } else { return 99; } 0 }"
+        ).is_empty());
+    }
+
+    #[test]
+    fn return_inside_while_body() {
+        assert!(check_fn_errors(
+            "fn f() -> i32 { \
+                let mut i = 0; \
+                while i < 10 { if i == 5 { return i; } i = i + 1; } \
+                0 \
+            }"
+        ).is_empty());
+    }
+
+    #[test]
+    fn return_inside_loop_body() {
+        assert!(check_fn_errors(
+            "fn f() -> i32 { \
+                let mut i = 0; \
+                loop { i = i + 1; if i >= 5 { return i; } } \
+                0 \
+            }"
+        ).is_empty());
+    }
+
+    #[test]
+    fn return_inside_nested_else_if() {
+        // Nested `else { if ... }` chain: both if-bodies have returns.
+        assert!(check_fn_errors(
+            "fn f(a: bool, b: bool) -> i32 { \
+                if a { return 1; } else { if b { return 2; } } \
+                0 \
+            }"
+        ).is_empty());
+    }
+
+    // ── Bug 2 regression: compound assignment type checking ───────────────────
+
+    #[test]
+    fn ok_compound_assign_i32() {
+        // Bug 2: `x += 1` previously emitted Deferred and blocked codegen.
+        assert!(check_fn_errors("fn f() -> i32 { let mut x = 0; x += 1; x }").is_empty());
+    }
+
+    #[test]
+    fn error_compound_assign_bool_rhs() {
+        // `x += true` must be a real Mismatch, not Deferred.
+        // Proves Deferred was not silently hiding a genuine type-safety gap.
+        let errs = check_fn_errors("fn f() -> i32 { let mut x = 0; x += true; x }");
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::Mismatch { expected: Ty::I32, found: Ty::Bool, .. }
+        )), "expected Mismatch(I32, Bool), got: {:?}", errs);
+    }
+
+    #[test]
+    fn ok_compound_assign_field() {
+        // `p.x += 5`: compound assign on a struct field (exercises PR #35 codegen path).
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { let mut p = Point { x = 0, y = 0 }; p.x += 5; p.x }";
+        assert!(infer_program_errors(src).is_empty());
+    }
+
+    #[test]
+    fn error_compound_assign_field_via_shared_ref() {
+        // Compound assign through a shared ref: FieldWriteViaSharedRef takes precedence;
+        // check_binary_op_types is never reached, no secondary Mismatch piled on.
+        let src = "struct Point { x: i32 } fn f(p: &Point) { p.x += 1; }";
+        let errs = infer_program_errors(src);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}", errs);
+        assert!(matches!(&errs[0],
+            TypeError::FieldWriteViaSharedRef { field_name, .. } if field_name == "x"
+        ), "expected FieldWriteViaSharedRef, got: {:?}", errs[0]);
     }
 }

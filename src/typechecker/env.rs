@@ -73,6 +73,13 @@ pub(crate) struct InferCtx {
     /// are collected here but do not prevent inference from continuing.
     pub(crate) errors: Vec<TypeError>,
 
+    /// Declared return type of the function currently being inferred.
+    /// Stored as a stack so nested `fn` items (not in Ofan today, but anticipated)
+    /// do not clobber the outer function's return type. A flat field would silently
+    /// misbehave the moment nested functions are added. Pushed on entry to
+    /// `infer_fn`/`infer_method`, popped on exit — every push/pop is paired.
+    pub(crate) current_return_ty: Vec<Ty>,
+
     // ── Phase 2 hooks (not yet implemented) ───────────────────────────────────
     // Uncomment when Hindley-Milner unification is introduced:
     // ty_var_count: u32,
@@ -91,6 +98,7 @@ impl InferCtx {
             struct_defs: HashMap::new(),
             type_map: HashMap::new(),
             errors: Vec::new(),
+            current_return_ty: Vec::new(),
         }
     }
 

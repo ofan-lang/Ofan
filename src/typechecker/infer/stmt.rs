@@ -76,18 +76,8 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
         }
 
         Stmt::Assign { target, op, value, span } => {
-            // Compound assignments (+=, -=, etc.) require knowing the operator's
-            // typing rule (e.g. += requires numeric); defer to avoid silently
-            // accepting `x += true` as type-correct.
-            // PHASE2: implement compound-assign operator type checking.
-            if op.is_some() {
-                super::expr::infer_expr(target, ctx, env);
-                super::expr::infer_expr(value, ctx, env);
-                super::defer(ctx, "compound assignment operator type checking", *span);
-                return;
-            }
-
-            // FieldWriteViaSharedRef: detect `(&T).field = ...` before full infer.
+            // FieldWriteViaSharedRef: detect `(&T).field [op]= ...` before full infer.
+            // Applies to both plain and compound assignments.
             if let Expr::Field { object, field, span: field_span, .. } = target.as_ref() {
                 let obj_ty = super::expr::infer_expr(object, ctx, env);
                 if let Ty::Ref { mutable: false, inner, .. } = &obj_ty {
@@ -110,12 +100,19 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
 
             let target_ty = super::expr::infer_expr(target, ctx, env);
             let value_ty = super::expr::infer_expr(value, ctx, env);
-            super::check_types(&target_ty, &value_ty, *span, ctx, || {
-                Some(format!(
-                    "assignment: left-hand side has type `{target_ty:?}`, \
-                     right-hand side has type `{value_ty:?}` — they must match"
-                ))
-            });
+            match op {
+                None => {
+                    super::check_types(&target_ty, &value_ty, *span, ctx, || {
+                        Some(format!(
+                            "assignment: left-hand side has type `{target_ty:?}`, \
+                             right-hand side has type `{value_ty:?}` — they must match"
+                        ))
+                    });
+                }
+                Some(bin_op) => {
+                    super::ops::check_binary_op_types(*bin_op, &target_ty, &value_ty, *span, ctx);
+                }
+            }
         }
 
         Stmt::Expr { expr, .. } => {
