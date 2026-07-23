@@ -1,10 +1,31 @@
 # Architecture — Ofan compiler
 
 The Ofan compiler is implemented in Rust (`src/`). The frontend is complete through
-typechecking (lexer, parser, typechecker phase 1); codegen exists as a skeleton only.
-For language syntax decisions see `docs/SYNTAX_SPEC.md`; for design pillars and
-semantic rationale see `docs/PHILOSOPHY.md`; for session history and what was decided
+typechecking (lexer, parser, typechecker phase 1); codegen covers slice 1 (primitives,
+arithmetic, control-flow, free-function calls) and slice 2 (struct instantiation, field
+access, method dispatch). A CLI surface (`ofan build`, `ofan run`, `ofan check`) is
+available. For language syntax decisions see `docs/SYNTAX_SPEC.md`; for design pillars
+and semantic rationale see `docs/PHILOSOPHY.md`; for session history and what was decided
 when see `docs/PROGRESS.md`.
+
+---
+
+## CLI surface  (`src/main.rs`)
+
+Three subcommands, all share the same `lex → parse → typecheck` pipeline:
+
+| Subcommand | What it does | Requires codegen? |
+|------------|--------------|:-----------------:|
+| `ofan check <file.ofn>` | Type-check only; exit 0 on success | No |
+| `ofan build <file.ofn> [-o <out>]` | Compile to binary (CWD default) | Yes |
+| `ofan run <file.ofn> [-- <args>…]` | Compile to PID-suffixed temp binary, run, forward exit code, clean up | Yes |
+
+**Key design points:**
+- `check` never calls `emit_to` — works without `--features codegen`. No LLVM invocation.
+- `build` default output is `./stem[.exe]` (CWD), not next-to-source. Deliberate change to avoid artifact clutter.
+- `run` writes to `$TEMP/stem_<pid>[.exe]` — PID suffix prevents collision on concurrent invocations. `TempBinary` RAII guard removes it on return. All locals drop before `std::process::exit` fires because `main()` delegates to `run() -> i32`.
+- `run_pipeline<F>` keeps the source `String` alive on the stack so `Ast<'src>` (which borrows `&'src str` slices) can be safely passed to the callback.
+- Without `--features codegen`, `build`/`run` print an actionable rebuild instruction; `check` is unaffected.
 
 ---
 
@@ -21,13 +42,15 @@ source text
     │  Ast<'src>
     ▼  src/typechecker/
  typechecker::infer(&ast)
-    │  InferResult  (deferred warnings → stderr)
-    ▼  src/codegen/
- ⚠ NOT YET IMPLEMENTED
-    (prints "codegen not yet implemented", exits 1)
+    │  InferResult  (deferred diagnostics → stderr)
+    ▼  src/codegen/llvm.rs   [requires --features codegen]
+ LlvmContext::emit(ast, result, out)
+    │  native object file → system linker → binary
+    ▼
+ binary  (or temp binary for `ofan run`)
 ```
 
-See `src/main.rs` for the wiring.
+See `src/main.rs` for the wiring (`run_pipeline`, `emit_to`, `TempBinary`).
 
 ---
 
@@ -143,6 +166,7 @@ Match and for-in bodies are parsed; their semantic typechecking is deferred
 | `struct_defs` | `HashMap<String, StructInfo>` | struct field tables |
 | `type_map` | `HashMap<Span, Ty>` | expression span → resolved type |
 | `errors` | `Vec<TypeError>` | accumulated fatal errors |
+| `current_return_ty` | `Vec<Ty>` | stack of enclosing function return types; pushed/popped in `infer_fn`/`infer_method` so nested constructs (if/while/loop bodies) can check `return VALUE;` against the correct type |
 
 `Env` is a separate scope stack for variable bindings (`push_scope / pop_scope / define / lookup`).
 
@@ -196,7 +220,6 @@ These constructs are accepted with a `TypeError::Deferred` diagnostic and typed 
 - `for` / `for-in` loops
 - `match` arm typechecking
 - Cast (`as`), `?` operator
-- Compound assignment type checking
 
 ### Phase 2 — not started
 
@@ -484,6 +507,7 @@ See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 | Design pillars + rationale | `docs/PHILOSOPHY.md` |
 | Session history + what was decided | `docs/PROGRESS.md` |
 | Process, commit workflow, agent use | `CLAUDE.md`, `.claude/agents/` |
+| Understand `ofan build` / `run` / `check` | Architecture §CLI surface; `src/main.rs` |
 | Change how a token is scanned | `src/lexer/<construct>.rs` |
 | Add a new AST node | `src/ast/<appropriate-submodule>.rs` |
 | Add a new syntax construct | `src/parser/<appropriate-submodule>.rs` |

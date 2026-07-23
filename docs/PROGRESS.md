@@ -3,7 +3,49 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-07-21 — slice-2 codegen: struct instantiation, field access, method dispatch (PR #35)
+## Last session: 2026-07-22 — CLI subcommands: build / run / check (PR #37)
+
+**Branch:** `feat/cli-subcommands` (PR #37, merged)
+
+**What was done:**
+
+Replaced bare `ofan <file.ofn>` invocation with three proper subcommands:
+
+```
+ofan build <file.ofn> [-o <output>]
+ofan run   <file.ofn> [-- <args>...]
+ofan check <file.ofn>
+```
+
+**Design decisions:**
+
+- `check` never touches LLVM — works with or without `--features codegen`. Useful for fast type-error feedback in editors and CI where the full codegen chain is not needed.
+- `build` default output lands in CWD (`./smoke_test.exe`) instead of next-to-source. Deliberate behavior change — avoids artifact clutter in `.ofn` directories. Source paths with no usable stem get an explicit diagnostic instead of a silent empty-named artifact (pillar 1).
+- `run` compiles to a PID-suffixed temp file (`smoke_test_<pid>.exe`) in `std::env::temp_dir()`, runs it, forwards exit code, cleans up via RAII. PID suffix prevents collision when two concurrent `ofan run` invocations target the same source file.
+- `std::process::exit` bypasses Drop. Solved with `fn main() { std::process::exit(run()); }` — all locals including `TempBinary` RAII guard drop before `exit` fires.
+- `Ast<'src>` borrows `&'src str` slices from the source string and cannot outlive it. Solved with a continuation pattern (`run_pipeline<F: FnOnce(&Ast, InferResult) -> i32>`) keeping the source alive on the same stack frame. No `Arc`, no clone.
+- Without `--features codegen`, `build`/`run` print a clear rebuild instruction and exit 1; `check` still works.
+- Exec-spawn failure in `run` includes the temp-binary path + what to check in the message (pillar 5). This path is verified by code review only — reproducing a successful-compile + failed-spawn scenario deterministically requires mocking `std::process::Command` or engineering an external failure (chmod, AV quarantine). Disclosed in PR #37 description.
+
+**Reviewer findings (addressed before merge):**
+
+- `rust-idiom-reviewer`: `file_stem().unwrap_or_default()` → silent empty-named artifact (fixed: explicit diagnostic + early return at both call sites, pillar 1). Avoidable `.clone()` on owned `PathBuf` in `cmd_build` (fixed: resolve `out` before closure). Concurrent `ofan run` temp-file collision risk (fixed: PID suffix). Pre-existing `codegen::llvm::emit` returns `Result<(), String>` — noted in PR as known debt; `emit_to` can't do better without a `CodegenError` enum.
+- `pillars-reviewer`: pillar-5 violation at `"ofan: run error: {e}"` — fixed to include temp-binary path + suggestion. Pre-existing LLVM coupling is pillar-4 pressure but unchanged; codegen-disabled binary now gives actionable rebuild instruction instead of an opaque error.
+
+**Test state:** 251 passed, 0 failed. `cargo clippy --features codegen -- -D warnings` clean.
+
+**PR #37 merged** (end of 2026-07-22 session).
+
+**What's next:**
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named`; need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values in expression position (not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (pre-existing debt, surfaced again by this session's rust-idiom-reviewer).
+- Standard library prelude / `Option<T>` / `Checked<T, E>`.
+
+---
+
+## Session: 2026-07-21 — slice-2 codegen: struct instantiation, field access, method dispatch (PR #35)
 
 **What was done:**
 
