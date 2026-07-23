@@ -239,7 +239,7 @@ Placeholder variants already exist in `TypeError` and `Ty` for API stability.
 Slice 1 covers primitives, arithmetic, free function calls, if/while/loop, let/return.
 Slice 2 adds struct instantiation, field read/write, and method dispatch.
 
-**Planned backend:** LLVM via inkwell (decided 2026-06-24; rationale in `PROGRESS.md` —
+**Backend:** LLVM via inkwell (decided 2026-06-24; rationale in `PROGRESS.md` —
 multi-platform reach without per-arch codegen; Cranelift evaluated and rejected).
 
 ### Linking strategy — LLVM static, system linker for final link
