@@ -3,6 +3,61 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-23 — GitHub Actions CI (PR #38)
+
+**Branch:** `chore/ci` (PR #38, merged)
+
+**What was done:**
+
+Added the first CI pipeline. Single job on `ubuntu-24.04`, triggered on push to `main`
+and all PRs targeting `main`.
+
+**Steps:**
+1. `cargo test` — baseline suite without codegen (fast, no LLVM required)
+2. `cargo test --features codegen` — full suite with LLVM
+3. `cargo clippy --features codegen -- -D warnings`
+
+**LLVM install approach:** `llvm-18-dev` + `libpolly-18-dev` + `clang-18` from Ubuntu
+24.04 default apt repos. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18`. Pinned to
+`ubuntu-24.04` (not `ubuntu-latest`) to avoid breakage if GitHub bumps the default to a
+release where LLVM 18 is no longer in default repos.
+
+**`libpolly-18-dev` was needed:** Initial run failed with `could not find native static
+library 'Polly'` — Ubuntu 24.04 splits Polly into its own package separate from
+`llvm-18-dev`. Added in a second commit before merge.
+
+**Caching:** `~/.cargo/registry`, `~/.cargo/git`, `target/` keyed on `Cargo.lock` hash.
+Cold compile of inkwell/llvm-sys takes several minutes; cache should make subsequent runs
+fast.
+
+**Scope decisions:**
+- Linux only — Windows has the LLVM path-with-spaces issue (dev machine covers Windows
+  locally); macOS untested and would fail on missing ARM backend
+- No formatter check (no Ofan-language formatter)
+- No multi-OS matrix (premature given X86+AMDGPU-only LLVM gap in PROGRESS.md)
+- PR (not direct push) for the first CI commit specifically — so the YAML itself could be
+  validated by the first run before landing on main. All future `chore:` CI tweaks can go
+  direct.
+
+**Merge note:** PR required admin bypass (`--admin`) since the `main-protection` ruleset
+requires 1 approval and MYS158 is the sole maintainer. This is the expected flow for
+solo-maintainer PRs on this repo.
+
+**Commits:** `89afa03`, `4028fbe` (Polly fix)
+
+**Test state:** 251 passed, 0 failed (CI green on merge).
+
+**CI badge added to README.md.**
+
+**What's next:**
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named`; need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values in expression position (not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (pre-existing debt).
+- Standard library prelude / `Option<T>` / `Checked<T, E>`.
+
+---
+
 ## Last session: 2026-07-23 — repo made public; GitHub hardening, README rewrite, PRD cleanup
 
 **Branch:** direct to main (docs: commits)
