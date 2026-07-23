@@ -1238,4 +1238,42 @@ mod tests {
             }"
         ).is_empty());
     }
+
+    // ── Bug 2 regression: compound assignment type checking ───────────────────
+
+    #[test]
+    fn ok_compound_assign_i32() {
+        // Bug 2: `x += 1` previously emitted Deferred and blocked codegen.
+        assert!(check_fn_errors("fn f() -> i32 { let mut x = 0; x += 1; x }").is_empty());
+    }
+
+    #[test]
+    fn error_compound_assign_bool_rhs() {
+        // `x += true` must be a real Mismatch, not Deferred.
+        // Proves Deferred was not silently hiding a genuine type-safety gap.
+        let errs = check_fn_errors("fn f() -> i32 { let mut x = 0; x += true; x }");
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::Mismatch { expected: Ty::I32, found: Ty::Bool, .. }
+        )), "expected Mismatch(I32, Bool), got: {:?}", errs);
+    }
+
+    #[test]
+    fn ok_compound_assign_field() {
+        // `p.x += 5`: compound assign on a struct field (exercises PR #35 codegen path).
+        let src = "struct Point { x: i32, y: i32 } \
+                   fn f() -> i32 { let mut p = Point { x = 0, y = 0 }; p.x += 5; p.x }";
+        assert!(infer_program_errors(src).is_empty());
+    }
+
+    #[test]
+    fn error_compound_assign_field_via_shared_ref() {
+        // Compound assign through a shared ref: FieldWriteViaSharedRef takes precedence;
+        // check_binary_op_types is never reached, no secondary Mismatch piled on.
+        let src = "struct Point { x: i32 } fn f(p: &Point) { p.x += 1; }";
+        let errs = infer_program_errors(src);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}", errs);
+        assert!(matches!(&errs[0],
+            TypeError::FieldWriteViaSharedRef { field_name, .. } if field_name == "x"
+        ), "expected FieldWriteViaSharedRef, got: {:?}", errs[0]);
+    }
 }
