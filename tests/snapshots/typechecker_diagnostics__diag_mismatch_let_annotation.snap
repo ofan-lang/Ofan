@@ -1,0 +1,6 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 103
+expression: "errors[0].to_string()"
+---
+type mismatch at byte 11: expected Bool, found I32 — variable `x` is annotated as `Bool` but the initializer has type `I32` — change the annotation or the initializer

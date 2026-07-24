@@ -3,6 +3,67 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-23 — golden diagnostic test suite (PR #40)
+
+**Branch:** `test/golden-diagnostics` (PR #40, open)
+
+**What was done:**
+
+Added a snapshot-based golden test suite using the `insta` crate to protect pillar-5
+error message quality from silent wording regressions.
+
+**Architecture change:** Added `[lib]` crate target (`src/lib.rs`) alongside the existing
+`[[bin]]`. Required so `tests/` integration tests can import the compiler pipeline via
+`use ofan::{lexer, parser, typechecker}`. `src/main.rs` now imports via `ofan::` rather
+than inline `mod` declarations. All 233 existing unit tests still pass in the library crate.
+
+**Files added:**
+- `src/lib.rs` — re-exports `pub mod ast, codegen, lexer, parser, typechecker`
+- `tests/typechecker_diagnostics.rs` — 10 snapshot tests for TypeError Display output
+- `tests/cli_diagnostics.rs` — 2 snapshot tests for CLI-level messages
+- `tests/snapshots/*.snap` — 12 accepted baseline snapshot files
+
+**Variants covered by golden tests:**
+
+| Test | TypeError variant | Key invariant locked in |
+|------|------------------|------------------------|
+| `diag_field_not_found_with_available` | `FieldNotFound` | Available fields in declaration order |
+| `diag_field_not_found_type_has_no_fields` | `FieldNotFound` | "type has no fields" branch text |
+| `diag_missing_struct_fields` | `MissingStructFields` | Missing fields join format |
+| `diag_method_not_found_sorted_available` | `MethodNotFound` | Available methods alphabetically sorted |
+| `diag_self_access_ambiguity` | `SelfAccessAmbiguity` | Dual byte-offset + note + suggestion wording |
+| `diag_consume_via_ref` | `ConsumeViaRef` | Multi-line note + two-suggestion format |
+| `diag_duplicate_method` | `DuplicateMethod` | §22 note text in the message |
+| `diag_duplicate_fn` | `DuplicateFn` | Dual-site byte citation format |
+| `diag_mismatch_let_annotation` | `Mismatch` | `{:?}` Debug format for `Ty` (Bool/I32 not bool/i32) |
+| `diag_field_write_via_shared_ref` | `FieldWriteViaSharedRef` | Multi-line note + suggestion |
+| `diag_check_ok` (CLI) | — | `ofan: check ok` wording |
+| `diag_codegen_disabled_build` (CLI) | — | Two-line codegen-disabled message |
+
+**CI enforcement:** `INSTA_UPDATE: "no"` added to global env in `.github/workflows/ci.yml`.
+Any snapshot mismatch (wording drift, byte-offset shift from source restructuring) fails CI.
+Snapshot update workflow: run tests to produce `.snap.new` files, review, rename to `.snap`,
+commit alongside the intentional change.
+
+**Snapshot update workflow (for future changes):**
+```sh
+cargo test --test typechecker_diagnostics  # fails on mismatch, writes .snap.new
+# review output — verify the change is intentional
+for f in tests/snapshots/*.snap.new; do mv "$f" "${f%.new}"; done
+# commit the updated .snap files alongside the wording change
+```
+
+**Test state:** 245 passed (233 unit + 12 integration), 0 failed. Clippy clean.
+
+**What's next:**
+- Merge PR #40 after CI green
+- Enum typechecking — AST + parser complete, typechecker not started.
+- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named`; need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
+- Method calls returning struct values in expression position (not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (pre-existing debt).
+
+---
+
 ## Last session: 2026-07-23 — GitHub Actions CI (PR #38)
 
 **Branch:** `chore/ci` (PR #38, merged)

@@ -1,0 +1,7 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 23
+expression: "errors[0].to_string()"
+---
+field `z` not found on type `Point` at byte 58 — available fields: x, y
+suggestion: check the field name against the definition of `Point`

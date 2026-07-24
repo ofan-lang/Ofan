@@ -1,0 +1,8 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 76
+expression: "errors[0].to_string()"
+---
+cannot call consuming method `Foo::consume` on a reference receiver at byte 54
+note: `consume` declares `move self`, which requires ownership of `Foo`, but the receiver is a reference and does not hold ownership
+suggestion: call this method on an owned `Foo` value, or change `move self` to `self` in the method signature if ownership is not required

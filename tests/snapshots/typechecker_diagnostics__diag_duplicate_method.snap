@@ -1,0 +1,8 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 86
+expression: "errors[0].to_string()"
+---
+duplicate method `bar` on type `Foo` — first definition at byte 14, duplicate at byte 43
+note: all `impl Foo` blocks merge into one namespace; each name must be unique across all of them
+suggestion: rename one of the conflicting definitions

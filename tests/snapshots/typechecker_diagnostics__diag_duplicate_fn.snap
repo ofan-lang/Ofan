@@ -1,0 +1,6 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 94
+expression: "errors[0].to_string()"
+---
+duplicate function `foo` — first definition at byte 3, duplicate at byte 15 — rename one of the conflicting definitions

@@ -1,0 +1,8 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 113
+expression: "errors[0].to_string()"
+---
+cannot assign to `Point::x` through a shared reference at byte 42
+note: the receiver is a shared borrow (`&Point`) — field mutation requires either a mutable borrow (`&mut Point`) or an owned value
+suggestion: use a `&mut Point` receiver, or restructure so the owning binding is used directly

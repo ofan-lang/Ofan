@@ -1,0 +1,6 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 52
+expression: "errors[0].to_string()"
+---
+method `missing` not found on type `Foo` at byte 67 — type `Foo` has methods: alpha, bad, zebra

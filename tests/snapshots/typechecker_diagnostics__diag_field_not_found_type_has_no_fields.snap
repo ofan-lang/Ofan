@@ -1,0 +1,7 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 31
+expression: "errors[0].to_string()"
+---
+field `x` not found on type `Empty` at byte 42 — type has no fields
+suggestion: check the field name against the definition of `Empty`

@@ -1,0 +1,6 @@
+---
+source: tests/cli_diagnostics.rs
+assertion_line: 13
+expression: stderr.trim()
+---
+ofan: check ok

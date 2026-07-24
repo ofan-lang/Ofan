@@ -1,0 +1,8 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 66
+expression: e.to_string()
+---
+cannot infer access mode for `self` in `bad` — consuming use at byte 67 conflicts with non-consuming use at byte 74
+note: these requirements conflict — the method cannot simultaneously borrow and consume
+suggestion: if consuming ownership is intended, write `move self` and restructure the body so any borrowing use precedes the move
