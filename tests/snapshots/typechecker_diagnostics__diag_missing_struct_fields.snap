@@ -1,0 +1,7 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 41
+expression: "errors[0].to_string()"
+---
+struct `Point` is missing fields at byte 49: y
+suggestion: add initializers for the missing fields

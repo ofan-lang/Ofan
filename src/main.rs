@@ -1,11 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-mod ast;
-mod codegen;
-mod lexer;
-mod parser;
-mod typechecker;
+use ofan::{ast, lexer, parser, typechecker};
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -196,7 +192,7 @@ fn emit_to(
     result: &typechecker::InferResult,
     out: &Path,
 ) -> Result<(), i32> {
-    use codegen::llvm::LlvmContext;
+    use ofan::codegen::llvm::LlvmContext;
     let ctx = LlvmContext::new();
     ctx.emit(ast, result, out).map_err(|e| {
         eprintln!("ofan: codegen error: {e}");

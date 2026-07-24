@@ -7,6 +7,10 @@ edition = "2021"
 name = "ofan"
 path = "src/main.rs"
 
+[lib]
+name = "ofan"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 thiserror = "2.0"
@@ -14,6 +18,9 @@ inkwell = { version = "0.9", features = ["llvm18-1"], optional = true }
 
 [features]
 codegen = ["inkwell"]
+
+[dev-dependencies]
+insta = "1"
 
 [profile.dev]
 lto = "thin"

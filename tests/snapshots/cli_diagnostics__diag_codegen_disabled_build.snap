@@ -1,0 +1,7 @@
+---
+source: tests/cli_diagnostics.rs
+assertion_line: 25
+expression: stderr.trim()
+---
+ofan: `build` and `run` require codegen support
+ofan: rebuild the compiler with: cargo build --features codegen
