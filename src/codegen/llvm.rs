@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, Stmt, StructFieldInit, Type, UnaryOp};
+use crate::lexer::token::Span;
 use crate::typechecker::{InferResult, Ty};
 
 /// LLVM compilation context for one compiler invocation.
@@ -138,32 +139,27 @@ struct FnLower<'ctx, 'b> {
     fn_val: FunctionValue<'ctx>,
     /// LLVM named struct types, keyed by Ofan struct name. Built in Pass 0.
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
+    /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
+    alloca_slots: HashMap<Span, PointerValue<'ctx>>,
 }
 
 impl<'ctx, 'b> FnLower<'ctx, 'b> {
     // ── Alloca hoisting ───────────────────────────────────────────────────────
 
     /// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT
-    /// builder position.  Callers must ensure this is the function entry block for
-    /// mem2reg eligibility.  Recurses into block-like `Stmt::Expr` so nested lets
-    /// inside if/while/loop bodies are also hoisted.
+    /// builder position into `self.alloca_slots`.  Callers must ensure this is the
+    /// function entry block for mem2reg eligibility.  Recurses into block-like
+    /// `Stmt::Expr` so nested lets inside if/while/loop bodies are also hoisted.
     ///
-    /// Shadowing (same name at multiple nesting depths) is deferred to PR 33:
-    /// when a name collision is detected the inner binding falls back to inline
-    /// alloca emission in `lower_stmt`.
-    fn emit_allocas<'src>(
-        &self,
-        stmts: &[Stmt<'src>],
-        env: &mut CodegenEnv<'ctx, 'src>,
-    ) -> Result<(), String> {
+    /// Each `Stmt::Let` gets its own alloca keyed by `name_span`, so shadowed
+    /// bindings — whether in the same block or a nested block — each have a
+    /// distinct slot.  `lower_stmt` updates `env[name]` incrementally, ensuring
+    /// `Expr::Ident` reads always resolve to the most-recently-processed binding.
+    fn emit_allocas<'src>(&mut self, stmts: &[Stmt<'src>]) -> Result<(), String> {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, init, .. } => {
-                    if env.contains_key(*name) {
-                        // Known limitation (PR 33): shadowed bindings reuse the outer alloca.
-                        // A full scope-stack is needed to assign each shadow its own slot.
-                        continue;
-                    }
+                Stmt::Let { name, name_span, init, .. } => {
                     let ty = self
                         .types
                         .type_of(init.span())
@@ -173,10 +169,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .builder
                         .build_alloca(llvm_ty, name)
                         .map_err(|e| e.to_string())?;
-                    env.insert(*name, (ptr, llvm_ty));
+                    self.alloca_slots.insert(*name_span, ptr);
+                    // Hoist lets that live inside block-like init expressions
+                    // (e.g. `let y = { let x = 1; x }`).
+                    self.emit_allocas_in_expr(init)?;
                 }
                 Stmt::Expr { expr, .. } => {
-                    self.emit_allocas_in_expr(expr, env)?;
+                    self.emit_allocas_in_expr(expr)?;
                 }
                 _ => {}
             }
@@ -185,31 +184,27 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 
     /// Recurse into block-like expressions to hoist their nested `let` allocas.
-    fn emit_allocas_in_expr<'src>(
-        &self,
-        expr: &Expr<'src>,
-        env: &mut CodegenEnv<'ctx, 'src>,
-    ) -> Result<(), String> {
+    fn emit_allocas_in_expr<'src>(&mut self, expr: &Expr<'src>) -> Result<(), String> {
         match expr {
             Expr::If { then_block, else_branch, .. } => {
-                self.emit_allocas(&then_block.stmts, env)?;
+                self.emit_allocas(&then_block.stmts)?;
                 if let Some(tail) = &then_block.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+                    self.emit_allocas_in_expr(tail)?;
                 }
                 if let Some(else_expr) = else_branch {
-                    self.emit_allocas_in_expr(else_expr, env)?;
+                    self.emit_allocas_in_expr(else_expr)?;
                 }
             }
             Expr::While { body, .. } | Expr::Loop { body, .. } => {
-                self.emit_allocas(&body.stmts, env)?;
+                self.emit_allocas(&body.stmts)?;
                 if let Some(tail) = &body.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+                    self.emit_allocas_in_expr(tail)?;
                 }
             }
             Expr::Block(block) => {
-                self.emit_allocas(&block.stmts, env)?;
+                self.emit_allocas(&block.stmts)?;
                 if let Some(tail) = &block.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+                    self.emit_allocas_in_expr(tail)?;
                 }
             }
             _ => {}
@@ -409,23 +404,21 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<(), String> {
         match stmt {
-            Stmt::Let { name, init, .. } => {
-                // Use the pre-hoisted alloca if available; otherwise emit inline (nested block).
-                let (ptr, llvm_ty) = if let Some(&entry) = env.get(*name) {
-                    entry
-                } else {
-                    let ty = self
-                        .types
-                        .type_of(init.span())
-                        .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                    let llvm_ty = self.llvm_ty(ty)?;
-                    let ptr = self
-                        .builder
-                        .build_alloca(llvm_ty, name)
-                        .map_err(|e| e.to_string())?;
-                    env.insert(*name, (ptr, llvm_ty));
-                    (ptr, llvm_ty)
-                };
+            Stmt::Let { name, name_span, init, .. } => {
+                // Retrieve the pre-hoisted alloca for this specific binding (keyed by its
+                // declaration span, so shadowed bindings each get their own slot).
+                // Update env[name] so subsequent Expr::Ident reads find this alloca.
+                let ty = self
+                    .types
+                    .type_of(init.span())
+                    .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
+                let llvm_ty = self.llvm_ty(ty)?;
+                let ptr = self
+                    .alloca_slots
+                    .get(name_span)
+                    .copied()
+                    .ok_or_else(|| format!("ICE: no pre-hoisted alloca for `{name}` at {name_span:?}"))?;
+                env.insert(*name, (ptr, llvm_ty));
                 // Struct literals are lowered field-by-field directly into the destination
                 // alloca; other expressions are lowered to a value and stored normally.
                 match init.as_ref() {
@@ -1289,11 +1282,14 @@ fn lower_function<'ctx, 'b, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
-    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
+    let mut lower = FnLower {
+        builder, ctx, module, types, fn_val, struct_types,
+        alloca_slots: HashMap::new(),
+    };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     // Phase 1: emit all allocas at the entry block top (canonical mem2reg form).
-    // Params first, then top-level body lets.
+    // Params first, then all body lets (including shadowed and nested ones).
     let mut param_alloca_entries: Vec<(&'src str, PointerValue<'ctx>, BasicTypeEnum<'ctx>)> =
         Vec::new();
     for param in &func.params {
@@ -1304,7 +1300,7 @@ fn lower_function<'ctx, 'b, 'src>(
             .map_err(|e| e.to_string())?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
-    lower.emit_allocas(&func.body.stmts, &mut env)?;
+    lower.emit_allocas(&func.body.stmts)?;
 
     // Phase 2: store param values into their allocas (after all alloca instructions).
     for (i, (name, ptr, llvm_ty)) in param_alloca_entries.into_iter().enumerate() {
@@ -1376,7 +1372,10 @@ fn lower_method<'ctx, 'b, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
-    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
+    let mut lower = FnLower {
+        builder, ctx, module, types, fn_val, struct_types,
+        alloca_slots: HashMap::new(),
+    };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     let has_self = method
@@ -1417,7 +1416,7 @@ fn lower_method<'ctx, 'b, 'src>(
             .map_err(|e| e.to_string())?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
-    lower.emit_allocas(&method.body.stmts, &mut env)?;
+    lower.emit_allocas(&method.body.stmts)?;
 
     // Phase 2: store explicit param values.
     for (name, ptr, llvm_ty) in param_alloca_entries {
@@ -1932,5 +1931,62 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 17, "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}");
+    }
+
+    /// T24 — nested-block shadow must not corrupt the outer binding.
+    /// `let x = 1; let y = { let x = 2; x }; x` — outer x must remain 1.
+    #[test]
+    fn test_shadow_nested_block_does_not_corrupt_outer_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let y = { let x = 2; x }; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 1, "outer x should remain 1 after inner block shadows it, got {result}");
+    }
+
+    /// T25 — same-block shadow: the second binding overwrites the name.
+    /// `let x = 1; let x = 2; x` — must return 2.
+    #[test]
+    fn test_shadow_same_block_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let x = 2; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 2, "shadow should make x == 2, got {result}");
+    }
+
+    /// T26 — capture before shadow: y captures x before the shadow overwrites x.
+    /// `let x = 1; let y = x; let x = 2; y` — must return 1.
+    #[test]
+    fn test_shadow_capture_before_shadow_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let y = x; let x = 2; y }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 1, "y should hold x's value before the shadow (1), got {result}");
     }
 }
