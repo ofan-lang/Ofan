@@ -98,7 +98,7 @@ detectable, documented runtime panic if not.
 
 The compiler handles a real subset of the language today. Missing pieces:
 
-- **Enum typechecking** — AST and parser complete; typechecker not started
+- **Enum declarations** — `Token::Enum` lexed; `Item::Enum` AST node and parser not yet implemented
 - **Structs as field types** — a struct containing another struct hits a codegen gap
 - **Generics in codegen** — generic functions defer through the pipeline; no lowering yet
 - **Standard library / prelude** — no `Option<T>`, I/O, or `println!`

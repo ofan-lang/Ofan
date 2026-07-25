@@ -5,7 +5,7 @@
 
 ## Last session: 2026-07-23 — golden diagnostic test suite (PR #40)
 
-**Branch:** `test/golden-diagnostics` (PR #40, open)
+**Branch:** `test/golden-diagnostics` (PR #40, merged 2026-07-24, CI green)
 
 **What was done:**
 
@@ -56,10 +56,10 @@ for f in tests/snapshots/*.snap.new; do mv "$f" "${f%.new}"; done
 **Test state:** 245 passed (233 unit + 12 integration), 0 failed. Clippy clean.
 
 **What's next:**
-- Merge PR #40 after CI green
-- Enum typechecking — AST + parser complete, typechecker not started.
-- Structs-as-fields: `basic_type` returns `Err` for `Ty::Named`; need to thread `struct_types` into `lower_struct_lit_into` Pass 0b.
-- Method calls returning struct values in expression position (not yet tested end-to-end).
+- ✅ PR #40 merged 2026-07-24, CI green.
+- Structs-as-fields: `basic_type()` at `src/codegen/llvm.rs:1157` (Pass 0b) doesn't handle `Ty::Named`; any struct with a struct-typed field errors at codegen. Fix: replace `basic_type(ty, ctx)` call with `self.llvm_ty(ty)` equivalent (struct_types is in scope at that point). Small targeted fix.
+- Enum declarations: `Item::Enum` AST node and parser not yet implemented (only `Token::Enum` in lexer). AST + parser + typechecker all needed.
+- Method calls returning struct values in expression position (not yet tested end-to-end — codegen spill path should handle it via `lower_as_ptr`).
 - `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (pre-existing debt).
 
 ---
