@@ -221,14 +221,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
     /// Resolve `ty` to an LLVM `BasicTypeEnum`, including named struct types.
     fn llvm_ty(&self, ty: &Ty) -> Result<BasicTypeEnum<'ctx>, String> {
-        match ty {
-            Ty::Named(name) => self
-                .struct_types
-                .get(name.as_str())
-                .map(|st| BasicTypeEnum::StructType(*st))
-                .ok_or_else(|| format!("ICE: unknown struct type `{name}` in codegen")),
-            other => basic_type(other, self.ctx),
-        }
+        resolve_ty(ty, self.ctx, self.struct_types)
     }
 
     /// Extract the struct name from the type recorded for `span`.
@@ -343,12 +336,42 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 .iter()
                 .find(|f| f.name == fname)
                 .ok_or_else(|| format!("ICE: missing field `{fname}` in struct literal"))?;
-            let val = self.lower_expr(&init_expr.value, env, loop_ctx)?;
             let gep = self
                 .builder
                 .build_struct_gep(struct_ty, dest, i as u32, "field_init")
                 .map_err(|e| e.to_string())?;
-            self.builder.build_store(gep, val).map_err(|e| e.to_string())?;
+            // Mirrors Stmt::Let: fast-path StructLit directly into dest, then lower-once
+            // for everything else and match on the (value, type) pair.
+            match init_expr.value.as_ref() {
+                Expr::StructLit { name: sname, fields: inner_fields, .. } => {
+                    // Nested struct literal: write directly into the GEP slot — no temp alloca.
+                    let inner_ty = *self.struct_types.get(*sname).ok_or_else(|| {
+                        format!("ICE: struct `{sname}` not in struct_types")
+                    })?;
+                    self.lower_struct_lit_into(gep, inner_ty, sname, inner_fields, env, loop_ctx)?;
+                }
+                _ => {
+                    let val = self.lower_expr(&init_expr.value, env, loop_ctx)?;
+                    // Struct-typed inits that flow through a Block/If wrapper return a
+                    // PointerValue (temp alloca). Load the struct value before storing.
+                    match (val, self.types.type_of(init_expr.value.span())) {
+                        (BasicValueEnum::PointerValue(src_ptr), Some(Ty::Named(sname))) => {
+                            let inner_ty =
+                                *self.struct_types.get(sname.as_str()).ok_or_else(|| {
+                                    format!("ICE: struct `{sname}` not in struct_types")
+                                })?;
+                            let struct_val = self
+                                .builder
+                                .build_load(inner_ty, src_ptr, "field_struct")
+                                .map_err(|e| e.to_string())?;
+                            self.builder.build_store(gep, struct_val).map_err(|e| e.to_string())?;
+                        }
+                        (other_val, _) => {
+                            self.builder.build_store(gep, other_val).map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1154,7 +1177,7 @@ fn lower_to_module<'ctx>(
                             def.name
                         )
                     })?;
-                    basic_type(ty, ctx)
+                    resolve_ty(ty, ctx, &struct_types)
                 })
                 .collect::<Result<_, _>>()?;
             struct_types[def.name].set_body(&field_tys, false);
@@ -1459,6 +1482,24 @@ fn stmt_span_start(stmt: &Stmt<'_>) -> usize {
 }
 
 // ─── Type helpers ─────────────────────────────────────────────────────────────
+
+/// Resolve a typechecker `Ty` to an LLVM `BasicTypeEnum`.
+///
+/// Handles both primitive types and named struct types. Used by Pass 0b
+/// (setting struct field layouts) and by `FnLower::llvm_ty` (body lowering).
+fn resolve_ty<'ctx>(
+    ty: &Ty,
+    ctx: &'ctx Context,
+    struct_types: &HashMap<String, StructType<'ctx>>,
+) -> Result<BasicTypeEnum<'ctx>, String> {
+    match ty {
+        Ty::Named(name) => struct_types
+            .get(name.as_str())
+            .map(|st| BasicTypeEnum::StructType(*st))
+            .ok_or_else(|| format!("ICE: unknown struct type `{name}` in codegen")),
+        other => basic_type(other, ctx),
+    }
+}
 
 fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, String> {
     match ty {
@@ -1843,5 +1884,53 @@ mod tests {
             engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
         };
         assert_eq!(result, 7, "expected if/else struct p.x == 7, got {result}");
+    }
+
+    /// T22 — struct-as-field: Entity containing Point; two-level field read (forward order).
+    /// Exercises the Pass 0b fix: resolve_ty handles Ty::Named for struct-typed fields.
+    #[test]
+    fn test_struct_as_field_nested_read_jit() {
+        let ctx = Context::create();
+        let src = "struct Point { x: i32, y: i32 } \
+                   struct Entity { position: Point, id: i32 } \
+                   fn make() -> i32 { \
+                       let e = Entity { position = Point { x = 3, y = 4 }, id = 10 }; \
+                       e.position.x + e.position.y + e.id \
+                   }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("make")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 17, "expected e.position.x + e.position.y + e.id == 17, got {result}");
+    }
+
+    /// T23 — struct-as-field: Entity declared before Point (reverse order).
+    /// Confirms Pass 0a/0b forward-reference handling is order-independent.
+    #[test]
+    fn test_struct_as_field_reverse_decl_order_jit() {
+        let ctx = Context::create();
+        let src = "struct Entity { position: Point, id: i32 } \
+                   struct Point { x: i32, y: i32 } \
+                   fn make() -> i32 { \
+                       let e = Entity { position = Point { x = 3, y = 4 }, id = 10 }; \
+                       e.position.x + e.position.y + e.id \
+                   }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("make")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 17, "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}");
     }
 }
