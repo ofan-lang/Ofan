@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, UnaryOp};
+use crate::ast::{BinOp, Expr, Literal, UnaryOp};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
@@ -64,6 +64,17 @@ pub(super) fn infer_unary(
     ctx: &mut InferCtx,
     env: &mut Env,
 ) -> Ty {
+    // -2147483648 = i32::MIN: the bare literal 2147483648 exceeds i32::MAX and would
+    // trigger IntegerOutOfRange, but under negation it is a valid i32. Intercept before
+    // infer_expr reaches the literal to suppress the false error.
+    if matches!(op, UnaryOp::Neg) {
+        if let Expr::Literal(Literal::Integer(n), lit_span) = expr {
+            if *n == (i32::MAX as i64) + 1 {
+                ctx.record(*lit_span, Ty::I32);
+                return Ty::I32;
+            }
+        }
+    }
     let operand_ty = super::expr::infer_expr(expr, ctx, env);
     match op {
         UnaryOp::Neg => match &operand_ty {

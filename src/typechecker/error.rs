@@ -22,6 +22,11 @@ pub enum TypeError {
         suggestion: Option<String>,
     },
 
+    #[error("integer literal {value} is out of range for `i32` at byte {} — \
+        valid range is -2147483648 to 2147483647; use a smaller literal value",
+        span.start)]
+    IntegerOutOfRange { value: i64, span: Span },
+
     #[error("undefined variable `{name}` at byte {}{}", span.start,
         suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     UndefinedVariable {
