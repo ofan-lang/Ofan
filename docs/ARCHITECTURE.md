@@ -487,7 +487,8 @@ When assessing future candidates, ask: "can I name the subsystem as a domain con
 
 See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 
-- Enum typechecking — AST + parser complete; typechecker deferred
+- Enum declarations — `Item::Enum` AST node and parser not yet implemented (`Token::Enum` lexed; full AST + parser + typechecker needed)
+- `match` / `for` typechecking — AST + parser complete; typechecking deferred (produces `Ty::Error`)
 - Traits / trait bounds
 - Modules / namespaces (`mod`, `use`)
 - Generic instantiation (phase 2 typechecker)
