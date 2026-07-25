@@ -170,23 +170,70 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .build_alloca(llvm_ty, name)
                         .map_err(|e| e.to_string())?;
                     self.alloca_slots.insert(*name_span, ptr);
-                    // Hoist lets that live inside block-like init expressions
-                    // (e.g. `let y = { let x = 1; x }`).
                     self.emit_allocas_in_expr(init)?;
                 }
-                Stmt::Expr { expr, .. } => {
-                    self.emit_allocas_in_expr(expr)?;
+                Stmt::Expr { expr, .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Assign { target, value, .. } => {
+                    self.emit_allocas_in_expr(target)?;
+                    self.emit_allocas_in_expr(value)?;
                 }
+                Stmt::Return { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Break { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Const { init, .. } => self.emit_allocas_in_expr(init)?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    /// Recurse into block-like expressions to hoist their nested `let` allocas.
+    /// Recurse into every expression position that can contain a nested `let` binding,
+    /// hoisting allocas to the function entry block so they are mem2reg-eligible and
+    /// never execute more than once regardless of control flow.
     fn emit_allocas_in_expr<'src>(&mut self, expr: &Expr<'src>) -> Result<(), String> {
         match expr {
-            Expr::If { then_block, else_branch, .. } => {
+            // Leaf nodes — no sub-expressions to traverse.
+            Expr::Literal(..) | Expr::Ident(..) => {}
+
+            Expr::Unary { expr, .. } => self.emit_allocas_in_expr(expr)?,
+
+            Expr::Binary { left, right, .. } => {
+                self.emit_allocas_in_expr(left)?;
+                self.emit_allocas_in_expr(right)?;
+            }
+
+            Expr::Call { callee, args, .. } => {
+                self.emit_allocas_in_expr(callee)?;
+                for arg in args {
+                    self.emit_allocas_in_expr(arg)?;
+                }
+            }
+
+            Expr::MethodCall { object, args, .. } => {
+                self.emit_allocas_in_expr(object)?;
+                for arg in args {
+                    self.emit_allocas_in_expr(arg)?;
+                }
+            }
+
+            Expr::Field { object, .. } => self.emit_allocas_in_expr(object)?,
+            Expr::Cast { expr, .. } => self.emit_allocas_in_expr(expr)?,
+            Expr::Propagate { expr, .. } => self.emit_allocas_in_expr(expr)?,
+
+            Expr::StructLit { fields, .. } => {
+                for field in fields {
+                    self.emit_allocas_in_expr(&field.value)?;
+                }
+            }
+
+            Expr::Block(block) => {
+                self.emit_allocas(&block.stmts)?;
+                if let Some(tail) = &block.tail {
+                    self.emit_allocas_in_expr(tail)?;
+                }
+            }
+
+            Expr::If { condition, then_block, else_branch, .. } => {
+                self.emit_allocas_in_expr(condition)?;
                 self.emit_allocas(&then_block.stmts)?;
                 if let Some(tail) = &then_block.tail {
                     self.emit_allocas_in_expr(tail)?;
@@ -195,19 +242,24 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     self.emit_allocas_in_expr(else_expr)?;
                 }
             }
-            Expr::While { body, .. } | Expr::Loop { body, .. } => {
+
+            Expr::While { condition, body, .. } => {
+                self.emit_allocas_in_expr(condition)?;
                 self.emit_allocas(&body.stmts)?;
                 if let Some(tail) = &body.tail {
                     self.emit_allocas_in_expr(tail)?;
                 }
             }
-            Expr::Block(block) => {
-                self.emit_allocas(&block.stmts)?;
-                if let Some(tail) = &block.tail {
+
+            Expr::Loop { body, .. } => {
+                self.emit_allocas(&body.stmts)?;
+                if let Some(tail) = &body.tail {
                     self.emit_allocas_in_expr(tail)?;
                 }
             }
-            _ => {}
+
+            // For and Match are deferred — not lowered to codegen yet.
+            Expr::For { .. } | Expr::Match { .. } => {}
         }
         Ok(())
     }
@@ -414,8 +466,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
                 let llvm_ty = self.llvm_ty(ty)?;
                 // Use the pre-hoisted alloca when available (mem2reg-eligible). Fall back to
-                // inline alloca for lets inside sub-expressions that emit_allocas_in_expr
-                // doesn't descend into (e.g. block operands of Binary, Call, MethodCall).
+                // inline alloca for lets inside deferred expression forms (For, Match) whose
+                // sub-expressions emit_allocas_in_expr explicitly skips. With the full
+                // traversal of all currently-lowered expr forms, this branch should be
+                // unreachable in practice — but it keeps correctness if new forms are added.
                 let ptr = if let Some(&p) = self.alloca_slots.get(name_span) {
                     p
                 } else {
@@ -2020,5 +2074,33 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 1, "y should hold x's value before the shadow (1), got {result}");
+    }
+
+    /// T28 — Expr::Block as a Binary operand inside a while loop body.
+    /// `{ let a = i; a }` is Expr::Block nested under Expr::Binary — a position
+    /// emit_allocas_in_expr did not recurse into before the traversal fix.
+    /// Result: sum = (0+1)+(1+1)+(2+1) = 6.
+    #[test]
+    fn test_block_in_binary_inside_loop_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { \
+            let sum = 0; let i = 0; \
+            while i < 3 { \
+                sum = sum + ({ let a = i; a } + 1); \
+                i = i + 1; \
+            } \
+            sum \
+        }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 6, "sum should be (0+1)+(1+1)+(2+1)=6, got {result}");
     }
 }
