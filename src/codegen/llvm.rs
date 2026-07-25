@@ -413,11 +413,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .type_of(init.span())
                     .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
                 let llvm_ty = self.llvm_ty(ty)?;
-                let ptr = self
-                    .alloca_slots
-                    .get(name_span)
-                    .copied()
-                    .ok_or_else(|| format!("ICE: no pre-hoisted alloca for `{name}` at {name_span:?}"))?;
+                // Use the pre-hoisted alloca when available (mem2reg-eligible). Fall back to
+                // inline alloca for lets inside sub-expressions that emit_allocas_in_expr
+                // doesn't descend into (e.g. block operands of Binary, Call, MethodCall).
+                let ptr = if let Some(&p) = self.alloca_slots.get(name_span) {
+                    p
+                } else {
+                    self.builder.build_alloca(llvm_ty, name).map_err(|e| e.to_string())?
+                };
                 env.insert(*name, (ptr, llvm_ty));
                 // Struct literals are lowered field-by-field directly into the destination
                 // alloca; other expressions are lowered to a value and stored normally.
@@ -632,6 +635,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::Unary { op, expr: inner, .. } => {
+                // Fold Neg(Literal::Integer(2147483648)) → i32::MIN constant directly.
+                // The typechecker blesses this via the infer_unary INT_MIN special case,
+                // but the literal lowering guard rejects 2147483648 > i32::MAX. Bypass it.
+                if matches!(op, UnaryOp::Neg) {
+                    if let Expr::Literal(Literal::Integer(n), _) = inner.as_ref() {
+                        if *n == (i32::MAX as i64) + 1 {
+                            return Ok(self.ctx.i32_type().const_int(i32::MIN as u64, false).into());
+                        }
+                    }
+                }
                 let val = self.lower_expr(inner, env, loop_ctx)?;
                 let ty = self
                     .types
@@ -1931,6 +1944,25 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 17, "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}");
+    }
+
+    /// T27 — i32::MIN literal: `-2147483648` must compile and return i32::MIN end-to-end.
+    /// Verifies the codegen fold in lower_expr for Neg(Literal::Integer(2147483648)).
+    #[test]
+    fn test_i32_min_literal_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { -2147483648 }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, i32::MIN, "expected i32::MIN (-2147483648), got {result}");
     }
 
     /// T24 — nested-block shadow must not corrupt the outer binding.
