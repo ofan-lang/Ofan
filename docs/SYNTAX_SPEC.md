@@ -1194,6 +1194,42 @@ just the name. A unit variant is a complete value of the enum type on its own.
 `Circle(f64)`, `Some(T)`, `Ok(T)`. Constructing: the variant name applied as a
 function — `Circle(3.14)`, `Some(x)`, `Ok(result)`. Positional, not named.
 
+**Variant construction syntax — bare and qualified forms:**
+
+*Bare (unqualified):* variant name alone or applied as a function. Valid when the name
+is unambiguous — no other enum in the same program declares a variant with the same
+spelling.
+
+```ofn
+let d = North;           // unit variant — bare name
+let s = Circle(3.14);   // tuple variant — bare name applied as function
+```
+
+*Qualified:* `EnumName.VariantName` or `EnumName.TupleVariant(args)`. Always valid,
+regardless of whether the name is ambiguous elsewhere.
+
+```ofn
+let d = Direction.North;       // unit variant — qualified
+let s = Shape.Circle(3.14);    // tuple variant — qualified
+```
+
+The qualified form uses the already-decided `.` token (§23). `Direction` in
+`Direction.North` is a bare type identifier in the left-hand position, not a value
+binding — the typechecker detects this case and routes to variant construction before
+the standard field-access-on-value path runs (see §23 §8 for the disambiguation rule).
+
+*When two enums share a variant name:* the bare form is an error at the use site (not
+at declaration time — declaring two enums with a shared variant name is valid):
+
+```
+error: bare `Foo` is ambiguous — defined in `EnumA` (line X) and `EnumB` (line Y)
+suggestion: write `EnumA.Foo` or `EnumB.Foo` to disambiguate
+```
+
+The declaration-time constraint for variant names is only within a single enum (duplicate
+variant names inside one `enum` body are an error). Across different enums, names may
+collide freely; the qualifier resolves them at the point of use.
+
 **Struct variants deferred:** a struct variant embeds named fields directly in the
 variant (`Rectangle { width: f64, height: f64 }` instead of `Rectangle(f64, f64)`).
 This is a convenience — it is fully expressible today as a tuple variant wrapping a
@@ -1261,6 +1297,8 @@ special-casing at the enum position.
 > — `Option<T>` and `Checked<T, E>` are the canonical generic enum examples.
 > [§21](#21-match--pattern-matching) — pattern matching on enum variants.
 > [§22](#22-impl-block-syntax) — `impl` block structure and conflict detection.
+> [§23 §8](#23-struct-field-access) — `.` on a type name for qualified variant construction,
+> contrasted with `.` on a value binding for field access.
 
 ---
 
@@ -1736,6 +1774,24 @@ syntax in shared source). Neither outcome is acceptable.
 The decision rule: no field-access-specific `move` syntax ships until a dedicated phase-2 design
 session settles it spec-first, the same process used for every other construct in this language.
 
+### 8. Qualified variant construction — `.` on a type name
+
+`EnumName.VariantName` applies `.` to a bare type identifier rather than a value binding.
+Syntactically identical to `obj.field` at the token and AST level (`Expr::Field` in both
+cases); semantically distinct — it constructs a new value of the enum type rather than
+reading a field of an existing value.
+
+**Disambiguation:** at the top of `infer_field_access`, before inferring the type of the
+left operand, the typechecker checks whether the left operand is a bare `Expr::Ident`
+whose name resolves to a known enum type. If so, it routes to qualified variant
+construction. If the left operand is anything else — a local binding, a parameter, a
+function call, a chained expression — the normal field-access-on-value path runs. The
+two cases cannot overlap: a bare type name is never simultaneously a value binding.
+
+No new token, AST node, or parser rule is required. The distinction is entirely in the
+typechecker. See §20 for the full variant construction syntax and the disambiguation rule
+for ambiguous bare variant names.
+
 ### Pillar-alignment rationale
 
 **Pillar 1 (explicit erroneous behavior):** two hard errors, each with full context: non-Copy
@@ -1761,6 +1817,8 @@ position.
 > [§17](#17-copymove-semantics) — Copy/Move rule applied to field types.
 > [§18](#18-method-receiver--self-and-self) — same inference mechanism at the receiver position;
 > `ConsumeViaRef` pattern this section's mutation-through-ref check mirrors.
+> [§20](#20-enum-declaration-syntax) — qualified variant construction (`EnumName.Variant`) uses
+> `.` on a type name; §23 §8 is the normative disambiguation rule.
 > [§22](#22-impl-block-syntax) — impl block structure; methods that access `self` fields follow
 > the same borrow inference as standalone field access.
 > [§24](#24-not-yet-decided--deferred) — visibility/module syntax; partial-move tracking.
