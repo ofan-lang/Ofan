@@ -3,6 +3,81 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-25 — shadow-init self-reference regression fix (PR #43)
+
+**Branch:** `fix/shadow-self-reference-regression` (PR #43, merged 2026-07-25, CI green)
+
+**What was done:**
+
+### Root cause
+
+PR #42's per-binding alloca fix (`alloca_slots: HashMap<Span, PointerValue>`) exposed a
+pre-existing ordering bug in `lower_stmt(Stmt::Let)`: `env.insert(*name, (ptr, llvm_ty))`
+ran at line 478, BEFORE `lower_expr(init, env, loop_ctx)` at line 487. With shared allocas
+(old code) this was harmless — env already pointed to the initialized outer alloca. With
+separate allocas (PR #42), env now pointed to the new, uninitialized alloca, so a
+self-referencing shadow init (`let x = x + 1`) silently read garbage — a pillar-1 violation.
+
+Minimum repro: `fn main() -> i32 { let x = 5; let x = x + 1; return x; }` → `277967217`
+(expected `6`). Discovered via `smoke_test_2.ofn` Part D (d1 and d3 subtotals wrong).
+
+### Fix
+
+Moved `env.insert(*name, (ptr, llvm_ty))` from before the `match init.as_ref() { ... }`
+block to after its closing brace (`src/codegen/llvm.rs`). The init expression now always
+resolves names against the old env state. The `Expr::StructLit` branch is also correctly
+ordered — `lower_struct_lit_into` receives the old env, consistent with the scalar path.
+
+### Scope sweep (confirmed no other instances)
+
+| Site | Status |
+|------|--------|
+| `Stmt::Let` in `lower_stmt` | Fixed (the only instance) |
+| `Stmt::Const` | Unimplemented in lower_stmt; N/A |
+| `lower_function` / `lower_method` param binding | `env.insert` after `build_store`, no init expression; N/A |
+
+### New JIT regression tests (T29–T32)
+
+All target the gap — prior shadow tests only used literal inits and couldn't detect this bug:
+
+| Test | Program | Expected |
+|------|---------|----------|
+| T29 | `let x=5; let x=x+1; x` | 6 |
+| T30 | `let x=1; let y={ let x=x+10; x }; x+y` | 12 (outer x=1, inner x uses old x=1) |
+| T31 | `let x=1; let x=x+1; let x=x+1; x` | 3 |
+| T32 | `let flag=5; let flag=flag>3; if flag {1} else {0}` | 1 (i32→bool self-ref) |
+
+T32 also disproves the claim "different-type self-reference is unrepresentable" — it is
+representable via comparison operators and must be covered.
+
+### Process update
+
+Added **shadow-init self-reference gap** as a named pattern in
+`.claude/agents/pillars-reviewer.md` (parallel to the tail-position transparency item):
+when a fix changes binding/storage semantics, the test matrix must include at least one
+case where the new binding's initializer references the OLD binding of the same name.
+
+### smoke_test_2.ofn
+
+`examples/smoke_test_2.ofn` added as an integration smoke test exercising all features
+since `smoke_test.ofn` (PR #41 nested struct literals, PR #42 shadow allocas + i32::MIN,
+recursion, while/loop, logical operators). Predicted exit code: 332. Confirmed: 332.
+
+**Test state:**
+- `cargo test --features codegen` — 276 passed (262 unit+JIT + 14 integration), 0 failed.
+  Clippy clean.
+
+**What's next:**
+- ✅ PR #43 merged 2026-07-25. Shadow-init self-reference regression closed.
+- Enum declarations: `Item::Enum` AST node and parser not yet implemented.
+- Method calls returning struct values (codegen spill path — not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+  (pre-existing debt, surfaced each session).
+- `emit_allocas` coverage for `For`/`Match` forms: currently skipped; fallback handles them
+  but per-iteration stack growth will occur when these land without updating the traversal.
+
+---
+
 ## Last session: 2026-07-25 — i32 literal range check + shadowed let alloca (PR #42)
 
 **Branch:** `fix/gap-n-q-literal-range-shadow-alloca` (PR #42, merged 2026-07-25, CI green)
