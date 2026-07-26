@@ -46,6 +46,30 @@ When reviewing a diff that adds a new position-specific check, ask: "if I wrap t
 expression in `{ … }` or `if true { … } else { … }`, does the check still fire?" If the
 answer is no, flag it as a pillar-1 violation — silent acceptance of erroneous behavior.
 
+Additionally, for any fix that changes binding/storage semantics (new alloca strategy, env
+mutation order, scope-stack changes, symbol-table update ordering), explicitly verify:
+
+**Shadow-init self-reference check:** does the test matrix include at least one case where the
+new binding's initializer references the OLD binding of the same name (e.g. `let x = x + 1`)?
+A shadow init using a literal (`let x = 2`) does not exercise the ordering — only an expression
+that reads the name being shadowed does.
+
+This class of gap — "fix only tested with literal inits, misses self-referencing inits" — is a
+named pattern to check for explicitly:
+- **Shadow-init self-reference regression (PR #43, `fix/shadow-self-reference-regression`):**
+  PR #42 introduced per-binding allocas (Gap Q fix) but left `env.insert(*name, (ptr, llvm_ty))`
+  BEFORE `lower_expr(init)` in `lower_stmt(Stmt::Let)`. With separate allocas, a shadow init
+  like `let x = x + 1` now read from the new uninitialized alloca instead of the old binding.
+  All three PR #42 regression tests used literal inits and passed — the gap was invisible until
+  a smoke test exercised `let x = x + 5`.
+
+When reviewing a diff that touches how bindings are created, stored, or looked up, ask: "is
+there a test where the init expression reads the same name that the let is binding?" If the
+answer is no, flag it — this is a pillar-1 violation (silent read of uninitialized storage).
+
+Note: different-type self-reference IS representable — `let flag = 5; let flag = flag > 3;`
+shadows i32 with bool via a comparison. It must also be covered.
+
 If you find a violation, state exactly what causes it and suggest the minimal alternative that
 resolves it. Do not rewrite the code yourself — report it and let the author or the human decide.
 If everything checks out, say so explicitly with a short summary — don't assume "no comments"

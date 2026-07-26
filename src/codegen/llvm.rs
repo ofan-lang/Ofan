@@ -475,7 +475,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 } else {
                     self.builder.build_alloca(llvm_ty, name).map_err(|e| e.to_string())?
                 };
-                env.insert(*name, (ptr, llvm_ty));
+                // Evaluate the init expression BEFORE updating env[name]. A self-referencing
+                // shadow (`let x = x + 1`) must resolve `x` to the OLD binding, not the new
+                // (as-yet-unwritten) alloca. env.insert is deferred until after the store.
                 // Struct literals are lowered field-by-field directly into the destination
                 // alloca; other expressions are lowered to a value and stored normally.
                 match init.as_ref() {
@@ -511,6 +513,8 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         }
                     }
                 }
+                // Update env[name] so subsequent Expr::Ident reads find this alloca.
+                env.insert(*name, (ptr, llvm_ty));
             }
 
             Stmt::Assign { target, op, value, .. } => {
@@ -2102,5 +2106,92 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 6, "sum should be (0+1)+(1+1)+(2+1)=6, got {result}");
+    }
+
+    /// T29 — shadow-init self-reference (same name, same type).
+    /// `let x=5; let x=x+1; x` — init must read OLD x=5, result 6.
+    /// Regression test for the env.insert-before-lower_expr ordering bug.
+    #[test]
+    fn test_shadow_self_reference_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 5; let x = x + 1; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 6, "shadow init must read old x=5, got {result}");
+    }
+
+    /// T30 — nested-block shadow self-reference + outer binding preserved.
+    /// `let x=1; let y={ let x=x+10; x }; x+y` → x=1, y=11, result=12.
+    /// Covers nested-block + self-reference together; verifies outer x not corrupted.
+    #[test]
+    fn test_nested_block_shadow_self_reference_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { \
+            let x = 1; \
+            let y = { let x = x + 10; x }; \
+            x + y \
+        }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 12, "x=1, y=11 (inner x used old x=1), x+y=12, got {result}");
+    }
+
+    /// T31 — chained shadow self-references.
+    /// `let x=1; let x=x+1; let x=x+1; x` → each shadow reads the previous, result=3.
+    #[test]
+    fn test_chained_shadow_self_reference_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let x = x + 1; let x = x + 1; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 3, "each shadow reads previous: 1→2→3, got {result}");
+    }
+
+    /// T32 — different-type shadow self-reference (i32 → bool).
+    /// `let flag=5; let flag=flag>3; if flag {1} else {0}` → 1.
+    /// Confirms "different-type self-reference is unrepresentable" claim is FALSE.
+    #[test]
+    fn test_shadow_self_reference_type_change_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { \
+            let flag = 5; \
+            let flag = flag > 3; \
+            if flag { 1 } else { 0 } \
+        }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 1, "flag>3 is true (old flag=5), branch should return 1, got {result}");
     }
 }
