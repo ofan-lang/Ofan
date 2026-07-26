@@ -3,6 +3,76 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-26 — enum declarations with qualified variant construction (PR #44)
+
+**Branch:** `feat/enum-declarations` (PR #44, merged 2026-07-26, CI green)
+
+**What was done:**
+
+Full enum declaration pipeline through the typechecker (§20). Codegen lowering explicitly deferred.
+
+### AST
+
+`EnumVariant` (unit and tuple forms), `EnumDef`, `Item::Enum` — enums are first-class
+top-level items alongside structs.
+
+### Parser (`src/parser/item.rs`, `src/parser/mod.rs`)
+
+`parse_enum_def`: handles unit variants (`North`) and tuple variants (`Circle(f64)`).
+`copy enum` / `move enum` keyword pair. 8 new parser tests.
+
+### Typechecker (`src/typechecker/env.rs`, `error.rs`, `infer/expr.rs`, `infer/mod.rs`)
+
+- `EnumInfo` + `enum_defs: HashMap<String, EnumInfo>` + `variant_to_enum: HashMap<String, String>` in `InferCtx`
+- Collection sub-passes 1b (enum names into `type_names`) and 1d (variants + variant index) — inserted in the existing declaration-collection pass order without restructuring
+- Bare variant resolution: `Expr::Ident` hook tries `variant_to_enum` lookup; `infer_call` hook handles `Variant(args...)` construction call form
+- Qualified variant resolution: `infer_field_access` hook intercepts `Enum.Variant`; `infer_method_call` hook intercepts `Enum.Variant(args...)` — both hooks fire before `infer_expr(object)` is called, so no partial inference leak
+- 7 new `TypeError` variants for enum-specific errors
+- `is_copy` extended: checks `enum_defs` for `copy enum` declaration
+
+### Bug fix — `check_field_own_non_copy` false positive
+
+`Enum.Variant` and `Enum.Variant(args...)` parse as `Expr::Field` and `Expr::MethodCall`
+respectively (no parser changes needed). Without the fix, `check_field_own_non_copy` would
+fire on `Enum.Variant` reads of a non-Copy enum, treating construction as a partial struct
+move — a pillar-1 false positive. Fix: short-circuit when the object type resolves to a
+known enum name.
+
+Covered by T_en_16–T_en_19: `move enum` and inferred-non-Copy enums in
+tail/block-tail/let positions.
+
+### Codegen (`src/codegen/llvm.rs`)
+
+`Item::Enum(_) => {}` skip arms added to all lowering passes. Enum value representation
+(tag + payload layout) is deferred to a dedicated PR.
+
+### Design decisions (§20/§23)
+
+- **Bare variants** (`North`) resolve to their owning enum when unambiguous in scope.
+  Two enums may share a variant name without error; the `AmbiguousVariant` error fires at
+  the use site, not at declaration time.
+- **Qualified form** (`Dir.North`, `Shape.Circle(3.14)`) always resolves and disambiguates.
+  No parser changes: `Dir.North` was already `Expr::Field`; `Shape.Circle(3.14)` was already
+  `Expr::MethodCall`. The typechecker hooks intercept both.
+
+**Reviewers run (background, before merge):**
+- `pillars-reviewer`: one pillar-1 violation found — false-positive `FieldOwnNonCopy` for
+  non-Copy enum qualified variants — fixed before merge. All other pillars clean.
+- `rust-idiom-reviewer`: `check_types` used for arg checking; `new_variants` Vec removed in
+  favour of iterating `variant_order`. Both addressed.
+
+**Test state:** 306 passed, 0 failed (`cargo test --features codegen`). Clippy clean.
+
+**What's next:**
+- Enum codegen: tag + payload layout, match lowering (deferred from this PR; §21 match typechecking is a prerequisite).
+- Method calls returning struct values (codegen spill path — not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs` (recurring debt).
+- `emit_allocas` coverage for `For`/`Match` forms: currently skipped; fallback handles them but per-iteration stack growth will occur when these land.
+- Struct declaration syntax: no dedicated spec section yet — implied by §9 + examples. Worth formalizing before visibility modifiers land.
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`.
+
+---
+
 ## Last session: 2026-07-25 — §24 intent-reservation: `@` delimiter + visibility (docs only)
 
 **Branch:** `main` (direct docs commit bbb94b4, no feature branch — intent-reservation only,
