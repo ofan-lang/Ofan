@@ -1,0 +1,146 @@
+# smoke_test_2.ofn — integration check for features since smoke_test.ofn.
+#
+# Covers:
+#   PR #41 — structs-as-fields: nested struct literal INLINE as field values,
+#             nested field reads (outer.inner.field), methods accessing inner fields.
+#   PR #42 Gap Q — shadowed let bindings: three distinguishable cases whose
+#             correct and buggy answers differ by large amounts.
+#   PR #42 Gap N — i32::MIN literal (-2147483648) in real arithmetic.
+#   Carry-forward — method-name mangling across two types, recursion, while/loop,
+#             all arithmetic and comparison operators, logical operators.
+#
+# No I/O. Correctness proven by main's return value = checksum.
+# Predicted exit code: 332
+
+struct Vec2 { x: i32, y: i32 }
+
+struct Rect { origin: Vec2, size: Vec2 }
+
+struct Token { id: i32, weight: i32 }
+
+impl Vec2 {
+    fn len_sq(self) -> i32 { self.x * self.x + self.y * self.y }
+    fn scale(self, k: i32) { self.x = self.x * k; self.y = self.y * k; }
+}
+
+impl Rect {
+    fn area(self) -> i32 { self.size.x * self.size.y }
+    fn perimeter(self) -> i32 { (self.size.x + self.size.y) * 2 }
+}
+
+impl Token {
+    # Same method name as Vec2 — must mangle to Token_len_sq, not Vec2_len_sq.
+    fn len_sq(self) -> i32 { self.id * self.id + self.weight * self.weight }
+    fn bump(self, delta: i32) { self.id += delta; }
+}
+
+fn sum_to(n: i32) -> i32 {
+    if n <= 0 { 0 } else { n + sum_to(n - 1) }
+}
+
+fn main() -> i32 {
+
+    # ---- Part A: PR #41 structs-as-fields ----
+    # Rect contains two Vec2 fields. Both field values are nested struct literals
+    # written inline — the exact form that was broken before PR #41.
+    let r = Rect {
+        origin = Vec2 { x = 2, y = 3 },
+        size   = Vec2 { x = 7, y = 4 }
+    };
+
+    let a1 = r.origin.x + r.origin.y;   # 2+3 = 5
+    let a2 = r.size.x   + r.size.y;     # 7+4 = 11
+    let a3 = r.area();                    # 7*4 = 28
+    let a4 = r.perimeter();              # (7+4)*2 = 22
+    # Subtotal A: 5+11+28+22 = 66
+
+    # ---- Part B: method-name mangling across two types ----
+    let mut v = Vec2 { x = 3, y = 4 };
+    v.scale(2);                           # v.x=6, v.y=8
+    let b1 = v.len_sq();                 # 36+64 = 100
+
+    let mut t = Token { id = 3, weight = 4 };
+    t.bump(2);                            # t.id=5, t.weight stays 4
+    let b2 = t.len_sq();                 # 25+16 = 41
+    # Subtotal B: 100+41 = 141
+
+    # ---- Part C: recursion ----
+    let c1 = sum_to(5);                  # 5+4+3+2+1+0 = 15
+    # Subtotal C: 15
+
+    # ---- Part D: Gap Q shadow allocas (PR #42) ----
+
+    # D1: nested-block shadow must NOT corrupt the outer binding.
+    # Before fix: inner `let x` reused outer alloca → outer x read as 15 after block.
+    # Correct: d1=10+15=25.  Buggy: d1=15+15=30.  Difference: 5.
+    let x = 10;
+    let mut inner_x = 0;
+    {
+        let x = x + 5;  # inner x = 15; init uses outer x=10 via its own alloca
+        inner_x = x;    # capture inner x into outer mut binding
+    }
+    # outer x must still be 10 (its alloca was not overwritten by the inner shadow)
+    let d1 = x + inner_x;
+
+    # D2: same-block, DIFFERENT-TYPE shadow — LLVM type mismatch crash before fix.
+    # `flag` starts as i32=8, then shadowed with bool=(8>5)=true.
+    # With fix: a fresh alloca of bool type is allocated; d2=7.
+    # Without fix: i1 stored into i32 alloca → LLVM type mismatch → crash.
+    let flag = 8;
+    let flag = flag > 5;
+    let d2 = if flag { 7 } else { 0 };
+
+    # D3: same-block shadow then nested-block shadow, combined.
+    # p=5 → same-block shadow p=15 → nested-block shadow p=100 (must not escape).
+    # Correct: p=15, q=15 → d3=15*2+15=45.
+    # Buggy: nested block corrupts outer alloca to 100 → d3=100*2+15=215.  Diff: 170.
+    let p = 5;
+    let q = p * 3;          # q=15 (captures p before any shadow)
+    let p = p + 10;         # same-block shadow: new p=15, init used old p=5
+    {
+        let p = 100;        # nested-block shadow; must NOT overwrite the outer p=15
+    }
+    let d3 = p * 2 + q;
+    # Subtotal D: 25+7+45 = 77
+
+    # ---- Part E: Gap N — i32::MIN literal in real arithmetic (PR #42) ----
+    # -2147483648 % 100:  srem sign follows dividend → -48  (2^31 % 100 = 48, negated)
+    # -48 + 50 = 2.
+    # If Gap N were not fixed the program would not compile at all (IntegerOutOfRange).
+    let min_val = -2147483648;
+    let e1 = min_val % 100 + 50;
+    # Subtotal E: 2
+
+    # ---- Part F: carry-forward (while/loop/logical operators) ----
+    let mut wsum = 0;
+    let mut wi = 1;
+    while wi <= 5 {
+        wsum += wi;
+        wi += 1;
+    }
+    let f1 = wsum;   # 1+2+3+4+5 = 15
+
+    let mut lval = 0;
+    loop {
+        lval += 1;
+        if lval >= 7 { break; }
+    }
+    let f2 = lval;   # 7
+
+    # Logical: && and ||
+    let f3 = if f1 > 10 && f2 < 10 { 1 } else { 0 };   # true && true = 1
+
+    # if/else as a value
+    let f4 = if f1 >= f2 { f1 - f2 } else { f2 - f1 };  # 15-7 = 8
+    # Subtotal F: 15+7+1+8 = 31
+
+    # ---- Checksum ----
+    # A(66) + B(141) + C(15) + D(77) + E(2) + F(31) = 332
+    let result = a1 + a2 + a3 + a4
+               + b1 + b2
+               + c1
+               + d1 + d2 + d3
+               + e1
+               + f1 + f2 + f3 + f4;
+    return result;
+}
