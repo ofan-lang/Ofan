@@ -3,6 +3,104 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-25 — i32 literal range check + shadowed let alloca (PR #42)
+
+**Branch:** `fix/gap-n-q-literal-range-shadow-alloca` (PR #42, merged 2026-07-25, CI green)
+
+**What was done:**
+
+### Gap N — i32 literal range check (typechecker)
+
+`infer_expr_inner` mapped all `Literal::Integer(_)` → `Ty::I32` with no range check, silently
+accepting values like `9_999_999_999` that would miscompile. Fix:
+
+- Added `TypeError::IntegerOutOfRange` in `src/typechecker/error.rs`; emitted in
+  `infer_expr_inner` for `n > i32::MAX`.
+- Special-cased `Expr::Unary Neg(Literal::Integer(2147483648))` in `infer_unary` to allow the
+  valid `-2147483648 = i32::MIN` representation without triggering a false out-of-range error.
+  `ctx.record` is called manually here — comment documents why this is safe without duplicating
+  the outer `infer_expr` wrapper's contract.
+- Mirrored the fold in codegen: `lower_expr` for `Expr::Unary Neg` now has an early-return arm
+  that folds `Neg(Literal::Integer(2147483648))` → `i32::MIN` constant directly, bypassing the
+  `> i32::MAX` guard that would otherwise fire before negation was applied. T27 JIT-verifies the
+  round-trip.
+
+Three new golden tests: bare overflow (error), `i32::MIN` as negation of literal (ok), negated
+literal overflow (error).
+
+### Gap Q — span-keyed alloca map for shadowed `let` bindings
+
+`emit_allocas` skipped re-declarations when the name was already in `alloca_slots`, so shadowed
+`let` bindings reused the outer alloca. Two real bugs:
+1. Nested-block shadows wrote to the outer alloca (via the cloned env), corrupting the outer
+   variable at runtime.
+2. Different-type shadows caused an LLVM type mismatch (wrong alloca size).
+
+Fix: `alloca_slots: HashMap<Span, PointerValue>` added to `FnLower`, keyed by each `Stmt::Let`'s
+`name_span`. `emit_allocas` creates one alloca per `let` (no skipping) and recurses into
+let-init expressions to pre-hoist nested lets. `lower_stmt` retrieves the correct alloca by
+`name_span` and updates `env[name]` incrementally so `Expr::Ident` reads always resolve to the
+most-recently-processed binding's slot.
+
+Three new JIT tests:
+- T24: nested-block shadow doesn't corrupt outer `x` (returns 1, not 2).
+- T25: same-block shadow produces correct value (returns 2).
+- T26: capture-before-shadow: `y` holds the pre-rebind value 1 after `x` is re-bound to 2.
+
+### Reviewer findings (addressed in follow-up commit)
+
+1. **(Pillar 1 — codegen fold for i32::MIN)** `lower_expr` rejected `Literal::Integer(2147483648)`
+   via the `> i32::MAX` guard before negation was applied. Fixed with an early-return in
+   `Expr::Unary Neg` arm that folds `Neg(Literal::Integer(2147483648))` → `i32::MIN` directly.
+2. **(Rust idiom — HIGH)** `emit_allocas_in_expr` only descended into If/While/Loop/Block; a `let`
+   inside a Binary/Call/etc. operand had no pre-hoisted slot, causing an ICE on that path.
+   Inline-alloca fallback restored in `lower_stmt` as a genuine safety net for cases without a
+   pre-hoisted slot.
+3. **(Rust idiom — MEDIUM)** Added explanatory comment in `infer_unary` INT_MIN special case
+   justifying the manual `ctx.record` call.
+
+### emit_allocas full traversal extension
+
+After the reviewer fallback-ICE finding, a deeper audit found that `emit_allocas_in_expr` only
+descended into `If`/`While`/`Loop`/`Block`, making `Binary`/`Call`/`MethodCall`/`Unary`/`Cast`/
+`Field`/`Propagate`/`StructLit` dead ends. A `let` nested inside any of those positions — e.g.
+`{ let a = i; a }` as a `Binary` operand inside a `while` loop body — was never pre-hoisted,
+causing real per-iteration stack growth at `OptimizationLevel::None`.
+
+This was confirmed by converting the fallback to `Err` and running T28:
+`"PROBE: fallback fired for a at Span { start: 73, end: 74 }"`.
+
+Fix (`src/codegen/llvm.rs`):
+- `emit_allocas` now covers `Stmt::Assign`, `Stmt::Return`, `Stmt::Break`, `Stmt::Const` in
+  addition to `Stmt::Let`.
+- `emit_allocas_in_expr` now recurses into every currently-lowered `Expr` variant. `If`/`While`
+  conditions are traversed too (previously missed).
+- `For`/`Match` remain explicitly skipped (not yet lowered). The fallback is kept as a genuine
+  safety net for those deferred forms, with an updated comment.
+- T28: `{ let a = i; a }` as a `Binary` operand inside a 3-iteration `while` loop, asserts
+  result == 6. Passes with the fallback converted to `Err`, proving the alloca is found via
+  `alloca_slots`.
+
+**Tests added:** T24–T28 (JIT), 3 new golden tests for Gap N, `ok_i32_min_literal` unit test.
+
+**Test state:**
+- `cargo test` — 248 passed (233 unit + 15 integration), 0 failed. Clippy clean.
+- `cargo test --features codegen` — 272 passed (258 unit+JIT + 14 integration), 0 failed.
+  Clippy clean.
+
+**What's next:**
+- ✅ PR #42 merged 2026-07-25. Gap N closed. Gap Q closed.
+- Enum declarations: `Item::Enum` AST node and parser not yet implemented.
+- Method calls returning struct values (codegen spill path — not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+  (pre-existing debt, surfaced each session).
+- `emit_allocas` coverage for `For`/`Match` forms: currently skipped (not yet lowered);
+  fallback handles them but per-iteration stack growth will occur if these land without
+  updating the traversal.
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`.
+
+---
+
 ## Last session: 2026-07-25 — structs-as-fields codegen fix (PR #41)
 
 **Branch:** `fix/structs-as-fields-codegen` (PR #41, merged 2026-07-25, CI green)
