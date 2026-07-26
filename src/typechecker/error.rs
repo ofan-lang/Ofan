@@ -152,6 +152,90 @@ pub enum TypeError {
         duplicate_span: Span,
     },
 
+    /// Duplicate enum name — two `enum Foo { ... }` blocks with the same name.
+    #[error("duplicate enum `{name}` — first definition at byte {}, \
+        duplicate at byte {} \
+        — rename one of the conflicting definitions",
+        first_span.start, duplicate_span.start)]
+    DuplicateEnum {
+        name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
+    /// Duplicate variant name within the same enum body.
+    #[error("duplicate variant `{variant_name}` in enum `{enum_name}` — \
+        first definition at byte {}, duplicate at byte {} \
+        — rename one of the conflicting variants",
+        first_span.start, duplicate_span.start)]
+    DuplicateVariant {
+        enum_name: String,
+        variant_name: String,
+        first_span: Span,
+        duplicate_span: Span,
+    },
+
+    /// Bare variant name is ambiguous — two or more enums in the program declare it.
+    /// Use the qualified form `EnumName.VariantName` to disambiguate (§20).
+    #[error("bare `{variant_name}` is ambiguous at byte {} — defined in {}\n\
+        suggestion: write {} to disambiguate",
+        span.start,
+        defined_in.join(" and "),
+        defined_in.iter().map(|e| format!("`{e}.{variant_name}`")).collect::<Vec<_>>().join(" or "))]
+    AmbiguousVariant {
+        variant_name: String,
+        defined_in: Vec<String>,
+        span: Span,
+    },
+
+    /// Variant not found in the named enum — qualified form used but variant doesn't exist.
+    #[error("variant `{variant_name}` not found in enum `{enum_name}` at byte {}{}\n\
+        suggestion: check the variant name against the definition of `{enum_name}`",
+        span.start,
+        if available.is_empty() { " — enum has no variants".to_string() }
+        else { format!(" — available variants: {}", available.join(", ")) })]
+    VariantNotFound {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+        available: Vec<String>,
+    },
+
+    /// Wrong number of arguments passed to a tuple variant constructor.
+    #[error("wrong number of arguments for variant `{enum_name}::{variant_name}` at byte {}: \
+        expected {expected}, found {found}{}", span.start,
+        suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
+    VariantArgCountMismatch {
+        enum_name: String,
+        variant_name: String,
+        expected: usize,
+        found: usize,
+        span: Span,
+        suggestion: Option<String>,
+    },
+
+    /// A unit variant was called as a function (with argument list).
+    #[error("`{enum_name}::{variant_name}` is a unit variant and cannot be called as a function \
+        at byte {}\n\
+        suggestion: write `{variant_name}` or `{enum_name}.{variant_name}` without arguments",
+        span.start)]
+    UnitVariantCalledAsFunction {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
+
+    /// A tuple variant was used without arguments (as if it were a unit variant).
+    #[error("`{enum_name}::{variant_name}` is a tuple variant and requires arguments at byte {}\n\
+        suggestion: write `{variant_name}(...)` or `{enum_name}.{variant_name}(...)` \
+        with the required fields",
+        span.start)]
+    TupleVariantUsedAsUnit {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
+
     /// Struct name used in a struct literal is not defined.
     #[error("unknown struct `{name}` at byte {} — no struct with this name is defined\n\
         suggestion: check the struct name or add a `struct {name}` declaration",

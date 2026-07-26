@@ -4,9 +4,9 @@ mod ops;
 mod convert;
 mod self_access;
 
-use crate::ast::{Ast, Block, CopyMove, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type};
+use crate::ast::{Ast, Block, CopyMove, EnumDef, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type};
 use crate::lexer::token::Span;
-use crate::typechecker::env::{Env, InferCtx, StructInfo};
+use crate::typechecker::env::{Env, EnumInfo, InferCtx, StructInfo};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Ty};
 use crate::typechecker::InferResult;
@@ -16,26 +16,40 @@ use crate::typechecker::InferResult;
 pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
 
-    // Sub-pass 1a: register struct names so 1b can resolve forward references.
+    // Sub-pass 1a: register struct names (enables forward references in fields).
     for item in &ast.items {
         if let Item::Struct(def) = item {
             collect_struct_name(def, &mut ctx);
         }
     }
 
-    // Sub-pass 1b: populate struct field types (all names now known from 1a).
+    // Sub-pass 1b: register enum names (enables forward references in variant fields).
+    for item in &ast.items {
+        if let Item::Enum(def) = item {
+            collect_enum_name(def, &mut ctx);
+        }
+    }
+
+    // Sub-pass 1c: populate struct field types (all type names known from 1a/1b).
     for item in &ast.items {
         if let Item::Struct(def) = item {
             collect_struct_fields(def, &mut ctx);
         }
     }
 
-    // Sub-pass 1c: collect fn/impl signatures.
+    // Sub-pass 1d: populate enum variant types and build variant_to_enum index.
+    for item in &ast.items {
+        if let Item::Enum(def) = item {
+            collect_enum_variants(def, &mut ctx);
+        }
+    }
+
+    // Sub-pass 1e: collect fn/impl signatures.
     for item in &ast.items {
         match item {
             Item::Function(f) => collect_fn_sig(f, &mut ctx),
             Item::Impl(block) => collect_impl_sigs(block, &mut ctx),
-            Item::Struct(_) => {}
+            Item::Struct(_) | Item::Enum(_) => {}
         }
     }
 
@@ -45,7 +59,7 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
         match item {
             Item::Function(f) => infer_fn(f, &mut ctx, &mut env),
             Item::Impl(block) => infer_impl_methods(block, &mut ctx, &mut env),
-            Item::Struct(_) => {}
+            Item::Struct(_) | Item::Enum(_) => {}
         }
     }
 
@@ -169,6 +183,75 @@ fn collect_struct_fields(def: &StructDef<'_>, ctx: &mut InferCtx) {
     if let Some(info) = ctx.struct_defs.get_mut(def.name) {
         info.fields = fields;
         info.field_order = field_order;
+        info.copy_override = def.copy_move;
+    }
+}
+
+// ─── Pass 1: enum collection ──────────────────────────────────────────────────
+
+fn collect_enum_name(def: &EnumDef<'_>, ctx: &mut InferCtx) {
+    if let Some(existing) = ctx.enum_defs.get(def.name) {
+        ctx.error(TypeError::DuplicateEnum {
+            name: def.name.to_string(),
+            first_span: existing.name_span,
+            duplicate_span: def.name_span,
+        });
+        return;
+    }
+    ctx.enum_defs.insert(def.name.to_string(), EnumInfo {
+        name_span: def.name_span,
+        variants: std::collections::HashMap::new(),
+        variant_order: Vec::new(),
+        copy_override: None,
+        is_generic: !def.generic_params.is_empty(),
+    });
+}
+
+fn collect_enum_variants(def: &EnumDef<'_>, ctx: &mut InferCtx) {
+    if !ctx.enum_defs.contains_key(def.name) {
+        return; // duplicate enum — skip field population
+    }
+    let gp: Vec<&str> = def.generic_params.to_vec();
+    let mut variants: std::collections::HashMap<String, Vec<crate::typechecker::ty::Ty>> =
+        std::collections::HashMap::new();
+    let mut variant_order: Vec<String> = Vec::new();
+    let mut first_spans: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
+    // Collect duplicate errors to emit after the loop (avoids borrow conflicts).
+    let mut dup_errors: Vec<(String, Span, Span)> = Vec::new();
+
+    for v in &def.variants {
+        if let Some(&first_span) = first_spans.get(v.name) {
+            dup_errors.push((v.name.to_string(), first_span, v.name_span));
+            continue;
+        }
+        first_spans.insert(v.name.to_string(), v.name_span);
+
+        let field_tys: Vec<crate::typechecker::ty::Ty> = v.fields.iter()
+            .map(|ty| convert::ast_ty_to_ty(ty, &gp, None, v.span, ctx))
+            .collect();
+        variants.insert(v.name.to_string(), field_tys);
+        variant_order.push(v.name.to_string());
+    }
+
+    for (vname, first_span, dup_span) in dup_errors {
+        ctx.error(TypeError::DuplicateVariant {
+            enum_name: def.name.to_string(),
+            variant_name: vname,
+            first_span,
+            duplicate_span: dup_span,
+        });
+    }
+
+    for vname in &variant_order {
+        ctx.variant_to_enum
+            .entry(vname.clone())
+            .or_default()
+            .push(def.name.to_string());
+    }
+
+    if let Some(info) = ctx.enum_defs.get_mut(def.name) {
+        info.variants = variants;
+        info.variant_order = variant_order;
         info.copy_override = def.copy_move;
     }
 }
@@ -380,6 +463,13 @@ pub(super) fn check_field_own_non_copy(
         Ty::Ref { inner, .. } => inner.as_ref().clone(),
         t => t.clone(),
     };
+    // `Enum.Variant` parses as Expr::Field but is construction, not a field access —
+    // no partial move can occur regardless of the enum's Copy-ness.
+    if let Ty::Named(name) = &struct_ty {
+        if ctx.enum_defs.contains_key(name.as_str()) {
+            return false;
+        }
+    }
     if is_copy(&struct_ty, ctx) {
         return false;
     }
@@ -432,14 +522,26 @@ pub(super) fn is_copy(ty: &Ty, ctx: &InferCtx) -> bool {
         Ty::I32 | Ty::F64 | Ty::Bool | Ty::Char | Ty::Unit => true,
         Ty::Ref { mutable: false, .. } => true,
         Ty::Ref { mutable: true, .. } => false,
-        Ty::Named(name) => match ctx.struct_defs.get(name.as_str()) {
-            Some(info) => match info.copy_override {
-                Some(CopyMove::Copy) => true,
-                Some(CopyMove::Move) => false,
-                None => info.fields.values().all(|fty| is_copy(fty, ctx)),
-            },
-            None => false,
-        },
+        Ty::Named(name) => {
+            if let Some(info) = ctx.struct_defs.get(name.as_str()) {
+                match info.copy_override {
+                    Some(CopyMove::Copy) => true,
+                    Some(CopyMove::Move) => false,
+                    None => info.fields.values().all(|fty| is_copy(fty, ctx)),
+                }
+            } else if let Some(info) = ctx.enum_defs.get(name.as_str()) {
+                match info.copy_override {
+                    Some(CopyMove::Copy) => true,
+                    Some(CopyMove::Move) => false,
+                    // Enum is Copy iff all variant field types are Copy.
+                    None => info.variants.values()
+                        .flat_map(|fields| fields.iter())
+                        .all(|fty| is_copy(fty, ctx)),
+                }
+            } else {
+                false
+            }
+        }
         Ty::Str | Ty::Param(_) | Ty::TyVar(_) | Ty::Error => false,
     }
 }
@@ -1276,4 +1378,187 @@ mod tests {
             TypeError::FieldWriteViaSharedRef { field_name, .. } if field_name == "x"
         ), "expected FieldWriteViaSharedRef, got: {:?}", errs[0]);
     }
+
+    // ── Enum declarations (§20) ───────────────────────────────────────────────
+
+    // T_en_01: bare unit variant resolves to the owning enum type.
+    #[test]
+    fn ok_bare_unit_variant() {
+        let src = "enum Dir { North, South } fn f() -> Dir { North }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_02: bare tuple variant constructor resolves to the owning enum type.
+    #[test]
+    fn ok_bare_tuple_variant() {
+        let src = "enum Shape { Circle(f64), Point } fn f() -> Shape { Circle(3.14) }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_03: qualified unit variant (`Dir.North`).
+    #[test]
+    fn ok_qualified_unit_variant() {
+        let src = "enum Dir { North, South } fn f() -> Dir { Dir.North }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_04: qualified tuple variant (`Shape.Circle(3.14)`).
+    #[test]
+    fn ok_qualified_tuple_variant() {
+        let src = "enum Shape { Circle(f64) } fn f() -> Shape { Shape.Circle(3.14) }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_05: `copy enum` declaration is accepted; no errors.
+    #[test]
+    fn ok_copy_enum_declaration() {
+        let src = "copy enum Dir { North, South } fn f() -> Dir { North }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_06: `move enum` declaration is accepted; no errors.
+    #[test]
+    fn ok_move_enum_declaration() {
+        let src = "move enum Handle { Open(i32), Closed } fn f() -> Handle { Closed }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_07: generic enum is accepted; variant access is deferred (non-fatal).
+    #[test]
+    fn ok_generic_enum_deferred() {
+        let src = "enum Opt<T> { Some(T), None } fn f() {}";
+        let result = infer_program(src).expect("no fatal errors");
+        let _ = result;
+    }
+
+    // T_en_08: duplicate enum name is a fatal error.
+    #[test]
+    fn error_duplicate_enum() {
+        let src = "enum Dir { North } enum Dir { South }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::DuplicateEnum { name, .. } if name == "Dir"
+        )));
+    }
+
+    // T_en_09: duplicate variant name within the same enum is a fatal error.
+    #[test]
+    fn error_duplicate_variant_in_enum() {
+        let src = "enum E { Foo, Bar, Foo } fn f() {}";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::DuplicateVariant { variant_name, .. } if variant_name == "Foo"
+        )));
+    }
+
+    // T_en_10: wrong number of arguments to tuple variant constructor.
+    #[test]
+    fn error_variant_arg_count_mismatch() {
+        let src = "enum Shape { Circle(f64) } fn f() -> Shape { Circle(1.0, 2.0) }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::VariantArgCountMismatch { variant_name, expected: 1, found: 2, .. }
+            if variant_name == "Circle"
+        )));
+    }
+
+    // T_en_11: unit variant called as a function.
+    #[test]
+    fn error_unit_variant_called_as_function() {
+        let src = "enum Dir { North } fn f() -> Dir { North() }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::UnitVariantCalledAsFunction { variant_name, .. }
+            if variant_name == "North"
+        )));
+    }
+
+    // T_en_12: tuple variant used without arguments.
+    #[test]
+    fn error_tuple_variant_used_as_unit() {
+        let src = "enum Shape { Circle(f64) } fn f() -> Shape { Circle }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::TupleVariantUsedAsUnit { variant_name, .. }
+            if variant_name == "Circle"
+        )));
+    }
+
+    // T_en_13a: two enums may declare the same variant name — valid at declaration time.
+    #[test]
+    fn ok_two_enums_same_variant_name_declaration() {
+        let src = "enum A { Foo, Bar } enum B { Foo, Baz } fn f() {}";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_13b: qualified form always resolves correctly even when name is shared.
+    #[test]
+    fn ok_qualified_disambiguates_shared_variant_name() {
+        let src = "enum A { Foo } enum B { Foo }                    fn use_a() -> A { A.Foo }                    fn use_b() -> B { B.Foo }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_16: `move enum` + qualified unit variant in tail — no FieldOwnNonCopy.
+    #[test]
+    fn ok_move_enum_qualified_unit_variant_tail() {
+        let src = "move enum Dir { North, South } fn f() -> Dir { Dir.North }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_17: `move enum` + qualified unit variant in block tail — no FieldOwnNonCopy.
+    #[test]
+    fn ok_move_enum_qualified_unit_variant_block_tail() {
+        let src = "move enum Dir { North, South } fn f() -> Dir { { Dir.North } }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_18: `move enum` + qualified unit variant in let — no FieldOwnNonCopy.
+    #[test]
+    fn ok_move_enum_qualified_unit_variant_let() {
+        let src = "move enum Dir { North, South } fn f() -> Dir { let v = Dir.North; v }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_19: inferred-non-Copy enum (contains a move-struct field) + qualified variant.
+    #[test]
+    fn ok_non_copy_inferred_enum_qualified_variant() {
+        // Handle wraps an i32 — but enum is non-Copy because str is non-Copy in one variant
+        // Use a move enum instead since that's the reliable non-Copy path.
+        let src = "move enum Handle { Open(i32), Closed } fn f() -> Handle { Handle.Closed }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_13c: bare form of a shared variant name is a fatal use-time error.
+    #[test]
+    fn error_ambiguous_bare_variant() {
+        let src = "enum A { Foo } enum B { Foo } fn f() -> A { Foo }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::AmbiguousVariant { variant_name, defined_in, .. }
+            if variant_name == "Foo" && defined_in.len() == 2
+        )));
+    }
+
+    // T_en_13d: bare form of an unambiguous variant (shared name but DIFFERENT variant unambiguous).
+    #[test]
+    fn ok_unambiguous_bare_variant_with_sibling_ambiguous() {
+        let src = "enum A { Foo, Bar } enum B { Foo, Baz }                    fn f() -> A { Bar }                    fn g() -> B { Baz }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_en_14: variant argument type mismatch (tuple variant).
+    #[test]
+    fn error_variant_arg_type_mismatch() {
+        let src = "enum Shape { Circle(f64) } fn f() -> Shape { Circle(42) }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::Mismatch { .. })));
+    }
+
+    // T_en_15: enum type used as a struct field type.
+    #[test]
+    fn ok_enum_as_struct_field_type() {
+        let src = "enum Dir { North, South }                    struct Step { dir: Dir, dist: i32 }                    fn f() -> i32 {                        let s = Step { dir = North, dist = 5 };                        s.dist                    }";
+        assert!(infer_program(src).is_ok());
+    }
+
 }

@@ -1258,7 +1258,7 @@ fn lower_to_module<'ctx>(
                     declare_method_sig(block.type_name, method, ctx, &module, &struct_types)?;
                 }
             }
-            Item::Struct(_) => {}
+            Item::Struct(_) | Item::Enum(_) => {}
         }
     }
 
@@ -1271,7 +1271,7 @@ fn lower_to_module<'ctx>(
                     lower_method(block.type_name, method, types, ctx, &module, &struct_types)?;
                 }
             }
-            Item::Struct(_) => {}
+            Item::Struct(_) | Item::Enum(_) => {}
         }
     }
 

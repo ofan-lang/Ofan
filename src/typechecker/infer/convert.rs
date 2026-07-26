@@ -25,7 +25,8 @@ pub(super) fn ast_ty_to_ty(
                     "unit" => return Ty::Unit,
                     n if generic_params.contains(&n) => return Ty::Param(n.to_string()),
                     n if ctx.struct_defs.contains_key(n) => return Ty::Named(n.to_string()),
-                    _ => return super::defer(ctx, "user-defined type — struct/enum design pending", span),
+                    n if ctx.enum_defs.contains_key(n) => return Ty::Named(n.to_string()),
+                    _ => return super::defer(ctx, "user-defined type — not yet known as struct or enum", span),
                 }
             }
             // Generic instantiation (e.g. `Option<i32>`): deferred in phase 1.

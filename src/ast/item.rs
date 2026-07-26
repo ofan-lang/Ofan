@@ -12,7 +12,8 @@ pub enum Item<'src> {
     Function(FunctionDef<'src>),
     Impl(ImplBlock<'src>),
     Struct(StructDef<'src>),
-    // Enum, TypeAlias — future PRs
+    Enum(EnumDef<'src>),
+    // TypeAlias — future PR
 }
 
 /// Explicit Copy/Move override on a struct definition (§23).
@@ -31,6 +32,28 @@ pub struct StructDef<'src> {
     pub copy_move: Option<CopyMove>,
     pub generic_params: Vec<&'src str>,
     pub fields: Vec<StructField<'src>>,
+    pub span: Span,
+}
+
+/// A single variant inside an enum body.
+/// `fields` is empty for a unit variant; non-empty for a tuple variant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant<'src> {
+    pub name: &'src str,
+    pub name_span: Span,
+    /// Empty = unit variant. Non-empty = tuple variant (payload types, in order).
+    pub fields: Vec<Type<'src>>,
+    pub span: Span,
+}
+
+/// `[copy|move] enum Name[<T, ...>] { Variant1, Variant2(Type), ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDef<'src> {
+    pub name: &'src str,
+    pub name_span: Span,
+    pub copy_move: Option<CopyMove>,
+    pub generic_params: Vec<&'src str>,
+    pub variants: Vec<EnumVariant<'src>>,
     pub span: Span,
 }
 

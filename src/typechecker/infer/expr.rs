@@ -31,12 +31,47 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
             if let Some(ty) = env.lookup(name) {
                 return ty.clone();
             }
-            // Also check if it's a zero-argument function reference used as value.
-            // (Rare, but syntactically possible: `let f = my_fn;`)
-            // For phase 1 treat function idents as their return type only when the
-            // name is unambiguously a function and not a local.
             if let Some((sig, _)) = ctx.fn_sigs.get(*name) {
                 return sig.return_ty.clone();
+            }
+            // Bare variant name lookup (§20). Clone the enum name list to avoid
+            // holding a borrow into ctx while we call ctx.error below.
+            if let Some(enum_names) = ctx.variant_to_enum.get(*name).cloned() {
+                if enum_names.len() > 1 {
+                    ctx.error(TypeError::AmbiguousVariant {
+                        variant_name: name.to_string(),
+                        defined_in: enum_names,
+                        span: *span,
+                    });
+                    return Ty::Error;
+                }
+                let enum_name = enum_names.into_iter().next().unwrap();
+                // Check is_generic and variant kind by reading the enum info once.
+                let (is_generic, variant_is_unit) = {
+                    let info = ctx.enum_defs.get(&enum_name);
+                    let gen = info.map(|i| i.is_generic).unwrap_or(false);
+                    let unit = info.and_then(|i| i.variants.get(*name)).map(|f| f.is_empty());
+                    (gen, unit)
+                };
+                if is_generic {
+                    return super::defer(
+                        ctx,
+                        "bare variant on generic enum — requires type instantiation",
+                        *span,
+                    );
+                }
+                match variant_is_unit {
+                    Some(true) => return Ty::Named(enum_name),
+                    Some(false) => {
+                        ctx.error(TypeError::TupleVariantUsedAsUnit {
+                            enum_name,
+                            variant_name: name.to_string(),
+                            span: *span,
+                        });
+                        return Ty::Error;
+                    }
+                    None => {} // variant_to_enum invariant violated; fall through
+                }
             }
             ctx.error(TypeError::UndefinedVariable {
                 name: name.to_string(),
@@ -169,6 +204,74 @@ fn infer_method_call(
     ctx: &mut InferCtx,
     env: &mut Env,
 ) -> Ty {
+    // Option B hook: qualified tuple variant construction (`EnumName.Variant(args)`).
+    // `Shape.Circle(3.14)` parses as MethodCall { object: Ident("Shape"), method: "Circle" }.
+    // Must fire BEFORE infer_expr(object) — same reason as the Field hook above.
+    if let Expr::Ident(type_name, _) = object {
+        if env.lookup(type_name).is_none() {
+            if let Some(info) = ctx.enum_defs.get(*type_name) {
+                if info.is_generic {
+                    infer_all(args, ctx, env);
+                    return super::defer(
+                        ctx,
+                        "qualified variant on generic enum — requires type instantiation",
+                        span,
+                    );
+                }
+                let variant_order = info.variant_order.clone();
+                let variant_fields = info.variants.get(method).cloned();
+                let enum_name = type_name.to_string();
+                match variant_fields {
+                    None => {
+                        infer_all(args, ctx, env);
+                        ctx.error(TypeError::VariantNotFound {
+                            enum_name,
+                            variant_name: method.to_string(),
+                            span: method_span,
+                            available: variant_order,
+                        });
+                        return Ty::Error;
+                    }
+                    Some(fields) if fields.is_empty() => {
+                        infer_all(args, ctx, env);
+                        ctx.error(TypeError::UnitVariantCalledAsFunction {
+                            enum_name,
+                            variant_name: method.to_string(),
+                            span,
+                        });
+                        return Ty::Error;
+                    }
+                    Some(field_tys) => {
+                        if args.len() != field_tys.len() {
+                            infer_all(args, ctx, env);
+                            ctx.error(TypeError::VariantArgCountMismatch {
+                                enum_name: enum_name.clone(),
+                                variant_name: method.to_string(),
+                                expected: field_tys.len(),
+                                found: args.len(),
+                                span,
+                                suggestion: Some(format!(
+                                    "pass exactly {} argument(s) to `{enum_name}::{method}`",
+                                    field_tys.len()
+                                )),
+                            });
+                            return Ty::Error;
+                        }
+                        for (arg, expected_ty) in args.iter().zip(field_tys.iter()) {
+                            let arg_ty = infer_expr(arg, ctx, env);
+                            super::check_types(expected_ty, &arg_ty, arg.span(), ctx, || {
+                                Some(format!(
+                                    "variant `{enum_name}::{method}` field expects `{expected_ty:?}`"
+                                ))
+                            });
+                        }
+                        return Ty::Named(enum_name);
+                    }
+                }
+            }
+        }
+    }
+
     let recv_ty = infer_expr(object, ctx, env);
 
     // Cascade suppression: don't pile errors onto an already-errored receiver.
@@ -295,6 +398,52 @@ fn infer_field_access(
     ctx: &mut InferCtx,
     env: &mut Env,
 ) -> Ty {
+    // Option B hook: qualified unit variant construction (`EnumName.VariantName`).
+    // Must fire BEFORE infer_expr(object) because enum names are type identifiers,
+    // not value bindings — the normal infer path would emit UndefinedVariable on them.
+    // Local bindings shadow enum names (env.lookup check first, per spec §20).
+    if let Expr::Ident(type_name, type_name_span) = object {
+        if env.lookup(type_name).is_none() {
+            if let Some(info) = ctx.enum_defs.get(*type_name) {
+                if info.is_generic {
+                    return super::defer(
+                        ctx,
+                        "qualified variant on generic enum — requires type instantiation",
+                        span,
+                    );
+                }
+                let variant_order = info.variant_order.clone();
+                let variant_fields = info.variants.get(field).cloned();
+                let enum_name = type_name.to_string();
+                // Record the enum name identifier's type so that
+                // check_tail_field_own_non_copy can correctly identify this as an enum
+                // type (not a struct field access) and not emit FieldOwnNonCopy.
+                ctx.record(*type_name_span, Ty::Named(enum_name.clone()));
+                match variant_fields {
+                    None => {
+                        ctx.error(TypeError::VariantNotFound {
+                            enum_name,
+                            variant_name: field.to_string(),
+                            span: field_span,
+                            available: variant_order,
+                        });
+                        return Ty::Error;
+                    }
+                    Some(fields) if !fields.is_empty() => {
+                        // Tuple variant used without args — should be EnumName.Variant(...)
+                        ctx.error(TypeError::TupleVariantUsedAsUnit {
+                            enum_name,
+                            variant_name: field.to_string(),
+                            span: field_span,
+                        });
+                        return Ty::Error;
+                    }
+                    Some(_) => return Ty::Named(enum_name),
+                }
+            }
+        }
+    }
+
     let obj_ty = infer_expr(object, ctx, env);
     if matches!(obj_ty, Ty::Error) { return Ty::Error; }
 
@@ -371,6 +520,63 @@ fn infer_call(
             infer_expr(arg, ctx, env);
         }
         return super::defer(ctx, "calling local variables as functions (closures/fn pointers)", span);
+    }
+
+    // Bare tuple variant constructor: `Circle(3.14)` where Circle ∈ variant_to_enum (§20).
+    if let Some(enum_names) = ctx.variant_to_enum.get(name).cloned() {
+        if enum_names.len() > 1 {
+            infer_all(args, ctx, env);
+            ctx.error(TypeError::AmbiguousVariant {
+                variant_name: name.to_string(),
+                defined_in: enum_names,
+                span,
+            });
+            return Ty::Error;
+        }
+        let enum_name = enum_names.into_iter().next().unwrap();
+        let (enum_is_generic, field_tys) = {
+            let info = ctx.enum_defs.get(&enum_name);
+            let gen = info.map(|i| i.is_generic).unwrap_or(false);
+            let tys = info.and_then(|i| i.variants.get(name)).cloned().unwrap_or_default();
+            (gen, tys)
+        };
+        if enum_is_generic {
+            infer_all(args, ctx, env);
+            return super::defer(ctx, "bare variant on generic enum — requires type instantiation", span);
+        }
+        if field_tys.is_empty() {
+            infer_all(args, ctx, env);
+            ctx.error(TypeError::UnitVariantCalledAsFunction {
+                enum_name,
+                variant_name: name.to_string(),
+                span,
+            });
+            return Ty::Error;
+        }
+        if args.len() != field_tys.len() {
+            infer_all(args, ctx, env);
+            ctx.error(TypeError::VariantArgCountMismatch {
+                enum_name: enum_name.clone(),
+                variant_name: name.to_string(),
+                expected: field_tys.len(),
+                found: args.len(),
+                span,
+                suggestion: Some(format!(
+                    "pass exactly {} argument(s) to `{enum_name}::{name}`",
+                    field_tys.len()
+                )),
+            });
+            return Ty::Error;
+        }
+        for (arg, expected_ty) in args.iter().zip(field_tys.iter()) {
+            let arg_ty = infer_expr(arg, ctx, env);
+            super::check_types(expected_ty, &arg_ty, arg.span(), ctx, || {
+                Some(format!(
+                    "field of `{enum_name}::{name}` expects `{expected_ty:?}`"
+                ))
+            });
+        }
+        return Ty::Named(enum_name);
     }
 
     let sig = match ctx.fn_sigs.get(name) {

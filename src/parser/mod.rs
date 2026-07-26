@@ -160,3 +160,14 @@ pub fn parse_struct(src: &str) -> Result<crate::ast::StructDef<'_>, ParseError> 
         _ => panic!("parse_struct: first item is not a struct"),
     }
 }
+
+#[cfg(test)]
+pub fn parse_enum(src: &str) -> Result<crate::ast::EnumDef<'_>, ParseError> {
+    use crate::ast::Item;
+    let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
+    let ast = Parser::new(tokens).parse()?;
+    match ast.items.into_iter().next().expect("parse_enum: no items in source") {
+        Item::Enum(def) => Ok(def),
+        _ => panic!("parse_enum: first item is not an enum"),
+    }
+}
