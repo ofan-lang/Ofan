@@ -1781,7 +1781,34 @@ syntax is settled for these.
 - **Trait / interface syntax** — not started; how `impl` blocks interact with named
   traits has not been decided, though the receiver forms themselves are now settled in §18
 - **Module / import syntax and path separator** — `::` used informally in examples only
-- **`#[no_runtime]`-style attributes** — appeared in one exploratory example only
+- **Field/method visibility (access levels)** — a confirmed future requirement, deferred
+  until the module/namespace system (also §24) is designed. Visibility is only meaningful
+  relative to a module boundary; no module boundary exists yet in the language. When the
+  module system is decided, a follow-up session will settle: (a) syntax for a visibility
+  modifier on struct fields and enum variants; (b) whether the model is per-field explicit
+  keywords (Java/C++-style `public`/`private`/`protected`) or module-relative (`pub`,
+  `pub(crate)`, etc., Rust-style). Both remain open — this entry flags the coupling
+  without deciding either direction.
+
+  `protected` specifically implies inheritance-based access — the distinction between
+  "this class only" and "this class and subclasses" is meaningless without an inheritance
+  hierarchy. Ofan has no inheritance model; a direct Java-style `protected` would need
+  redesign, not just adoption.
+
+  *Field declaration syntax compatibility note:* struct field declaration syntax
+  (`name: type` inside a struct body) has no dedicated section in this spec — it appears
+  only as incidental examples across §17 and §22, as an application of §9's `:` rule in
+  struct-body context. The absence of a formal section is itself a spec gap for a future
+  session. That said, the compatibility check is clean: `[vis_kw] name: type` is a
+  straightforwardly additive extension. No existing token at the field-declaration position
+  could be confused with a visibility keyword. `pub` is not currently reserved (§24
+  keyword table), so it is available as a field name today — adding `pub` to the reserved
+  table is the one prerequisite when the visibility decision is made. §10 (struct literal
+  construction syntax) is unaffected: visibility modifiers apply to declarations, never
+  to constructor expressions.
+- **Attribute syntax** — grammar, valid positions, and use cases (lint suppression,
+  conditional compilation, etc.) remain undecided. The delimiter `@` is reserved — see
+  *"Reserved delimiter: `@`"* below.
 - **Array/slice literal syntax** — `[f64]` and `&[f64]` used informally in earlier
   examples; literal construction syntax (`[1, 2, 3]`?) and fixed-size vs. dynamic-size
   distinction never formalized
@@ -1822,6 +1849,41 @@ word list) is now resolved by the table above.
 
 These do not block lexer work on the tokens decided in §1–§23, but the token set will
 need a follow-up pass once the parser/typechecker-relevant items above are resolved.
+
+**Reserved delimiter: `@` for future attribute syntax**
+
+`@` is reserved as the attribute/metadata prefix (e.g. `@inline`, `@allow(...)`,
+`@deprecated` — illustrative only; these are not committed use cases). Only the delimiter
+is reserved here. Full attribute grammar, valid positions, and actual use cases remain
+undecided.
+
+Unlike words in the keyword table above, `@` is a non-identifier character and does not
+need a `Token::` variant until attribute syntax is designed. Reservation means: no other
+construct may be designed that starts with `@` without first revisiting this entry.
+
+*Alternatives considered and rejected:*
+- **`#[attr]` (Rust-style):** impossible in Ofan — `#` is already the line-comment token
+  (§1). A `#[` sequence would fail to parse or be silently consumed as a comment body.
+- **`/attr/` or any `/`-leading form:** `//` means line comment in essentially every
+  C-family language. Any attribute form that opens with `/` carries a first-glance
+  misread risk for the large population of programmers arriving from C/Java/Go. A syntax
+  that is visually skippable-as-a-comment before the reader processes any content violates
+  the spirit of pillar 5 (errors and constructs should be immediately readable, not
+  requiring mental un-parsing of a familiar lookalike).
+- **`[[attr]]` (C++ precedent):** forward-compatibility risk. Array literal syntax and
+  indexing syntax (both still §24-deferred) may use `[...]`. `[[...]]` could collide with
+  an array-of-array literal or chained indexing once those constructs are designed. Making
+  a delimiter decision here that constrains two separate undecided constructs is the same
+  class of premature constraint this spec has consistently avoided.
+- **`@attr`:** real prior art across mainstream languages (Java annotations, Python
+  decorators, Kotlin annotations, Swift attributes, C# attributes). Terse. Zero collision
+  with any current or foreseeably-future Ofan syntax. The clear choice.
+
+*Note on `@`-binding in patterns (§21 deferred):* §21 also defers `x @ Some(y)` as a
+pattern-binding form that uses `@`. Both uses occupy syntactically disjoint positions —
+attribute syntax appears before item declarations; pattern binding appears inside match
+arms between a name and a sub-pattern. No ambiguity at either position. This is flagged
+explicitly so the §21 design session does not inadvertently conflict with this reservation.
 
 ---
 
