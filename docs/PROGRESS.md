@@ -3,6 +3,57 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-25 — §24 intent-reservation: `@` delimiter + visibility (docs only)
+
+**Branch:** `main` (direct docs commit bbb94b4, no feature branch — intent-reservation only,
+same pattern as `trait`/`mod`)
+
+**What was done:**
+
+Two `docs(syntax-spec):` additions to §24 of `docs/SYNTAX_SPEC.md`. No lexer, parser, or
+typechecker changes.
+
+### 1. Reserved delimiter: `@` for future attribute syntax
+
+`@` reserved as the attribute/metadata prefix (e.g. `@inline`, `@allow(...)` —
+illustrative only, not committed). Only the delimiter is reserved; grammar, valid
+positions, and use cases remain undecided.
+
+Rationale for `@` over the alternatives:
+- `#[attr]` (Rust-style): impossible — `#` is the Ofan line-comment token (§1).
+- `/`-leading forms: misread as comments by C-family readers (pillar 5 concern).
+- `[[attr]]` (C++): forward-compat collision risk with undecided array/indexing syntax.
+- `@`: real prior art (Java, Python, Kotlin, Swift, C#); zero collision risk.
+
+Also noted: §21 deferred `x @ Some(y)` pattern-binding uses the same character at a
+disjoint syntactic position — flagged explicitly so the §21 design session cannot
+inadvertently conflict.
+
+### 2. Deferred: field/method visibility (access levels)
+
+Added §24 entry flagging access control as a confirmed future requirement, explicitly
+coupled to the module system (also §24). Key notes:
+- `protected` implies inheritance semantics; Ofan has none — direct Java-style adoption
+  would need redesign.
+- Field declaration syntax spec gap surfaced: `name: type` inside a struct body has no
+  dedicated section. It is implied by §9 (`:` = "type follows") and appears only as
+  incidental examples in §17/§22. Named as a gap for a future session.
+- Compatibility check: `[vis_kw] name: type` is cleanly additive. `pub` is not currently
+  reserved — reserving it is the one prerequisite when the visibility decision is made.
+
+**Test state:** no code changes; all 276 tests still green from PR #43.
+
+**What's next:**
+- Enum declarations: `Item::Enum` AST node and parser not yet implemented.
+- Method calls returning struct values (codegen spill path — not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`.
+- `emit_allocas` coverage for `For`/`Match` forms (currently skipped; fallback handles
+  them but per-iteration stack growth will occur when these land).
+- Struct declaration syntax: no dedicated spec section yet — implied by §9 + examples.
+  Worth a focused session to formalize the grammar before adding visibility modifiers.
+
+---
+
 ## Last session: 2026-07-25 — shadow-init self-reference regression fix (PR #43)
 
 **Branch:** `fix/shadow-self-reference-regression` (PR #43, merged 2026-07-25, CI green)
