@@ -618,6 +618,14 @@ after the number scan completes successfully. Inputs like `1_abc` already error 
 next character as a digit lookahead and fails) before the success exit is reached.
 The two checks are sequenced by control flow, not ranked by design.
 
+*Current range limit for integer literals:* the typechecker enforces `i32` range
+(−2 147 483 648 to 2 147 483 647). A literal outside this range is a compile error
+(`IntegerOutOfRange`) rather than a silent truncation (pillar 1). The value
+`−2 147 483 648` is expressible only as the negation of the literal `2147483648` —
+there is no positive i32 literal with that value — and the typechecker special-cases
+`Neg(Literal::Integer(2147483648))` to accept it. This restriction lifts when
+multi-width integer types land.
+
 ---
 
 ## §15 String and character literals

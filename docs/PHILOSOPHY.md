@@ -186,6 +186,24 @@ Web and app development are explicitly deferred — sequenced later, not abandon
   Ofan's own lexer/parser exist. A `@c_import`-equivalent ergonomic wrapper is noted as a
   possible future goal once the core compiler is mature — not a v1 commitment.
 
-### 5.4 — Still pending
+### 5.4 — Integer arithmetic overflow policy
 
-_(None at this stage.)_
+**Decided (v1 only — revisit when multi-width types land).**
+
+**Overflow (add, sub, mul):** 2's complement wraparound. No runtime check; no compile-time
+guard. LLVM IR emits plain `add`/`sub`/`mul` without `nsw`/`nuw` flags, so the result is
+fully defined (no LLVM poison, no UB). This matches C's unsigned and Rust's `Wrapping<T>`
+semantics.
+
+*Rationale:* adding a guard on every integer operation is expensive on arithmetic-heavy code
+(microcontroller arithmetic, DSP loops). Silent truncation without UB is preferable to either
+a runtime panic on every add or LLVM poison that can silently miscompile. Programmers who need
+checked arithmetic will call an explicit checked-add operation (to be provided in the standard
+library). The decision is consistent with pillar 1 only because it is *documented* — the
+programmer knows what happens — not because wrapping is "correct" for all programs.
+
+**Division by zero and INT_MIN / -1:** runtime `abort()` (pillar 1 — loud crash over silent
+UB/LLVM poison). Guarded via an `icmp`-based check in codegen before `sdiv`/`srem`.
+
+**Float arithmetic:** IEEE 754 by spec. Division by zero yields ±∞; NaN propagates. No
+guard — this is defined, specified behavior, not silent UB.
