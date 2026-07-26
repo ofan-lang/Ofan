@@ -32,6 +32,18 @@ impl Env {
     }
 }
 
+/// Resolved enum definition stored in InferCtx after collection sub-passes.
+pub(crate) struct EnumInfo {
+    pub(crate) name_span: Span,
+    /// Resolved variant payload types, keyed by variant name.
+    /// Empty Vec = unit variant. Non-empty = tuple variant (fields in order).
+    pub(crate) variants: HashMap<String, Vec<crate::typechecker::ty::Ty>>,
+    /// Variant names in source order — used for `available` lists in VariantNotFound.
+    pub(crate) variant_order: Vec<String>,
+    pub(crate) copy_override: Option<CopyMove>,
+    pub(crate) is_generic: bool,
+}
+
 /// Resolved struct definition stored in InferCtx after collection sub-passes.
 pub(crate) struct StructInfo {
     /// Span of the struct name — used to cite the first definition in DuplicateStruct.
@@ -61,9 +73,17 @@ pub(crate) struct InferCtx {
     /// whole-program duplicate detection (§22); method dispatch in a future session.
     pub(crate) impl_sigs: HashMap<String, HashMap<String, (FnSig, Span)>>,
 
-    /// Struct definitions collected in sub-passes 1a/1b, keyed by struct name.
+    /// Struct definitions collected in sub-passes 1a/1c, keyed by struct name.
     /// Queried by infer_field_access and is_copy (§23).
     pub(crate) struct_defs: HashMap<String, StructInfo>,
+
+    /// Enum definitions collected in sub-passes 1b/1d, keyed by enum name.
+    /// Queried by infer_field_access (qualified variant) and is_copy (§20).
+    pub(crate) enum_defs: HashMap<String, EnumInfo>,
+
+    /// Maps variant name → list of enum names that declare it.
+    /// Vec len > 1 means the bare form is ambiguous at use sites (§20).
+    pub(crate) variant_to_enum: HashMap<String, Vec<String>>,
 
     /// Span → inferred type. Codegen queries this to determine LLVM operand types.
     /// Keyed by the expression span from the AST.
@@ -96,6 +116,8 @@ impl InferCtx {
             fn_sigs: HashMap::new(),
             impl_sigs: HashMap::new(),
             struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            variant_to_enum: HashMap::new(),
             type_map: HashMap::new(),
             errors: Vec::new(),
             current_return_ty: Vec::new(),

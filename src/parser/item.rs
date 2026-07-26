@@ -1,4 +1,4 @@
-use crate::ast::{CopyMove, FunctionDef, ImplBlock, Item, Param, StructDef, StructField, Type};
+use crate::ast::{CopyMove, EnumDef, EnumVariant, FunctionDef, ImplBlock, Item, Param, StructDef, StructField, Type};
 use crate::lexer::token::{Span, Token};
 use crate::parser::{ParseError, Parser};
 
@@ -11,31 +11,37 @@ impl<'src> Parser<'src> {
                 let start = self.peek_span().start;
                 Ok(Item::Struct(self.parse_struct_def(None, start)?))
             }
+            Token::Enum => {
+                let start = self.peek_span().start;
+                Ok(Item::Enum(self.parse_enum_def(None, start)?))
+            }
             Token::Copy => {
                 let start = self.peek_span().start;
                 self.advance();
-                if !matches!(self.peek(), Token::Struct) {
-                    return Err(self.error_expected(
-                        "`struct`",
-                        Some("`copy` at the top level is only valid as `copy struct` (§23)"),
-                    ));
+                match self.peek() {
+                    Token::Struct => Ok(Item::Struct(self.parse_struct_def(Some(CopyMove::Copy), start)?)),
+                    Token::Enum   => Ok(Item::Enum(self.parse_enum_def(Some(CopyMove::Copy), start)?)),
+                    _ => Err(self.error_expected(
+                        "`struct` or `enum`",
+                        Some("`copy` at the top level is only valid as `copy struct` or `copy enum` (§23)"),
+                    )),
                 }
-                Ok(Item::Struct(self.parse_struct_def(Some(CopyMove::Copy), start)?))
             }
             Token::Move => {
                 let start = self.peek_span().start;
                 self.advance();
-                if !matches!(self.peek(), Token::Struct) {
-                    return Err(self.error_expected(
-                        "`struct`",
-                        Some("`move` at the top level is only valid as `move struct` (§23)"),
-                    ));
+                match self.peek() {
+                    Token::Struct => Ok(Item::Struct(self.parse_struct_def(Some(CopyMove::Move), start)?)),
+                    Token::Enum   => Ok(Item::Enum(self.parse_enum_def(Some(CopyMove::Move), start)?)),
+                    _ => Err(self.error_expected(
+                        "`struct` or `enum`",
+                        Some("`move` at the top level is only valid as `move struct` or `move enum` (§23)"),
+                    )),
                 }
-                Ok(Item::Struct(self.parse_struct_def(Some(CopyMove::Move), start)?))
             }
             _ => Err(self.error_expected(
-                "`fn`, `impl`, or `struct`",
-                Some("only `fn`, `impl`, and `struct` declarations are allowed at the top level"),
+                "`fn`, `impl`, `struct`, or `enum`",
+                Some("only `fn`, `impl`, `struct`, and `enum` declarations are allowed at the top level"),
             )),
         }
     }
@@ -91,6 +97,83 @@ impl<'src> Parser<'src> {
             copy_move,
             generic_params,
             fields,
+            span: Span { start: outer_start, end },
+        })
+    }
+
+    /// `[copy|move] enum Name[<T, ...>] { Variant1, Variant2(Type, ...), ... }`
+    /// Caller has already consumed the `copy`/`move` modifier if present.
+    fn parse_enum_def(
+        &mut self,
+        copy_move: Option<CopyMove>,
+        outer_start: usize,
+    ) -> Result<EnumDef<'src>, ParseError> {
+        self.eat(&Token::Enum)?;
+        let (name, name_span) = self.eat_ident()?;
+        let generic_params = self.parse_generic_params_opt()?;
+        self.eat(&Token::LBrace)?;
+
+        let mut variants = Vec::new();
+        loop {
+            match self.peek() {
+                Token::RBrace => break,
+                Token::Eof => return Err(self.error_expected(
+                    "`}` or a variant name",
+                    Some("add `}` to close the enum body"),
+                )),
+                _ => {}
+            }
+            let variant_start = self.peek_span().start;
+            let (vname, vname_span) = self.eat_ident()?;
+
+            // Optional tuple payload: `(Type, Type, ...)`
+            let fields = if matches!(self.peek(), Token::LParen) {
+                self.advance();
+                let mut tys = Vec::new();
+                loop {
+                    if matches!(self.peek(), Token::RParen) {
+                        break;
+                    }
+                    tys.push(self.parse_type()?);
+                    match self.peek() {
+                        Token::Comma => { self.advance(); }
+                        Token::RParen => break,
+                        _ => return Err(self.error_expected(
+                            "`,` or `)`",
+                            Some("add `,` to separate variant field types or `)` to close the variant"),
+                        )),
+                    }
+                }
+                self.eat(&Token::RParen)?;
+                tys
+            } else {
+                Vec::new()
+            };
+
+            variants.push(EnumVariant {
+                name: vname,
+                name_span: vname_span,
+                fields,
+                span: Span { start: variant_start, end: vname_span.end },
+            });
+
+            match self.peek() {
+                Token::Comma => { self.advance(); }
+                Token::RBrace => break,
+                _ => return Err(self.error_expected(
+                    "`,` or `}`",
+                    Some("add `,` to separate variants or `}` to close the enum"),
+                )),
+            }
+        }
+
+        let end = self.eat(&Token::RBrace)?.end;
+        Ok(EnumDef {
+            name,
+            name_span,
+            copy_move,
+            generic_params,
+            variants,
             span: Span { start: outer_start, end },
         })
     }
@@ -506,6 +589,93 @@ mod tests {
         let ast = Parser::new(tokens).parse().unwrap();
         assert_eq!(ast.items.len(), 2);
         assert!(matches!(ast.items[0], Item::Struct(_)));
+        assert!(matches!(ast.items[1], Item::Function(_)));
+    }
+
+    // --- Enum declarations ---
+
+    #[test]
+    fn parse_enum_bare_unit_variants() {
+        use crate::parser::parse_enum;
+        let def = parse_enum("enum Dir { North, South, East, West }").unwrap();
+        assert_eq!(def.name, "Dir");
+        assert!(def.copy_move.is_none());
+        assert!(def.generic_params.is_empty());
+        assert_eq!(def.variants.len(), 4);
+        assert_eq!(def.variants[0].name, "North");
+        assert!(def.variants[0].fields.is_empty());
+        assert_eq!(def.variants[3].name, "West");
+    }
+
+    #[test]
+    fn parse_enum_tuple_variants() {
+        use crate::parser::parse_enum;
+        let def = parse_enum("enum Shape { Circle(f64), Rect(f64, f64), Point }").unwrap();
+        assert_eq!(def.name, "Shape");
+        assert_eq!(def.variants.len(), 3);
+        assert_eq!(def.variants[0].name, "Circle");
+        assert_eq!(def.variants[0].fields.len(), 1);
+        assert_eq!(def.variants[1].name, "Rect");
+        assert_eq!(def.variants[1].fields.len(), 2);
+        assert_eq!(def.variants[2].name, "Point");
+        assert!(def.variants[2].fields.is_empty());
+    }
+
+    #[test]
+    fn parse_enum_copy_modifier() {
+        use crate::ast::CopyMove;
+        use crate::parser::parse_enum;
+        let def = parse_enum("copy enum Dir { North, South }").unwrap();
+        assert_eq!(def.name, "Dir");
+        assert_eq!(def.copy_move, Some(CopyMove::Copy));
+        assert_eq!(def.variants.len(), 2);
+    }
+
+    #[test]
+    fn parse_enum_move_modifier() {
+        use crate::ast::CopyMove;
+        use crate::parser::parse_enum;
+        let def = parse_enum("move enum Handle { Open(i32), Closed }").unwrap();
+        assert_eq!(def.name, "Handle");
+        assert_eq!(def.copy_move, Some(CopyMove::Move));
+    }
+
+    #[test]
+    fn parse_enum_generic() {
+        use crate::parser::parse_enum;
+        let def = parse_enum("enum Opt<T> { Some(T), None }").unwrap();
+        assert_eq!(def.name, "Opt");
+        assert_eq!(def.generic_params, vec!["T"]);
+        assert_eq!(def.variants.len(), 2);
+        assert_eq!(def.variants[0].name, "Some");
+        assert_eq!(def.variants[0].fields.len(), 1);
+        assert_eq!(def.variants[1].name, "None");
+        assert!(def.variants[1].fields.is_empty());
+    }
+
+    #[test]
+    fn parse_enum_trailing_comma() {
+        use crate::parser::parse_enum;
+        let def = parse_enum("enum E { A, B, }").unwrap();
+        assert_eq!(def.variants.len(), 2);
+    }
+
+    #[test]
+    fn parse_enum_empty_body() {
+        use crate::parser::parse_enum;
+        let def = parse_enum("enum Empty { }").unwrap();
+        assert_eq!(def.name, "Empty");
+        assert!(def.variants.is_empty());
+    }
+
+    #[test]
+    fn parse_enum_integrated_with_fn() {
+        use crate::ast::Item;
+        let src = "enum Dir { North } fn f() { }";
+        let tokens = Lexer::new(src).lex().unwrap();
+        let ast = Parser::new(tokens).parse().unwrap();
+        assert_eq!(ast.items.len(), 2);
+        assert!(matches!(ast.items[0], Item::Enum(_)));
         assert!(matches!(ast.items[1], Item::Function(_)));
     }
 }
