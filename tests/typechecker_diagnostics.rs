@@ -13,6 +13,14 @@ fn type_errors(src: &str) -> Vec<TypeError> {
     }
 }
 
+fn type_check_ok(src: &str) {
+    let tokens = Lexer::new(src).lex().expect("lex failed");
+    let ast = Parser::new(tokens).parse().expect("parse failed");
+    if let Err(errs) = typechecker::infer(&ast) {
+        panic!("expected no errors but got: {errs:?}");
+    }
+}
+
 // ── FieldNotFound ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -110,5 +118,27 @@ fn diag_field_write_via_shared_ref() {
     let errors = type_errors(
         "struct Point { x: f64 } fn f(r: &Point) { r.x = 1.0; }",
     );
+    insta::assert_snapshot!(errors[0].to_string());
+}
+
+// ── IntegerOutOfRange ─────────────────────────────────────────────────────────
+
+#[test]
+fn diag_integer_out_of_range() {
+    // Bare positive overflow — 9999999999 > i32::MAX.
+    let errors = type_errors("fn f() -> i32 { let x = 9999999999; x }");
+    insta::assert_snapshot!(errors[0].to_string());
+}
+
+#[test]
+fn ok_i32_min_literal() {
+    // -2147483648 = i32::MIN — valid i32 written with explicit negation. Must not error.
+    type_check_ok("fn f() -> i32 { -2147483648 }");
+}
+
+#[test]
+fn diag_integer_out_of_range_neg() {
+    // -2147483649 — out of i32 range even with negation; no valid i32 representation.
+    let errors = type_errors("fn f() -> i32 { -2147483649 }");
     insta::assert_snapshot!(errors[0].to_string());
 }

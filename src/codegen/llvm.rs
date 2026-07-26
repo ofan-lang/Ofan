@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, Stmt, StructFieldInit, Type, UnaryOp};
+use crate::lexer::token::Span;
 use crate::typechecker::{InferResult, Ty};
 
 /// LLVM compilation context for one compiler invocation.
@@ -138,32 +139,27 @@ struct FnLower<'ctx, 'b> {
     fn_val: FunctionValue<'ctx>,
     /// LLVM named struct types, keyed by Ofan struct name. Built in Pass 0.
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
+    /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
+    alloca_slots: HashMap<Span, PointerValue<'ctx>>,
 }
 
 impl<'ctx, 'b> FnLower<'ctx, 'b> {
     // ── Alloca hoisting ───────────────────────────────────────────────────────
 
     /// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT
-    /// builder position.  Callers must ensure this is the function entry block for
-    /// mem2reg eligibility.  Recurses into block-like `Stmt::Expr` so nested lets
-    /// inside if/while/loop bodies are also hoisted.
+    /// builder position into `self.alloca_slots`.  Callers must ensure this is the
+    /// function entry block for mem2reg eligibility.  Recurses into block-like
+    /// `Stmt::Expr` so nested lets inside if/while/loop bodies are also hoisted.
     ///
-    /// Shadowing (same name at multiple nesting depths) is deferred to PR 33:
-    /// when a name collision is detected the inner binding falls back to inline
-    /// alloca emission in `lower_stmt`.
-    fn emit_allocas<'src>(
-        &self,
-        stmts: &[Stmt<'src>],
-        env: &mut CodegenEnv<'ctx, 'src>,
-    ) -> Result<(), String> {
+    /// Each `Stmt::Let` gets its own alloca keyed by `name_span`, so shadowed
+    /// bindings — whether in the same block or a nested block — each have a
+    /// distinct slot.  `lower_stmt` updates `env[name]` incrementally, ensuring
+    /// `Expr::Ident` reads always resolve to the most-recently-processed binding.
+    fn emit_allocas<'src>(&mut self, stmts: &[Stmt<'src>]) -> Result<(), String> {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, init, .. } => {
-                    if env.contains_key(*name) {
-                        // Known limitation (PR 33): shadowed bindings reuse the outer alloca.
-                        // A full scope-stack is needed to assign each shadow its own slot.
-                        continue;
-                    }
+                Stmt::Let { name, name_span, init, .. } => {
                     let ty = self
                         .types
                         .type_of(init.span())
@@ -173,46 +169,97 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .builder
                         .build_alloca(llvm_ty, name)
                         .map_err(|e| e.to_string())?;
-                    env.insert(*name, (ptr, llvm_ty));
+                    self.alloca_slots.insert(*name_span, ptr);
+                    self.emit_allocas_in_expr(init)?;
                 }
-                Stmt::Expr { expr, .. } => {
-                    self.emit_allocas_in_expr(expr, env)?;
+                Stmt::Expr { expr, .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Assign { target, value, .. } => {
+                    self.emit_allocas_in_expr(target)?;
+                    self.emit_allocas_in_expr(value)?;
                 }
+                Stmt::Return { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Break { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Const { init, .. } => self.emit_allocas_in_expr(init)?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    /// Recurse into block-like expressions to hoist their nested `let` allocas.
-    fn emit_allocas_in_expr<'src>(
-        &self,
-        expr: &Expr<'src>,
-        env: &mut CodegenEnv<'ctx, 'src>,
-    ) -> Result<(), String> {
+    /// Recurse into every expression position that can contain a nested `let` binding,
+    /// hoisting allocas to the function entry block so they are mem2reg-eligible and
+    /// never execute more than once regardless of control flow.
+    fn emit_allocas_in_expr<'src>(&mut self, expr: &Expr<'src>) -> Result<(), String> {
         match expr {
-            Expr::If { then_block, else_branch, .. } => {
-                self.emit_allocas(&then_block.stmts, env)?;
+            // Leaf nodes — no sub-expressions to traverse.
+            Expr::Literal(..) | Expr::Ident(..) => {}
+
+            Expr::Unary { expr, .. } => self.emit_allocas_in_expr(expr)?,
+
+            Expr::Binary { left, right, .. } => {
+                self.emit_allocas_in_expr(left)?;
+                self.emit_allocas_in_expr(right)?;
+            }
+
+            Expr::Call { callee, args, .. } => {
+                self.emit_allocas_in_expr(callee)?;
+                for arg in args {
+                    self.emit_allocas_in_expr(arg)?;
+                }
+            }
+
+            Expr::MethodCall { object, args, .. } => {
+                self.emit_allocas_in_expr(object)?;
+                for arg in args {
+                    self.emit_allocas_in_expr(arg)?;
+                }
+            }
+
+            Expr::Field { object, .. } => self.emit_allocas_in_expr(object)?,
+            Expr::Cast { expr, .. } => self.emit_allocas_in_expr(expr)?,
+            Expr::Propagate { expr, .. } => self.emit_allocas_in_expr(expr)?,
+
+            Expr::StructLit { fields, .. } => {
+                for field in fields {
+                    self.emit_allocas_in_expr(&field.value)?;
+                }
+            }
+
+            Expr::Block(block) => {
+                self.emit_allocas(&block.stmts)?;
+                if let Some(tail) = &block.tail {
+                    self.emit_allocas_in_expr(tail)?;
+                }
+            }
+
+            Expr::If { condition, then_block, else_branch, .. } => {
+                self.emit_allocas_in_expr(condition)?;
+                self.emit_allocas(&then_block.stmts)?;
                 if let Some(tail) = &then_block.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+                    self.emit_allocas_in_expr(tail)?;
                 }
                 if let Some(else_expr) = else_branch {
-                    self.emit_allocas_in_expr(else_expr, env)?;
+                    self.emit_allocas_in_expr(else_expr)?;
                 }
             }
-            Expr::While { body, .. } | Expr::Loop { body, .. } => {
-                self.emit_allocas(&body.stmts, env)?;
+
+            Expr::While { condition, body, .. } => {
+                self.emit_allocas_in_expr(condition)?;
+                self.emit_allocas(&body.stmts)?;
                 if let Some(tail) = &body.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+                    self.emit_allocas_in_expr(tail)?;
                 }
             }
-            Expr::Block(block) => {
-                self.emit_allocas(&block.stmts, env)?;
-                if let Some(tail) = &block.tail {
-                    self.emit_allocas_in_expr(tail, env)?;
+
+            Expr::Loop { body, .. } => {
+                self.emit_allocas(&body.stmts)?;
+                if let Some(tail) = &body.tail {
+                    self.emit_allocas_in_expr(tail)?;
                 }
             }
-            _ => {}
+
+            // For and Match are deferred — not lowered to codegen yet.
+            Expr::For { .. } | Expr::Match { .. } => {}
         }
         Ok(())
     }
@@ -409,23 +456,26 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<(), String> {
         match stmt {
-            Stmt::Let { name, init, .. } => {
-                // Use the pre-hoisted alloca if available; otherwise emit inline (nested block).
-                let (ptr, llvm_ty) = if let Some(&entry) = env.get(*name) {
-                    entry
+            Stmt::Let { name, name_span, init, .. } => {
+                // Retrieve the pre-hoisted alloca for this specific binding (keyed by its
+                // declaration span, so shadowed bindings each get their own slot).
+                // Update env[name] so subsequent Expr::Ident reads find this alloca.
+                let ty = self
+                    .types
+                    .type_of(init.span())
+                    .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
+                let llvm_ty = self.llvm_ty(ty)?;
+                // Use the pre-hoisted alloca when available (mem2reg-eligible). Fall back to
+                // inline alloca for lets inside deferred expression forms (For, Match) whose
+                // sub-expressions emit_allocas_in_expr explicitly skips. With the full
+                // traversal of all currently-lowered expr forms, this branch should be
+                // unreachable in practice — but it keeps correctness if new forms are added.
+                let ptr = if let Some(&p) = self.alloca_slots.get(name_span) {
+                    p
                 } else {
-                    let ty = self
-                        .types
-                        .type_of(init.span())
-                        .ok_or_else(|| format!("missing type for let `{name}` initialiser"))?;
-                    let llvm_ty = self.llvm_ty(ty)?;
-                    let ptr = self
-                        .builder
-                        .build_alloca(llvm_ty, name)
-                        .map_err(|e| e.to_string())?;
-                    env.insert(*name, (ptr, llvm_ty));
-                    (ptr, llvm_ty)
+                    self.builder.build_alloca(llvm_ty, name).map_err(|e| e.to_string())?
                 };
+                env.insert(*name, (ptr, llvm_ty));
                 // Struct literals are lowered field-by-field directly into the destination
                 // alloca; other expressions are lowered to a value and stored normally.
                 match init.as_ref() {
@@ -639,6 +689,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::Unary { op, expr: inner, .. } => {
+                // Fold Neg(Literal::Integer(2147483648)) → i32::MIN constant directly.
+                // The typechecker blesses this via the infer_unary INT_MIN special case,
+                // but the literal lowering guard rejects 2147483648 > i32::MAX. Bypass it.
+                if matches!(op, UnaryOp::Neg) {
+                    if let Expr::Literal(Literal::Integer(n), _) = inner.as_ref() {
+                        if *n == (i32::MAX as i64) + 1 {
+                            return Ok(self.ctx.i32_type().const_int(i32::MIN as u64, false).into());
+                        }
+                    }
+                }
                 let val = self.lower_expr(inner, env, loop_ctx)?;
                 let ty = self
                     .types
@@ -1289,11 +1349,14 @@ fn lower_function<'ctx, 'b, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
-    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
+    let mut lower = FnLower {
+        builder, ctx, module, types, fn_val, struct_types,
+        alloca_slots: HashMap::new(),
+    };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     // Phase 1: emit all allocas at the entry block top (canonical mem2reg form).
-    // Params first, then top-level body lets.
+    // Params first, then all body lets (including shadowed and nested ones).
     let mut param_alloca_entries: Vec<(&'src str, PointerValue<'ctx>, BasicTypeEnum<'ctx>)> =
         Vec::new();
     for param in &func.params {
@@ -1304,7 +1367,7 @@ fn lower_function<'ctx, 'b, 'src>(
             .map_err(|e| e.to_string())?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
-    lower.emit_allocas(&func.body.stmts, &mut env)?;
+    lower.emit_allocas(&func.body.stmts)?;
 
     // Phase 2: store param values into their allocas (after all alloca instructions).
     for (i, (name, ptr, llvm_ty)) in param_alloca_entries.into_iter().enumerate() {
@@ -1376,7 +1439,10 @@ fn lower_method<'ctx, 'b, 'src>(
     let builder = ctx.create_builder();
     builder.position_at_end(entry);
 
-    let lower = FnLower { builder, ctx, module, types, fn_val, struct_types };
+    let mut lower = FnLower {
+        builder, ctx, module, types, fn_val, struct_types,
+        alloca_slots: HashMap::new(),
+    };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
 
     let has_self = method
@@ -1417,7 +1483,7 @@ fn lower_method<'ctx, 'b, 'src>(
             .map_err(|e| e.to_string())?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
-    lower.emit_allocas(&method.body.stmts, &mut env)?;
+    lower.emit_allocas(&method.body.stmts)?;
 
     // Phase 2: store explicit param values.
     for (name, ptr, llvm_ty) in param_alloca_entries {
@@ -1932,5 +1998,109 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 17, "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}");
+    }
+
+    /// T27 — i32::MIN literal: `-2147483648` must compile and return i32::MIN end-to-end.
+    /// Verifies the codegen fold in lower_expr for Neg(Literal::Integer(2147483648)).
+    #[test]
+    fn test_i32_min_literal_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { -2147483648 }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, i32::MIN, "expected i32::MIN (-2147483648), got {result}");
+    }
+
+    /// T24 — nested-block shadow must not corrupt the outer binding.
+    /// `let x = 1; let y = { let x = 2; x }; x` — outer x must remain 1.
+    #[test]
+    fn test_shadow_nested_block_does_not_corrupt_outer_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let y = { let x = 2; x }; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 1, "outer x should remain 1 after inner block shadows it, got {result}");
+    }
+
+    /// T25 — same-block shadow: the second binding overwrites the name.
+    /// `let x = 1; let x = 2; x` — must return 2.
+    #[test]
+    fn test_shadow_same_block_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let x = 2; x }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 2, "shadow should make x == 2, got {result}");
+    }
+
+    /// T26 — capture before shadow: y captures x before the shadow overwrites x.
+    /// `let x = 1; let y = x; let x = 2; y` — must return 1.
+    #[test]
+    fn test_shadow_capture_before_shadow_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { let x = 1; let y = x; let x = 2; y }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 1, "y should hold x's value before the shadow (1), got {result}");
+    }
+
+    /// T28 — Expr::Block as a Binary operand inside a while loop body.
+    /// `{ let a = i; a }` is Expr::Block nested under Expr::Binary — a position
+    /// emit_allocas_in_expr did not recurse into before the traversal fix.
+    /// Result: sum = (0+1)+(1+1)+(2+1) = 6.
+    #[test]
+    fn test_block_in_binary_inside_loop_jit() {
+        let ctx = Context::create();
+        let src = "fn f() -> i32 { \
+            let sum = 0; let i = 0; \
+            while i < 3 { \
+                sum = sum + ({ let a = i; a } + 1); \
+                i = i + 1; \
+            } \
+            sum \
+        }";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("JIT engine creation failed");
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .expect("function not found in JIT module")
+                .call()
+        };
+        assert_eq!(result, 6, "sum should be (0+1)+(1+1)+(2+1)=6, got {result}");
     }
 }

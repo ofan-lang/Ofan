@@ -3,6 +3,50 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-25 — structs-as-fields codegen fix (PR #41)
+
+**Branch:** `fix/structs-as-fields-codegen` (PR #41, merged 2026-07-25, CI green)
+
+**What was done:**
+
+Fixed Gap A: structs that contain another struct as a field failed at codegen. Two bugs,
+not one:
+
+1. **Pass 0b (`resolve_ty`)** — `basic_type()` in the struct-body-setting loop had no
+   arm for `Ty::Named(...)`. Extracted a new free function `resolve_ty` that delegates to
+   `basic_type` for primitives and looks up `struct_types` for named types. Replaced the
+   broken `basic_type(ty, ctx)` call at the Pass 0b site and simplified `FnLower::llvm_ty`
+   to delegate to `resolve_ty`.
+
+2. **`lower_struct_lit_into` (pointer-vs-value)** — for struct-typed field initializers,
+   `lower_expr` returns a `PointerValue` (temp alloca pointer), not the struct value. The
+   old code blindly called `build_store(gep, ptr)`, storing pointer bits into the struct
+   slot. Fixed with a 3-arm dispatch: `Expr::StructLit` fast-path recursion, then a
+   `(val, type_of)` match that detects `Ty::Named` and inserts a `build_load` before the
+   `build_store`.
+
+**Tests added:** T22 and T23 (JIT; struct-as-field forward/reverse declaration order).
+Both assert `e.position.x + e.position.y + e.id == 17`.
+
+**Test state:** 247 passed (all previous + T22 + T23), 0 failed. Clippy clean.
+
+**What's next:**
+- ✅ PR #41 merged 2026-07-25, CI green. Gap A closed.
+- **Gap N** — `infer_literal` maps `Literal::Integer(_)` → `Ty::I32` without range check;
+  integers outside i32 range (-2147483648..=2147483647) are accepted silently. Fix in
+  `src/typechecker/infer/expr.rs` at `infer_expr_inner`; new `TypeError::IntegerOutOfRange`
+  variant.
+- **Gap Q** — shadowed `let` bindings reuse outer alloca. Same-type same-scope shadows
+  are coincidentally correct; the real bugs are (a) nested-block shadows corrupt the outer
+  variable's alloca at runtime, and (b) different-type shadows cause an LLVM type mismatch.
+  Fix: span-keyed alloca map in `FnLower` (`alloca_slots: HashMap<Span, PointerValue>`);
+  one pre-hoisted alloca per `Stmt::Let`, keyed by `name_span`.
+- Enum declarations: `Item::Enum` AST node and parser not yet implemented.
+- Method calls returning struct values (codegen spill path — not yet tested end-to-end).
+- `CodegenError` typed enum replacing `Result<(), String>` (pre-existing debt).
+
+---
+
 ## Last session: 2026-07-23 — golden diagnostic test suite (PR #40)
 
 **Branch:** `test/golden-diagnostics` (PR #40, merged 2026-07-24, CI green)

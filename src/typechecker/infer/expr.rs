@@ -16,7 +16,15 @@ pub(super) fn infer_expr(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> 
 fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
     match expr {
         // ── Literals ─────────────────────────────────────────────────────────
-        Expr::Literal(lit, _) => infer_literal(lit),
+        Expr::Literal(lit, span) => {
+            if let Literal::Integer(n) = lit {
+                if *n > i32::MAX as i64 {
+                    ctx.error(TypeError::IntegerOutOfRange { value: *n, span: *span });
+                    return Ty::Error;
+                }
+            }
+            infer_literal(lit)
+        }
 
         // ── Identifier ───────────────────────────────────────────────────────
         Expr::Ident(name, span) => {

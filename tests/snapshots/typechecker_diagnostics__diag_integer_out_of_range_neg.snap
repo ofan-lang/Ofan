@@ -1,0 +1,6 @@
+---
+source: tests/typechecker_diagnostics.rs
+assertion_line: 143
+expression: "errors[0].to_string()"
+---
+integer literal 2147483649 is out of range for `i32` at byte 17 — valid range is -2147483648 to 2147483647; use a smaller literal value
