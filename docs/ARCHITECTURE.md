@@ -359,6 +359,71 @@ general rule.
 that requires matching the C ABI at the extern boundary specifically — a narrow,
 targeted decision at that call site, not a change to internal method-calling convention.
 
+### Enum memory representation — tagged union, C layout
+
+Ofan enums use a **tagged union** representation: a struct of the form
+`{ tag: i32, payload: [N bytes] }` where:
+
+- **`tag`** is an `i32` assigned by declaration order, 0-indexed (first variant = 0,
+  second = 1, …).
+- **`payload`** is a block of `N` bytes, where `N` is the byte size of the largest
+  variant's payload. Enums with no payload-bearing variants have `N = 0` (tag only).
+- **Alignment and padding** follow the same natural-alignment behavior already decided
+  for structs — LLVM handles it automatically to satisfy the strictest variant's
+  alignment requirement. Not a new decision; confirming the same rule is inherited.
+
+This is the standard C idiom for discriminated unions
+(`struct { enum tag; union { ... } data; }`). The concrete reasons to use it:
+
+- **Directly continues the struct layout decision.** Struct layout was fixed to
+  declaration-order + natural alignment for C-interop compatibility, microcontroller
+  predictability, pillar 1 (no compiler magic), and pillar 3 (one canonical layout).
+  Choosing a different policy for enums — e.g. niche-packed layout like Rust's
+  `repr(Rust)` — would be an inconsistent stance with no principled justification:
+  the same four arguments apply here equally.
+
+- **Natural C interop mapping.** Once `extern` blocks land (v1 scope: call-into-C only),
+  an Ofan enum crossing the FFI boundary maps directly onto a C-side discriminated union
+  with no additional `repr` annotation or layout negotiation. A niche-packed layout would
+  require a secondary repr concept at exactly that boundary — precisely what struct layout
+  was designed to avoid.
+
+- **Tag type is `i32` as a deliberate, revisitable simplification.** `i32` is currently
+  Ofan's only fully-typechecked integer type. This is not a claim that `i32` is the right
+  tag width for all enums — it is a conscious tradeoff. When Ofan gains multiple integer
+  widths as first-class types (u8, u16, etc.), the tag type policy can be narrowed
+  per-enum without changing the fundamental tagged-union layout.
+
+**Tradeoff acknowledged:** An enum's total in-memory size is driven by its largest
+variant's payload, even for variants that carry no data. An enum with a `Nil` unit
+variant alongside a `Polygon([f64; 8])` variant allocates the full payload slot for
+every value, including `Nil`. This is the same size-vs-predictability tradeoff already
+accepted for struct layout, for the same reasons. **Actionable guideline for users:**
+if variant sizes vary dramatically and memory pressure matters, group size-sensitive
+variants into separate enums rather than combining them.
+
+**Hard constraint — recursive enums are not representable by value.** A variant whose
+payload contains the enum's own type directly (e.g. `Cons(i32, List)` inside
+`enum List`) would require infinite bytes under a fixed-size layout — the same
+fundamental reason Rust requires `Box<T>` for this case. The fix in Ofan is identical:
+`Cons(i32, Box<List>)` using the already-decided `Box<T>` (§13 of SYNTAX_SPEC.md).
+No new syntax is needed.
+
+**Scope: concrete (monomorphized) enums only.** For a generic enum such as `Option<T>`,
+`N` is not knowable until `T` is instantiated — the layout formula applies at
+monomorphization time, not at generic-definition time. This is consistent with the
+broader codegen posture: generic instantiation is deferred everywhere in the typechecker
+and codegen. Whoever scopes the generic codegen PR will need to confirm that
+tagged-union layout is computed per concrete instantiation, not once at the generic
+definition.
+
+The compiler **must** produce a clear, actionable error for an infinite-size enum —
+naming the recursive field and pointing at `Box<T>` as the fix. A cryptic
+size-computation failure or ICE here is not acceptable: recursive enum attempts are
+common enough that an unclear error would be a pillar-5 violation and a significant
+usability problem. This is a required error message, not an optional nicety, and must
+be designed into the codegen PR that implements this layout.
+
 ### Method name mangling
 
 Methods are emitted as free LLVM functions with name **`{TypeName}_{method_name}`**
