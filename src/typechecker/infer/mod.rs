@@ -44,7 +44,11 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
         }
     }
 
-    // Sub-pass 1e: collect fn/impl signatures.
+    // Sub-pass 1e: reject infinite-size types — DFS cycle check over the full
+    // struct+enum type graph. Must run after 1c/1d so all field types are resolved.
+    check_infinite_size_types(&mut ctx);
+
+    // Sub-pass 1f: collect fn/impl signatures.
     for item in &ast.items {
         match item {
             Item::Function(f) => collect_fn_sig(f, &mut ctx),
@@ -255,6 +259,91 @@ fn collect_enum_variants(def: &EnumDef<'_>, ctx: &mut InferCtx) {
         info.variants = variants;
         info.variant_order = variant_order;
         info.copy_override = def.copy_move;
+    }
+}
+
+// ─── Pass 1e: infinite-size type detection ───────────────────────────────────
+
+fn check_infinite_size_types(ctx: &mut InferCtx) {
+    use std::collections::HashSet;
+
+    // Build the direct-containment edge set: name → set of names reachable by value.
+    // Box<T>, &T, Ref<T> are pointers — they break cycles and are excluded.
+    fn direct_named_refs(ty: &Ty) -> Option<&str> {
+        match ty {
+            Ty::Named(n) => Some(n.as_str()),
+            _ => None,
+        }
+    }
+
+    let all_names: Vec<String> = ctx.struct_defs.keys()
+        .chain(ctx.enum_defs.keys())
+        .cloned()
+        .collect();
+
+    let mut globally_visited: HashSet<String> = HashSet::new();
+
+    for start in &all_names {
+        if globally_visited.contains(start) {
+            continue;
+        }
+        // DFS with explicit in-stack tracking.
+        let mut stack: Vec<(String, Option<(String, Span)>)> = vec![(start.clone(), None)];
+        let mut in_stack: HashSet<String> = HashSet::new();
+        let mut visited: HashSet<String> = HashSet::new();
+
+        while let Some((current, _)) = stack.last().cloned() {
+            if !visited.contains(&current) {
+                visited.insert(current.clone());
+                in_stack.insert(current.clone());
+
+                // Push neighbors (direct value-type references).
+                if let Some(sinfo) = ctx.struct_defs.get(&current) {
+                    for (field_name, field_ty) in &sinfo.fields {
+                        if let Some(ref_name) = direct_named_refs(field_ty) {
+                            let ref_name = ref_name.to_string();
+                            if in_stack.contains(&ref_name) {
+                                // Cycle found — emit error on this struct field.
+                                ctx.error(TypeError::InfiniteSizeStructField {
+                                    struct_name: current.clone(),
+                                    field_name: field_name.clone(),
+                                    span: sinfo.name_span,
+                                });
+                                break;
+                            }
+                            if !visited.contains(&ref_name) {
+                                stack.push((ref_name, None));
+                            }
+                        }
+                    }
+                } else if let Some(einfo) = ctx.enum_defs.get(&current) {
+                    'outer: for variant_name in &einfo.variant_order {
+                        let payload = &einfo.variants[variant_name];
+                        for field_ty in payload {
+                            if let Some(ref_name) = direct_named_refs(field_ty) {
+                                let ref_name = ref_name.to_string();
+                                if in_stack.contains(&ref_name) {
+                                    ctx.error(TypeError::InfiniteSizeEnumVariant {
+                                        enum_name: current.clone(),
+                                        variant_name: variant_name.clone(),
+                                        span: einfo.name_span,
+                                    });
+                                    break 'outer;
+                                }
+                                if !visited.contains(&ref_name) {
+                                    stack.push((ref_name, None));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // All neighbors processed — pop and unmark in_stack.
+                stack.pop();
+                in_stack.remove(&current);
+                globally_visited.insert(current);
+            }
+        }
     }
 }
 
@@ -1805,6 +1894,49 @@ mod tests {
         assert!(!errs.iter().any(|e| matches!(e,
             TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Circle".to_string())
         )));
+    }
+
+    // ── Infinite-size type detection (cycle check) ────────────────────────────
+
+    // T_cyc_01: direct enum self-reference by value → InfiniteSizeEnumVariant.
+    #[test]
+    fn error_infinite_size_enum_direct_self_ref() {
+        let src = "enum List { Cons(i32, List), Nil }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::InfiniteSizeEnumVariant { enum_name, variant_name, .. }
+            if enum_name == "List" && variant_name == "Cons"
+        )));
+    }
+
+    // T_cyc_02: direct struct self-reference by value → InfiniteSizeStructField.
+    #[test]
+    fn error_infinite_size_struct_direct_self_ref() {
+        let src = "struct Node { next: Node, val: i32 }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::InfiniteSizeStructField { struct_name, .. }
+            if struct_name == "Node"
+        )));
+    }
+
+    // T_cyc_03: indirect mutual cycle (enum A → struct B → enum A).
+    #[test]
+    fn error_infinite_size_mixed_cycle() {
+        let src = "enum A { X(B) } struct B { a: A }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::InfiniteSizeEnumVariant { .. } | TypeError::InfiniteSizeStructField { .. }
+        )));
+    }
+
+    // T_cyc_04: non-recursive enum containing another enum by value → no error.
+    #[test]
+    fn ok_non_recursive_enum_contains_other_enum() {
+        let src = "enum Color { Red, Green, Blue }
+                   enum Pixel { Rgb(Color) }
+                   fn f(p: Pixel) -> i32 { 0 }";
+        assert!(infer_program(src).is_ok());
     }
 
 }
