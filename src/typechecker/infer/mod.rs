@@ -508,9 +508,10 @@ pub(super) fn check_tail_field_own_non_copy(expr: &Expr<'_>, ctx: &mut InferCtx)
             };
             then_fired || else_fired
         }
+        Expr::Match { arms, .. } => {
+            arms.iter().any(|arm| check_tail_field_own_non_copy(&arm.body, ctx))
+        }
         // Any other expression is not a transparent tail wrapper (Unary, Binary, Call, etc.).
-        // NB: when Expr::Match leaves deferred status it must be added here — it is a
-        // value-producing tail wrapper and the wildcard will silently skip it otherwise.
         _ => false,
     }
 }
@@ -1192,6 +1193,21 @@ mod tests {
     }
 
     #[test]
+    fn error_field_own_non_copy_match_arm_tail() {
+        // Match arm tail is a non-Copy field access — check_tail_field_own_non_copy must
+        // recurse into arm bodies (§23 + the NB comment resolved in this PR).
+        let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
+                   enum Pick { First, Second } \
+                   fn f(e1: Entity, e2: Entity, p: Pick) -> Sprite { \
+                       match p { First => e1.sprite, Second => e2.sprite, } \
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite"
+        )));
+    }
+
+    #[test]
     fn ok_field_copy_through_block_tail() {
         // Point is inferred-Copy (all fields f64) — block tail should not fire FieldOwnNonCopy.
         let src = "struct Point { x: f64 } fn f(p: Point) { let _x: f64 = { p.x }; }";
@@ -1559,6 +1575,234 @@ mod tests {
     fn ok_enum_as_struct_field_type() {
         let src = "enum Dir { North, South }                    struct Step { dir: Dir, dist: i32 }                    fn f() -> i32 {                        let s = Step { dir = North, dist = 5 };                        s.dist                    }";
         assert!(infer_program(src).is_ok());
+    }
+
+    // ── Match / pattern-matching tests (T_m_01 – T_m_19) ─────────────────────
+
+    // T_m_01: exhaustive unit-variant enum match — all arms explicit, no wildcard.
+    #[test]
+    fn ok_match_enum_unit_variants_exhaustive() {
+        let src = "enum Dir { North, South, East, West }
+                   fn f(d: Dir) -> i32 {
+                       match d { North => 0, South => 1, East => 2, West => 3, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_02: exhaustive tuple-variant match — payload bound and used in body.
+    #[test]
+    fn ok_match_enum_tuple_variant_payload_binding() {
+        let src = "enum Shape { Circle(f64), Rect(i32) }
+                   fn f(s: Shape) -> i32 {
+                       match s { Circle(r) => 0, Rect(w) => w, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_03: non-exhaustive enum match — missing variant emits NonExhaustiveMatch.
+    #[test]
+    fn error_match_enum_non_exhaustive() {
+        let src = "enum Dir { North, South, East }
+                   fn f(d: Dir) -> i32 {
+                       match d { North => 0, South => 1, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"East".to_string())
+        )));
+    }
+
+    // T_m_04: wildcard arm covers remaining variants — exhaustive.
+    #[test]
+    fn ok_match_enum_wildcard_covers_remainder() {
+        let src = "enum Dir { North, South, East, West }
+                   fn f(d: Dir) -> i32 {
+                       match d { North => 0, _ => 1, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_05: guarded arm does NOT count toward exhaustiveness — still non-exhaustive.
+    #[test]
+    fn error_match_guarded_arm_not_exhaustive() {
+        let src = "enum Opt { Some(i32), None }
+                   fn f(o: Opt) -> i32 {
+                       match o { Some(x) if x > 0 => x, None => 0, }
+                   }";
+        let errs = infer_program_errors(src);
+        // Some is covered only by a guarded arm, so it's missing from unguarded coverage.
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Some".to_string())
+        )));
+    }
+
+    // T_m_06: bool match with explicit true + false — exhaustive without wildcard.
+    #[test]
+    fn ok_match_bool_explicit_true_false() {
+        let src = "fn f(b: bool) -> i32 { match b { true => 1, false => 0, } }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_07: bool match missing false — non-exhaustive.
+    #[test]
+    fn error_match_bool_missing_false() {
+        let src = "fn f(b: bool) -> i32 { match b { true => 1, } }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"false".to_string())
+        )));
+    }
+
+    // T_m_08: i32 subject without wildcard — non-exhaustive (open type requires _).
+    #[test]
+    fn error_match_i32_no_wildcard() {
+        let src = "fn f(n: i32) -> i32 { match n { 0 => 1, 1 => 2, } }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"_".to_string())
+        )));
+    }
+
+    // T_m_09: i32 subject with wildcard — exhaustive.
+    #[test]
+    fn ok_match_i32_with_wildcard() {
+        let src = "fn f(n: i32) -> i32 { match n { 0 => 1, _ => 2, } }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_10: payload binding typed correctly — Circle(r) binds r as f64.
+    #[test]
+    fn ok_match_payload_binding_typed() {
+        let src = "enum Shape { Circle(f64) }
+                   fn f(s: Shape) -> i32 {
+                       match s { Circle(r) => 0, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_11: payload count mismatch — Circle(r, s) where Circle(f64) has one field.
+    #[test]
+    fn error_match_pattern_arg_count_mismatch() {
+        let src = "enum Shape { Circle(f64) }
+                   fn f(s: Shape) -> i32 {
+                       match s { Circle(r, extra) => 0, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::PatternArgCountMismatch { expected: 1, found: 2, .. }
+        )));
+    }
+
+    // T_m_12: match is value-producing — result used as function return type.
+    #[test]
+    fn ok_match_value_producing() {
+        let src = "enum Dir { North, South }
+                   fn f(d: Dir) -> i32 {
+                       let x = match d { North => 1, South => 2, };
+                       x
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_13: arm type mismatch — one arm i32, another bool.
+    #[test]
+    fn error_match_arm_type_mismatch() {
+        let src = "enum Dir { North, South }
+                   fn f(d: Dir) -> i32 {
+                       match d { North => 1, South => true, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::MatchArmMismatch { .. })));
+    }
+
+    // T_m_14: unreachable arm — explicit variant arm after unguarded wildcard.
+    #[test]
+    fn error_match_unreachable_arm_after_wildcard() {
+        let src = "enum Dir { North, South }
+                   fn f(d: Dir) -> i32 {
+                       match d { _ => 0, North => 1, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::UnreachableArm { .. })));
+    }
+
+    // T_m_15: unreachable arm — explicit arm after unguarded binding.
+    #[test]
+    fn error_match_unreachable_arm_after_binding() {
+        let src = "enum Dir { North, South }
+                   fn f(d: Dir) -> i32 {
+                       match d { x => 0, North => 1, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e, TypeError::UnreachableArm { .. })));
+    }
+
+    // T_m_16: qualified pattern in match arm — clear parse error, not "expected =>".
+    #[test]
+    fn error_match_qualified_pattern_rejected() {
+        use crate::parser::parse_expr;
+        let result = parse_expr("match s { Shape.Circle(r) => 0, _ => 1, }");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("qualified patterns") || msg.contains("bare variant"),
+            "expected qualified-pattern message, got: {msg}");
+    }
+
+    // T_m_17: or-pattern counts both variants for exhaustiveness.
+    #[test]
+    fn ok_match_or_pattern_counts_both_variants() {
+        let src = "enum Dir { North, South, East }
+                   fn f(d: Dir) -> i32 {
+                       match d { North | South => 0, East => 1, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_18: guarded arm + separate unguarded arm for same variant — exhaustive.
+    #[test]
+    fn ok_match_guarded_plus_unguarded_exhaustive() {
+        let src = "enum Opt { Some(i32), None }
+                   fn f(o: Opt) -> i32 {
+                       match o {
+                           Some(x) if x > 0 => x,
+                           Some(_) => 0,
+                           None => -1,
+                       }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_19: unit variant used as constructor pattern — UnitVariantInConstructorPattern.
+    #[test]
+    fn error_match_unit_variant_as_constructor_pattern() {
+        let src = "enum Dir { North, South }
+                   fn f(d: Dir) -> i32 {
+                       match d { North() => 0, South => 1, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::UnitVariantInConstructorPattern { variant_name, .. }
+            if variant_name == "North"
+        )));
+    }
+
+    // T_m_20: tuple variant used bare (no parentheses) in pattern — TupleVariantMissingPatternPayload,
+    // with no cascading NonExhaustiveMatch for the same variant.
+    #[test]
+    fn error_match_tuple_variant_used_bare_in_pattern() {
+        let src = "enum Shape { Circle(f64), Rect(i32) }
+                   fn f(s: Shape) -> i32 {
+                       match s { Circle => 0, Rect(w) => w, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::TupleVariantMissingPatternPayload { variant_name, .. }
+            if variant_name == "Circle"
+        )));
+        // Must not also emit NonExhaustiveMatch for Circle — one error is enough.
+        assert!(!errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Circle".to_string())
+        )));
     }
 
 }

@@ -31,6 +31,18 @@ impl<'src> Parser<'src> {
 
         let pattern = self.parse_pattern_or()?;
 
+        // Reject qualified patterns (EnumName.Variant) — Phase 1 supports bare names only.
+        // Without this, `Shape.Circle(r)` parses `Shape` as Pattern::Name and then
+        // hits "expected =>, found ." with a misleading "add `=>`" suggestion.
+        if matches!(self.peek(), Token::Dot) {
+            return Err(self.error_expected(
+                "=> or if",
+                Some("qualified patterns (EnumName.Variant) are not supported in match arms \
+                      — use the bare variant name (Variant) directly; the subject type \
+                      determines which enum is searched"),
+            ));
+        }
+
         let guard = if matches!(self.peek(), Token::If) {
             self.advance();
             let prev = self.no_struct_lit;

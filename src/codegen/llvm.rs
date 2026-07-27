@@ -975,9 +975,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 Ok(call.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
             }
 
+            Expr::Match { span, .. } => Err(format!(
+                "match lowering not yet implemented at byte {} — \
+                 enum value representation is not yet designed; \
+                 match expressions type-check correctly but cannot be compiled in this version",
+                span.start
+            )),
+
             _ => Err(format!(
                 "expression not supported in this PR (at byte {}): \
-                 match, for, cast, borrow, and closures land in later PRs",
+                 for, cast, borrow, and closures land in later PRs",
                 expr.span().start
             )),
         }
