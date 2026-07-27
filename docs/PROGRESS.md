@@ -62,6 +62,16 @@ Full enum codegen pipeline: tagged union LLVM layout, enum construction, match l
 - Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
 - `For` loop codegen (currently deferred)
 
+**Known open assumption (tied to Gap T):** `host_target_data()` in `src/codegen/llvm.rs:2255`
+creates an X86 `TargetMachine` to obtain `TargetData` for enum payload size/alignment
+computation (`get_store_size` at `llvm.rs:1870`). This is correct for the current
+host-only compilation model but encodes an implicit "host target == compilation target"
+assumption. When cross-compilation to ARM/RISC-V lands (Gap T: LLVM distribution
+currently X86+AMDGPU only), `host_target_data()` must be replaced with a
+`TargetData` derived from the actual target triple — otherwise enum payload sizing will
+silently use X86 ABI measurements for a non-X86 target, producing wrong struct layouts
+at runtime with no compile-time diagnostic.
+
 ---
 
 ## Last session: 2026-07-26 — match/pattern-matching typechecking (PR #45)
