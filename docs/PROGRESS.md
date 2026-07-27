@@ -3,6 +3,69 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-26 — match/pattern-matching typechecking (PR #45)
+
+**Branch:** `feat/match-typechecking` (PR #45, open)
+
+**What was done:**
+
+Full match expression typechecking (Gap C, §21). Codegen lowering remains deferred (enum value representation — tag + payload layout — is a prerequisite).
+
+### Parser (`src/parser/pattern.rs`)
+
+Added qualified-pattern rejection in `parse_match_arm`: `EnumName.Variant` in a match arm now emits a targeted parse error with a clear suggestion ("use bare variant name; subject type determines which enum is searched"). Without this, `Shape.Circle(r)` would silently parse `Shape` as `Pattern::Name` and then fail with a confusing "expected `=>`, found `.`" message.
+
+### Typechecker errors (`src/typechecker/error.rs`)
+
+8 new `TypeError` variants (all Pillar-5 compliant — context + suggestion):
+
+- `NonExhaustiveMatch { missing: Vec<String>, span }` — missing variant names, "true"/"false" for bool, or `["_"]` for open primitives
+- `MatchArmMismatch { first_ty, found_ty, arm_span }` — arm body type conflicts with earlier arms
+- `PatternTypeMismatch { subject_ty, span }` — pattern form not valid for subject type
+- `UnreachableArm { span, catch_all_span }` — arm after an unguarded wildcard or binding
+- `UnitVariantInConstructorPattern { enum_name, variant_name, span }` — unit variant used with parens
+- `TupleVariantMissingPatternPayload { enum_name, variant_name, span }` — bare name used for tuple variant (added after pillars review caught wrong error being emitted)
+- `PatternArgCountMismatch { enum_name, variant_name, expected, found, span }` — sub-pattern count ≠ variant arity
+- `PatternVariantNotFound { enum_name, variant_name, span, available }` — name not a member of the matched enum
+
+### Match inference (`src/typechecker/infer/expr.rs`)
+
+Replaced `Expr::Match { span, .. } => super::defer(ctx, "match expressions", *span)` with `infer_match`. Three new functions:
+
+**`infer_match`**: Infers subject type, iterates arms, uses `catchall_span: Option<Span>` (doubles as has-catchall flag), routes guarded arms through temp coverage sets (critical: guarded arms do not count toward exhaustiveness), unifies arm types, calls exhaustiveness check.
+
+**`check_pattern`**: Dispatches by pattern variant. Key disambiguation for `Pattern::Name` on an enum subject: checks `ctx.enum_defs[enum_name].variants.get(name)` — `Some(true)` (unit) → mark covered; `Some(false)` (tuple without parens) → `TupleVariantMissingPatternPayload` + suppress cascade via `covered.insert`; `None` → binding, `env.define`.
+
+**`exhaustiveness_check`**: Enum subjects check `variant_order` against `covered` set; bool checks `true_covered`/`false_covered`; `Ty::Error` suppresses cascade; all other primitives require `_`.
+
+### Tail-field ownership (`src/typechecker/infer/mod.rs`)
+
+Added `Expr::Match` arm to `check_tail_field_own_non_copy` (closed the NB comment that was already in the file). All match arm bodies are checked for tail-position non-Copy field moves.
+
+### Codegen (`src/codegen/llvm.rs`)
+
+Explicit `Err(...)` arm for `Expr::Match` with a clear "not yet lowerable" message, so match expressions that pass typechecking don't hit the generic wildcard with a confusing error.
+
+### Design decisions fixed during this session
+
+- **Guarded arms + exhaustiveness**: guarded arms route through a `temp_covered` set that is discarded after the guard check. A guarded `Some(x) if x > 0 => …` arm does not count as covering `Some`. Checked upfront (`arm.guard.is_some()`) before `check_pattern` mutates `covered`.
+- **`Pattern::Name` on tuple variant**: was emitting `UnitVariantInConstructorPattern` (factually wrong — it's not a unit variant). Fixed by adding `TupleVariantMissingPatternPayload`. Also must still call `covered.insert` in that branch to prevent cascading `NonExhaustiveMatch`.
+
+**Reviewers run:**
+- `pillars-reviewer`: caught Pillar-5 violation (`UnitVariantInConstructorPattern` on a tuple variant — wrong message). Fixed before commit. Also caught missing tail-transparency regression test — added `error_field_own_non_copy_match_arm_tail`.
+- `rust-idiom-reviewer`: 3 clone-reduction findings. Applied in follow-up commit: `exhaustiveness_check` uses `.iter().filter().cloned()` instead of full `variant_order.clone()`; `check_pattern` Constructor branch clones `available` only in the not-found error path; clones payload_tys only on the success path.
+
+**Test state:** 299 passed, 0 failed (`cargo test`). Clippy clean. 21 new tests (T_m_01–T_m_20 + tail-transparency regression).
+
+**What's next:**
+- Merge PR #45 when CI green, then update docs
+- Enum codegen: tag + payload layout, match lowering (next natural step after match typechecking)
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+- `emit_allocas` coverage for `For`/`Match` forms
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+
+---
+
 ## Last session: 2026-07-26 — enum declarations with qualified variant construction (PR #44)
 
 **Branch:** `feat/enum-declarations` (PR #44, merged 2026-07-26, CI green)

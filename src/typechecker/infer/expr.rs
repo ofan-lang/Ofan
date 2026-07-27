@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use crate::ast::{Expr, Literal, StructFieldInit};
+use std::collections::{HashMap, HashSet};
+use crate::ast::{Expr, Literal, MatchArm, Pattern, StructFieldInit};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
@@ -168,8 +168,7 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         // PHASE2: requires iterator trait
         Expr::For { span, .. } => super::defer(ctx, "for loops — requires iterator trait", *span),
 
-        // PHASE2: pattern variable binding + exhaustiveness
-        Expr::Match { span, .. } => super::defer(ctx, "match expressions", *span),
+        Expr::Match { subject, arms, span } => infer_match(subject, arms, *span, ctx, env),
 
         Expr::StructLit { name, name_span, fields, span } => {
             infer_struct_lit(name, *name_span, fields, *span, ctx, env)
@@ -735,4 +734,283 @@ fn infer_struct_lit(
     }
 
     Ty::Named(name.to_string())
+}
+
+// ─── Match expression inference ───────────────────────────────────────────────
+
+fn infer_match(
+    subject: &Expr<'_>,
+    arms: &[MatchArm<'_>],
+    span: Span,
+    ctx: &mut InferCtx,
+    env: &mut Env,
+) -> Ty {
+    let subject_ty = infer_expr(subject, ctx, env);
+
+    let mut first_arm_ty: Option<Ty> = None;
+    // `catchall_span` doubles as the has-catchall flag — `Some` means a catch-all was seen.
+    let mut catchall_span: Option<Span> = None;
+
+    // Coverage tracking for exhaustiveness.
+    let mut covered: HashSet<String> = HashSet::new();
+    let mut true_covered = false;
+    let mut false_covered = false;
+
+    for arm in arms {
+        // Unreachable arm detection — flag but keep inferring for error recovery.
+        if let Some(cs) = catchall_span {
+            ctx.error(TypeError::UnreachableArm { span: arm.span, catch_all_span: cs });
+        }
+
+        env.push_scope();
+
+        // Guarded arms do NOT count toward exhaustiveness coverage. Route their pattern
+        // into a temporary set so real coverage is only updated by unguarded arms.
+        let is_guarded = arm.guard.is_some();
+        let mut temp_covered = HashSet::new();
+        let mut temp_tc = false;
+        let mut temp_fc = false;
+        let (cov, tc, fc) = if is_guarded {
+            (&mut temp_covered, &mut temp_tc, &mut temp_fc)
+        } else {
+            (&mut covered, &mut true_covered, &mut false_covered)
+        };
+
+        let mut arm_is_catchall = check_pattern(
+            &arm.pattern,
+            &subject_ty,
+            ctx,
+            env,
+            cov,
+            tc,
+            fc,
+        );
+
+        // Guard: must produce bool; a guarded arm never counts as a catch-all.
+        if let Some(guard) = &arm.guard {
+            let guard_ty = infer_expr(guard, ctx, env);
+            if !matches!(guard_ty, Ty::Bool | Ty::Error) {
+                ctx.error(TypeError::NonBoolCondition { found: guard_ty, span: guard.span() });
+            }
+            arm_is_catchall = false;
+        }
+
+        let arm_body_ty = infer_expr(&arm.body, ctx, env);
+        ctx.record(arm.span, arm_body_ty.clone());
+
+        env.pop_scope();
+
+        // Arm type unification — all arms must agree on one type.
+        match &first_arm_ty {
+            None => first_arm_ty = Some(arm_body_ty.clone()),
+            Some(ref_ty)
+                if ref_ty != &arm_body_ty
+                    && !matches!((ref_ty, &arm_body_ty), (Ty::Error, _) | (_, Ty::Error)) =>
+            {
+                ctx.error(TypeError::MatchArmMismatch {
+                    first_ty: ref_ty.clone(),
+                    found_ty: arm_body_ty,
+                    arm_span: arm.span,
+                });
+            }
+            _ => {}
+        }
+
+        if arm_is_catchall && catchall_span.is_none() {
+            catchall_span = Some(arm.span);
+        }
+    }
+
+    exhaustiveness_check(&subject_ty, span, catchall_span.is_some(), &covered, true_covered, false_covered, ctx);
+
+    first_arm_ty.unwrap_or(Ty::Error)
+}
+
+/// Check a pattern against the expected subject type. Introduces bindings into `env`
+/// for the current arm scope. Returns `true` if the pattern is an unconditional catch-all
+/// (wildcard `_` or a bare binding name) — used by exhaustiveness tracking.
+fn check_pattern(
+    pattern: &Pattern<'_>,
+    subject_ty: &Ty,
+    ctx: &mut InferCtx,
+    env: &mut Env,
+    covered: &mut HashSet<String>,
+    true_covered: &mut bool,
+    false_covered: &mut bool,
+) -> bool {
+    match pattern {
+        Pattern::Wildcard(_) => true,
+
+        Pattern::Name(name, _name_span) => {
+            match subject_ty {
+                Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
+                    let info = &ctx.enum_defs[enum_name.as_str()];
+                    let variant_payload = info.variants.get(*name).map(|v| v.is_empty());
+                    match variant_payload {
+                        Some(true) => {
+                            // Unit variant pattern — covers this variant.
+                            covered.insert((*name).to_string());
+                            false
+                        }
+                        Some(false) => {
+                            // Tuple variant used without payload pattern (e.g. `Circle` where
+                            // `Circle(f64)` expected). Count it covered to suppress cascade.
+                            let enum_name_s = enum_name.clone();
+                            ctx.error(TypeError::TupleVariantMissingPatternPayload {
+                                enum_name: enum_name_s,
+                                variant_name: (*name).to_string(),
+                                span: pattern.span(),
+                            });
+                            covered.insert((*name).to_string());
+                            false
+                        }
+                        None => {
+                            // Not a known variant of this enum → binding that catches everything.
+                            env.define(name, subject_ty.clone());
+                            true
+                        }
+                    }
+                }
+                _ => {
+                    // Non-enum subject → always a binding catch-all.
+                    env.define(name, subject_ty.clone());
+                    true
+                }
+            }
+        }
+
+        Pattern::Constructor { name, name_span, sub_patterns, span } => {
+            match subject_ty {
+                Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
+                    // Read what we need from the immutable borrow before any &mut ctx calls.
+                    // Clone payload types only on the success path (where they are iterated);
+                    // clone `available` only in the not-found branch (error path only).
+                    let info = &ctx.enum_defs[enum_name.as_str()];
+                    let enum_name_s = enum_name.clone();
+                    match info.variants.get(*name).map(|v| (v.is_empty(), v.len())) {
+                        None => {
+                            let available = info.variant_order.clone();
+                            ctx.error(TypeError::PatternVariantNotFound {
+                                enum_name: enum_name_s,
+                                variant_name: (*name).to_string(),
+                                span: *name_span,
+                                available,
+                            });
+                        }
+                        Some((true, _)) => {
+                            // Unit variant used with constructor syntax — parentheses not valid.
+                            ctx.error(TypeError::UnitVariantInConstructorPattern {
+                                enum_name: enum_name_s,
+                                variant_name: (*name).to_string(),
+                                span: *span,
+                            });
+                        }
+                        Some((false, expected_len)) if expected_len != sub_patterns.len() => {
+                            ctx.error(TypeError::PatternArgCountMismatch {
+                                enum_name: enum_name_s,
+                                variant_name: (*name).to_string(),
+                                expected: expected_len,
+                                found: sub_patterns.len(),
+                                span: *span,
+                            });
+                        }
+                        Some((false, _)) => {
+                            // Clone payload types now that we know counts match.
+                            let payload_tys =
+                                ctx.enum_defs[enum_name.as_str()].variants[*name].clone();
+                            for (sub, payload_ty) in sub_patterns.iter().zip(payload_tys.iter()) {
+                                // Sub-patterns are not enum-level variants; ignore their coverage.
+                                let mut _sc = HashSet::new();
+                                let mut _st = false;
+                                let mut _sf = false;
+                                check_pattern(sub, payload_ty, ctx, env,
+                                              &mut _sc, &mut _st, &mut _sf);
+                            }
+                            covered.insert((*name).to_string());
+                        }
+                    }
+                }
+                _ => {
+                    ctx.error(TypeError::PatternTypeMismatch {
+                        subject_ty: subject_ty.clone(),
+                        span: *span,
+                    });
+                }
+            }
+            false // constructor pattern is never an unconditional catch-all
+        }
+
+        Pattern::Literal(lit, lit_span) => {
+            let lit_ty = infer_literal(lit);
+            // For Ref-wrapped Str, compare unwrapped.
+            let subject_base = match subject_ty {
+                Ty::Ref { inner, .. } => inner.as_ref(),
+                other => other,
+            };
+            if !matches!(lit_ty, Ty::Error) && &lit_ty != subject_base && subject_ty != &Ty::Error {
+                ctx.error(TypeError::PatternTypeMismatch {
+                    subject_ty: subject_ty.clone(),
+                    span: *lit_span,
+                });
+            }
+            // Track bool literal coverage for exhaustiveness.
+            if let Literal::Bool(b) = lit {
+                if *b { *true_covered = true; } else { *false_covered = true; }
+            }
+            false // literal pattern is never a catch-all
+        }
+
+        Pattern::Or(pats, _span) => {
+            let mut any_catchall = false;
+            for p in pats {
+                if check_pattern(p, subject_ty, ctx, env, covered, true_covered, false_covered) {
+                    any_catchall = true;
+                }
+            }
+            any_catchall
+        }
+    }
+}
+
+fn exhaustiveness_check(
+    subject_ty: &Ty,
+    match_span: Span,
+    has_catchall: bool,
+    covered: &HashSet<String>,
+    true_covered: bool,
+    false_covered: bool,
+    ctx: &mut InferCtx,
+) {
+    if has_catchall {
+        return;
+    }
+    match subject_ty {
+        Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
+            let missing: Vec<String> = ctx.enum_defs[enum_name.as_str()]
+                .variant_order
+                .iter()
+                .filter(|v| !covered.contains(v.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                ctx.error(TypeError::NonExhaustiveMatch { missing, span: match_span });
+            }
+        }
+        Ty::Bool => {
+            let mut missing = Vec::new();
+            if !true_covered  { missing.push("true".to_string()); }
+            if !false_covered { missing.push("false".to_string()); }
+            if !missing.is_empty() {
+                ctx.error(TypeError::NonExhaustiveMatch { missing, span: match_span });
+            }
+        }
+        Ty::Error => {}
+        _ => {
+            // Open type (i32, f64, Str, Char, etc.) — cannot enumerate; wildcard required.
+            ctx.error(TypeError::NonExhaustiveMatch {
+                missing: vec!["_".to_string()],
+                span: match_span,
+            });
+        }
+    }
 }

@@ -302,6 +302,73 @@ pub enum TypeError {
         span: Span,
     },
 
+    // ── Match / pattern errors ────────────────────────────────────────────────
+
+    /// Match expression is non-exhaustive — one or more cases not covered by an unguarded arm.
+    /// `missing` contains variant names for enums, "true"/"false" for bool,
+    /// or ["_"] for open primitive types (i32, f64, etc.).
+    #[error("match at byte {} is not exhaustive — missing: {}\n\
+        suggestion: add arms for the missing cases, or add a `_ =>` catch-all",
+        span.start, missing.join(", "))]
+    NonExhaustiveMatch { missing: Vec<String>, span: Span },
+
+    /// Two match arm bodies produce different types — all arms must agree on a single type.
+    #[error("match arm at byte {} has type {found_ty:?}, but earlier arms have type {first_ty:?}\n\
+        suggestion: ensure all match arms produce the same type",
+        arm_span.start)]
+    MatchArmMismatch { first_ty: Ty, found_ty: Ty, arm_span: Span },
+
+    /// Pattern form cannot match the subject type (e.g. a literal int pattern on an enum subject).
+    #[error("pattern at byte {} cannot match subject of type {subject_ty:?}\n\
+        suggestion: use a pattern that is valid for {subject_ty:?}",
+        span.start)]
+    PatternTypeMismatch { subject_ty: Ty, span: Span },
+
+    /// Arm is unreachable — an earlier unguarded wildcard or binding already covers everything.
+    #[error("arm at byte {} is unreachable — a catch-all arm at byte {} already covers all \
+        remaining cases\n\
+        suggestion: remove this arm or move it before the catch-all",
+        span.start, catch_all_span.start)]
+    UnreachableArm { span: Span, catch_all_span: Span },
+
+    /// Constructor pattern (`Variant(...)`) applied to a unit variant that takes no payload.
+    #[error("`{enum_name}::{variant_name}` is a unit variant and takes no payload at byte {}\n\
+        suggestion: write `{variant_name}` without parentheses",
+        span.start)]
+    UnitVariantInConstructorPattern { enum_name: String, variant_name: String, span: Span },
+
+    /// Tuple variant used without a payload pattern — bare `Variant` where `Variant(...)` is needed.
+    #[error("`{enum_name}::{variant_name}` is a tuple variant and requires a payload pattern at byte {}\n\
+        suggestion: write `{variant_name}(_)` to ignore the payload, or `{variant_name}(x)` to bind it",
+        span.start)]
+    TupleVariantMissingPatternPayload { enum_name: String, variant_name: String, span: Span },
+
+    /// Wrong number of sub-patterns in a constructor pattern.
+    #[error("pattern for `{enum_name}::{variant_name}` has {found} sub-pattern(s) at byte {}, \
+        but the variant has {expected}\n\
+        suggestion: use exactly {expected} sub-pattern(s)",
+        span.start)]
+    PatternArgCountMismatch {
+        enum_name: String,
+        variant_name: String,
+        expected: usize,
+        found: usize,
+        span: Span,
+    },
+
+    /// Variant name used in a pattern is not a member of the matched enum.
+    #[error("variant `{variant_name}` not found in enum `{enum_name}` at byte {}{}\n\
+        suggestion: check the variant name or use `_` to catch all remaining cases",
+        span.start,
+        if available.is_empty() { " — enum has no variants".to_string() }
+        else { format!(" — available variants: {}", available.join(", ")) })]
+    PatternVariantNotFound {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+        available: Vec<String>,
+    },
+
     /// Non-fatal: a syntactically valid construct that phase 1 does not yet
     /// type-check. Inference continues with `Ty::Error` for the node.
     /// Does not count as a hard failure in `Result::Err`.
