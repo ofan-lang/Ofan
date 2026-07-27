@@ -288,11 +288,11 @@ fn check_infinite_size_types(ctx: &mut InferCtx) {
             continue;
         }
         // DFS with explicit in-stack tracking.
-        let mut stack: Vec<(String, Option<(String, Span)>)> = vec![(start.clone(), None)];
+        let mut stack: Vec<String> = vec![start.clone()];
         let mut in_stack: HashSet<String> = HashSet::new();
         let mut visited: HashSet<String> = HashSet::new();
 
-        while let Some((current, _)) = stack.last().cloned() {
+        while let Some(current) = stack.last().cloned() {
             if !visited.contains(&current) {
                 visited.insert(current.clone());
                 in_stack.insert(current.clone());
@@ -312,7 +312,7 @@ fn check_infinite_size_types(ctx: &mut InferCtx) {
                                 break;
                             }
                             if !visited.contains(&ref_name) {
-                                stack.push((ref_name, None));
+                                stack.push(ref_name);
                             }
                         }
                     }
@@ -331,7 +331,7 @@ fn check_infinite_size_types(ctx: &mut InferCtx) {
                                     break 'outer;
                                 }
                                 if !visited.contains(&ref_name) {
-                                    stack.push((ref_name, None));
+                                    stack.push(ref_name);
                                 }
                             }
                         }
