@@ -748,7 +748,7 @@ fn infer_match(
     let subject_ty = infer_expr(subject, ctx, env);
 
     let mut first_arm_ty: Option<Ty> = None;
-    let mut has_catchall = false;
+    // `catchall_span` doubles as the has-catchall flag — `Some` means a catch-all was seen.
     let mut catchall_span: Option<Span> = None;
 
     // Coverage tracking for exhaustiveness.
@@ -758,11 +758,8 @@ fn infer_match(
 
     for arm in arms {
         // Unreachable arm detection — flag but keep inferring for error recovery.
-        if has_catchall {
-            ctx.error(TypeError::UnreachableArm {
-                span: arm.span,
-                catch_all_span: catchall_span.unwrap(),
-            });
+        if let Some(cs) = catchall_span {
+            ctx.error(TypeError::UnreachableArm { span: arm.span, catch_all_span: cs });
         }
 
         env.push_scope();
@@ -819,13 +816,12 @@ fn infer_match(
             _ => {}
         }
 
-        if arm_is_catchall && !has_catchall {
-            has_catchall = true;
+        if arm_is_catchall && catchall_span.is_none() {
             catchall_span = Some(arm.span);
         }
     }
 
-    exhaustiveness_check(&subject_ty, span, has_catchall, &covered, true_covered, false_covered, ctx);
+    exhaustiveness_check(&subject_ty, span, catchall_span.is_some(), &covered, true_covered, false_covered, ctx);
 
     first_arm_ty.unwrap_or(Ty::Error)
 }
@@ -848,37 +844,31 @@ fn check_pattern(
         Pattern::Name(name, _name_span) => {
             match subject_ty {
                 Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
-                    // Clone what we need before any &mut ctx calls.
-                    let is_variant = ctx.enum_defs[enum_name.as_str()]
-                        .variants
-                        .contains_key(*name);
-                    let payload_empty = is_variant.then(|| {
-                        ctx.enum_defs[enum_name.as_str()].variants[*name].is_empty()
-                    });
-
-                    if is_variant {
-                        match payload_empty {
-                            Some(true) => {
-                                covered.insert((*name).to_string());
-                            }
-                            Some(false) => {
-                                // Tuple variant used without payload pattern (e.g. `Circle` where
-                                // `Circle(f64)` is expected). Still count it as covered so
-                                // exhaustiveness doesn't cascade a spurious second error.
-                                ctx.error(TypeError::TupleVariantMissingPatternPayload {
-                                    enum_name: enum_name.clone(),
-                                    variant_name: (*name).to_string(),
-                                    span: pattern.span(),
-                                });
-                                covered.insert((*name).to_string());
-                            }
-                            None => unreachable!(),
+                    let info = &ctx.enum_defs[enum_name.as_str()];
+                    let variant_payload = info.variants.get(*name).map(|v| v.is_empty());
+                    match variant_payload {
+                        Some(true) => {
+                            // Unit variant pattern — covers this variant.
+                            covered.insert((*name).to_string());
+                            false
                         }
-                        false // variant pattern is not a catch-all
-                    } else {
-                        // Not a known variant of this enum → binding that catches everything.
-                        env.define(name, subject_ty.clone());
-                        true
+                        Some(false) => {
+                            // Tuple variant used without payload pattern (e.g. `Circle` where
+                            // `Circle(f64)` expected). Count it covered to suppress cascade.
+                            let enum_name_s = enum_name.clone();
+                            ctx.error(TypeError::TupleVariantMissingPatternPayload {
+                                enum_name: enum_name_s,
+                                variant_name: (*name).to_string(),
+                                span: pattern.span(),
+                            });
+                            covered.insert((*name).to_string());
+                            false
+                        }
+                        None => {
+                            // Not a known variant of this enum → binding that catches everything.
+                            env.define(name, subject_ty.clone());
+                            true
+                        }
                     }
                 }
                 _ => {
@@ -892,18 +882,14 @@ fn check_pattern(
         Pattern::Constructor { name, name_span, sub_patterns, span } => {
             match subject_ty {
                 Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
-                    // Clone everything needed before any &mut ctx operations.
-                    let variant_exists = ctx.enum_defs[enum_name.as_str()]
-                        .variants
-                        .contains_key(*name);
-                    let payload_tys: Option<Vec<Ty>> = variant_exists.then(|| {
-                        ctx.enum_defs[enum_name.as_str()].variants[*name].clone()
-                    });
-                    let available = ctx.enum_defs[enum_name.as_str()].variant_order.clone();
+                    // Read what we need from the immutable borrow before any &mut ctx calls.
+                    // Clone payload types only on the success path (where they are iterated);
+                    // clone `available` only in the not-found branch (error path only).
+                    let info = &ctx.enum_defs[enum_name.as_str()];
                     let enum_name_s = enum_name.clone();
-
-                    match payload_tys {
+                    match info.variants.get(*name).map(|v| (v.is_empty(), v.len())) {
                         None => {
+                            let available = info.variant_order.clone();
                             ctx.error(TypeError::PatternVariantNotFound {
                                 enum_name: enum_name_s,
                                 variant_name: (*name).to_string(),
@@ -911,32 +897,34 @@ fn check_pattern(
                                 available,
                             });
                         }
-                        Some(ref tys) if tys.is_empty() => {
-                            // Unit variant used with parentheses.
+                        Some((true, _)) => {
+                            // Unit variant used with constructor syntax — parentheses not valid.
                             ctx.error(TypeError::UnitVariantInConstructorPattern {
                                 enum_name: enum_name_s,
                                 variant_name: (*name).to_string(),
                                 span: *span,
                             });
                         }
-                        Some(ref tys) if tys.len() != sub_patterns.len() => {
+                        Some((false, expected_len)) if expected_len != sub_patterns.len() => {
                             ctx.error(TypeError::PatternArgCountMismatch {
-                                enum_name: enum_name_s.clone(),
+                                enum_name: enum_name_s,
                                 variant_name: (*name).to_string(),
-                                expected: tys.len(),
+                                expected: expected_len,
                                 found: sub_patterns.len(),
                                 span: *span,
                             });
                         }
-                        Some(tys) => {
-                            for (sub, payload_ty) in sub_patterns.iter().zip(tys.iter()) {
-                                // Sub-patterns in constructor payload use a fresh coverage
-                                // context — they are not enum-level variants.
-                                let mut _sub_covered = HashSet::new();
-                                let mut _sub_tc = false;
-                                let mut _sub_fc = false;
+                        Some((false, _)) => {
+                            // Clone payload types now that we know counts match.
+                            let payload_tys =
+                                ctx.enum_defs[enum_name.as_str()].variants[*name].clone();
+                            for (sub, payload_ty) in sub_patterns.iter().zip(payload_tys.iter()) {
+                                // Sub-patterns are not enum-level variants; ignore their coverage.
+                                let mut _sc = HashSet::new();
+                                let mut _st = false;
+                                let mut _sf = false;
                                 check_pattern(sub, payload_ty, ctx, env,
-                                              &mut _sub_covered, &mut _sub_tc, &mut _sub_fc);
+                                              &mut _sc, &mut _st, &mut _sf);
                             }
                             covered.insert((*name).to_string());
                         }
@@ -998,10 +986,11 @@ fn exhaustiveness_check(
     }
     match subject_ty {
         Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
-            let variant_order = ctx.enum_defs[enum_name.as_str()].variant_order.clone();
-            let missing: Vec<String> = variant_order
-                .into_iter()
-                .filter(|v| !covered.contains(v))
+            let missing: Vec<String> = ctx.enum_defs[enum_name.as_str()]
+                .variant_order
+                .iter()
+                .filter(|v| !covered.contains(v.as_str()))
+                .cloned()
                 .collect();
             if !missing.is_empty() {
                 ctx.error(TypeError::NonExhaustiveMatch { missing, span: match_span });
