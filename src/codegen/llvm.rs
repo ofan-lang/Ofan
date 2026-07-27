@@ -6,14 +6,14 @@ use inkwell::{
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
-    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
+    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine},
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType},
     values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue},
 };
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, Stmt, StructFieldInit, Type, UnaryOp};
+use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, MatchArm, Pattern, Stmt, StructFieldInit, Type, UnaryOp};
 use crate::lexer::token::Span;
 use crate::typechecker::{InferResult, Ty};
 
@@ -138,7 +138,12 @@ struct FnLower<'ctx, 'b> {
     /// The LLVM function currently being populated; `Copy`.
     fn_val: FunctionValue<'ctx>,
     /// LLVM named struct types, keyed by Ofan struct name. Built in Pass 0.
+    /// After Pass 0e, also contains enum top-level types (merged in for resolve_ty).
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    /// LLVM tagged-union types keyed by enum name — `{ i32, [N x i8] }`. Built in Pass 0c/0e.
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    /// LLVM payload struct types keyed by `enum_name → variant_name`. Built in Pass 0d.
+    variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
     /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
     /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
     alloca_slots: HashMap<Span, PointerValue<'ctx>>,
@@ -258,8 +263,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            // For and Match are deferred — not lowered to codegen yet.
-            Expr::For { .. } | Expr::Match { .. } => {}
+            Expr::Match { subject, arms, .. } => {
+                self.emit_allocas_in_expr(subject)?;
+                for arm in arms {
+                    if let Some(g) = &arm.guard { self.emit_allocas_in_expr(g)?; }
+                    self.emit_allocas_in_expr(&arm.body)?;
+                }
+            }
+
+            // For is deferred.
+            Expr::For { .. } => {}
         }
         Ok(())
     }
@@ -636,6 +649,517 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         Ok(())
     }
 
+    // ── Enum helpers ──────────────────────────────────────────────────────────
+
+    fn get_variant_tag(&self, enum_name: &str, variant_name: &str) -> Result<u32, String> {
+        self.types
+            .enum_defs()
+            .get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?
+            .variant_order
+            .iter()
+            .position(|n| n == variant_name)
+            .map(|i| i as u32)
+            .ok_or_else(|| format!("ICE: variant `{variant_name}` not in `{enum_name}`"))
+    }
+
+    /// Lower an enum construction: allocate, write tag + payload, return loaded aggregate.
+    fn lower_enum_construction<'src>(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        payload_exprs: &[Expr<'src>],
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let enum_ty = *self.enum_types.get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_types"))?;
+        let tag = self.get_variant_tag(enum_name, variant_name)?;
+
+        let ptr = self.builder.build_alloca(enum_ty, "enum_tmp")
+            .map_err(|e| e.to_string())?;
+
+        // Write tag at GEP [0, 0].
+        let tag_ptr = self.builder.build_struct_gep(enum_ty, ptr, 0, "tag_ptr")
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_store(tag_ptr, self.ctx.i32_type().const_int(tag as u64, false))
+            .map_err(|e| e.to_string())?;
+
+        // Write payload fields at GEP [0, 1] (the [N x i64] area).
+        if !payload_exprs.is_empty() {
+            let payload_ty = *self.variant_payload_types
+                .get(enum_name)
+                .and_then(|m| m.get(variant_name))
+                .ok_or_else(|| {
+                    format!("ICE: payload for `{enum_name}::{variant_name}` not found")
+                })?;
+            let payload_area = self.builder
+                .build_struct_gep(enum_ty, ptr, 1, "payload_area")
+                .map_err(|e| e.to_string())?;
+            for (i, field_expr) in payload_exprs.iter().enumerate() {
+                let field_val = self.lower_expr(field_expr, env, loop_ctx)?;
+                let field_ptr = self.builder
+                    .build_struct_gep(payload_ty, payload_area, i as u32, "payload_field")
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(field_ptr, field_val)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        self.builder.build_load(enum_ty, ptr, "enum_val")
+            .map_err(|e| e.to_string())
+    }
+
+    // ── Match lowering ────────────────────────────────────────────────────────
+
+    fn lower_match<'src>(
+        &self,
+        subject: &Expr<'src>,
+        arms: &[MatchArm<'src>],
+        span: Span,
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let subject_ty = self
+            .types
+            .type_of(subject.span())
+            .ok_or_else(|| format!("ICE: match subject has no type at byte {}", subject.span().start))?;
+        match subject_ty {
+            Ty::Named(ename) if self.enum_types.contains_key(ename.as_str()) => {
+                self.lower_enum_match(ename, span, subject, arms, env, loop_ctx)
+            }
+            _ => self.lower_switch_match(subject, arms, span, env, loop_ctx),
+        }
+    }
+
+    fn lower_enum_match<'src>(
+        &self,
+        enum_name: &str,
+        match_span: Span,
+        subject: &Expr<'src>,
+        arms: &[MatchArm<'src>],
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let enum_ty = *self.enum_types.get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_types"))?;
+        let enum_info = self.types.enum_defs().get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?;
+
+        // ── Subject pointer ───────────────────────────────────────────────────
+        // For a variable subject, use its alloca directly to avoid a copy.
+        // For any expression (including bare unit variant construction), lower and spill.
+        let subject_ptr: PointerValue<'ctx> =
+            if let Expr::Ident(name, _) = subject {
+                if let Some(&(ptr, _)) = env.get(*name) {
+                    ptr
+                } else {
+                    let val = self.lower_expr(subject, env, loop_ctx)?;
+                    let ptr = self.builder.build_alloca(enum_ty, "match_subj")
+                        .map_err(|e| e.to_string())?;
+                    self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                    ptr
+                }
+            } else {
+                let val = self.lower_expr(subject, env, loop_ctx)?;
+                let ptr = self.builder.build_alloca(enum_ty, "match_subj")
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                ptr
+            };
+
+        // ── Load tag ──────────────────────────────────────────────────────────
+        let tag_gep = self.builder
+            .build_struct_gep(enum_ty, subject_ptr, 0, "tag_ptr")
+            .map_err(|e| e.to_string())?;
+        let tag_val = self.builder
+            .build_load(self.ctx.i32_type(), tag_gep, "tag")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+
+        // ── Merge block + result type ──────────────────────────────────────────
+        let merge_bb = self.ctx.append_basic_block(self.fn_val, "match_merge");
+        let result_ty: Option<BasicTypeEnum<'ctx>> = {
+            let ty = self.types.type_of(match_span).unwrap_or(&Ty::Unit);
+            match ty {
+                Ty::Unit => None,
+                Ty::Named(_) => Some(self.ctx.ptr_type(AddressSpace::default()).into()),
+                other => Some(self.llvm_ty(other)?),
+            }
+        };
+
+        // ── Default block ─────────────────────────────────────────────────────
+        let default_bb = self.ctx.append_basic_block(self.fn_val, "match_default");
+        let mut default_arm_opt: Option<&MatchArm<'src>> = None;
+
+        // ── Classify arms ─────────────────────────────────────────────────────
+        // tag_arms: ordered (tag, arm_indices) pairs (Vec for determinism).
+        // tag_arm_pos: tag → index into tag_arms.
+        let mut tag_arms: Vec<(u32, Vec<usize>)> = Vec::new();
+        let mut tag_arm_pos: HashMap<u32, usize> = HashMap::new();
+        // or_arms: (arm_idx, tags) for Or-patterns of unit variants.
+        let mut or_arms: Vec<(usize, Vec<u32>)> = Vec::new();
+
+        let lookup_tag = |name: &str| -> Result<u32, String> {
+            enum_info
+                .variant_order
+                .iter()
+                .position(|n| n == name)
+                .map(|i| i as u32)
+                .ok_or_else(|| format!("ICE: variant `{name}` not in `{enum_name}`"))
+        };
+
+        for (arm_idx, arm) in arms.iter().enumerate() {
+            match &arm.pattern {
+                Pattern::Wildcard(_) => {
+                    default_arm_opt = Some(arm);
+                }
+                Pattern::Name(name, _) => {
+                    if enum_info.variants.contains_key(*name) {
+                        // unit variant pattern
+                        let tag = lookup_tag(name)?;
+                        match tag_arm_pos.get(&tag).copied() {
+                            Some(idx) => tag_arms[idx].1.push(arm_idx),
+                            None => {
+                                tag_arm_pos.insert(tag, tag_arms.len());
+                                tag_arms.push((tag, vec![arm_idx]));
+                            }
+                        }
+                    } else {
+                        default_arm_opt = Some(arm); // binding catch-all
+                    }
+                }
+                Pattern::Constructor { name, .. } => {
+                    let tag = lookup_tag(name)?;
+                    match tag_arm_pos.get(&tag).copied() {
+                        Some(idx) => tag_arms[idx].1.push(arm_idx),
+                        None => {
+                            tag_arm_pos.insert(tag, tag_arms.len());
+                            tag_arms.push((tag, vec![arm_idx]));
+                        }
+                    }
+                }
+                Pattern::Or(pats, _) => {
+                    let mut tags = Vec::new();
+                    for p in pats {
+                        match p {
+                            Pattern::Name(vname, _)
+                                if enum_info.variants.get(*vname).map(|v| v.is_empty()).unwrap_or(false) =>
+                            {
+                                tags.push(lookup_tag(vname)?);
+                            }
+                            _ => {
+                                return Err(
+                                    "complex Or-patterns not yet supported in codegen".to_string()
+                                );
+                            }
+                        }
+                    }
+                    or_arms.push((arm_idx, tags));
+                }
+                Pattern::Literal(_, _) => {
+                    return Err("literal patterns inside enum match not supported".to_string());
+                }
+            }
+        }
+
+        // ── Create per-tag entry blocks ───────────────────────────────────────
+        // Create or-arm body blocks first so we can collect all switch cases.
+        let or_arm_bbs: Vec<(usize, Vec<u32>, BasicBlock<'ctx>)> = or_arms
+            .iter()
+            .map(|(arm_idx, tags)| {
+                (*arm_idx, tags.clone(), self.ctx.append_basic_block(self.fn_val, "or_arm"))
+            })
+            .collect();
+        let tag_entry_bbs: HashMap<u32, BasicBlock<'ctx>> = tag_arms
+            .iter()
+            .map(|&(tag, _)| (tag, self.ctx.append_basic_block(self.fn_val, "match_tag")))
+            .collect();
+
+        // Build switch with all cases upfront (inkwell API requires a slice, not add_case).
+        let mut switch_cases: Vec<(IntValue<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+        for (&tag, &entry_bb) in &tag_entry_bbs {
+            switch_cases.push((self.ctx.i32_type().const_int(tag as u64, false), entry_bb));
+        }
+        for (_, tags, body_bb) in &or_arm_bbs {
+            for &tag in tags {
+                switch_cases.push((self.ctx.i32_type().const_int(tag as u64, false), *body_bb));
+            }
+        }
+        self.builder
+            .build_switch(tag_val, default_bb, &switch_cases)
+            .map_err(|e| e.to_string())?;
+
+        let mut arm_exits: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+
+        // ── Or-pattern arms ───────────────────────────────────────────────────
+        for (arm_idx, _, body_bb) in &or_arm_bbs {
+            let arm = &arms[*arm_idx];
+            self.builder.position_at_end(*body_bb);
+            let body_val = self.lower_expr(&arm.body, env, loop_ctx)?;
+            let exit_bb = self.builder.get_insert_block().unwrap();
+            if exit_bb.get_terminator().is_none() {
+                self.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+            if result_ty.is_some() {
+                arm_exits.push((body_val, exit_bb));
+            }
+        }
+
+        // ── Tag-grouped arms (chained, possibly guarded) ──────────────────────
+        for (tag, arm_indices) in &tag_arms {
+            let variant_name = &enum_info.variant_order[*tag as usize];
+            let payload_ty = self.variant_payload_types
+                .get(enum_name)
+                .and_then(|m| m.get(variant_name.as_str()))
+                .copied();
+            let n_group = arm_indices.len();
+
+            // Pre-create arm entry blocks: first = tag_entry_bbs[tag], rest = new.
+            let arm_entry_bbs: Vec<BasicBlock<'ctx>> = {
+                let mut bbs = vec![tag_entry_bbs[tag]];
+                for _ in 1..n_group {
+                    bbs.push(self.ctx.append_basic_block(self.fn_val, "arm_entry"));
+                }
+                bbs
+            };
+            let body_bbs: Vec<BasicBlock<'ctx>> = (0..n_group)
+                .map(|_| self.ctx.append_basic_block(self.fn_val, "arm_body"))
+                .collect();
+
+            for (i, &arm_idx) in arm_indices.iter().enumerate() {
+                let arm = &arms[arm_idx];
+                let is_last = i == n_group - 1;
+                let guard_fail_bb = if is_last { default_bb } else { arm_entry_bbs[i + 1] };
+
+                // Arm entry: bind payload then branch (with optional guard).
+                self.builder.position_at_end(arm_entry_bbs[i]);
+                let mut arm_env = env.clone();
+                if let Pattern::Constructor { sub_patterns, .. } = &arm.pattern {
+                    if let Some(pt) = payload_ty {
+                        let payload_area = self.builder
+                            .build_struct_gep(enum_ty, subject_ptr, 1, "payload_area")
+                            .map_err(|e| e.to_string())?;
+                        let payload_fields = &enum_info.variants[variant_name.as_str()];
+                        for (j, sub_pat) in sub_patterns.iter().enumerate() {
+                            match sub_pat {
+                                Pattern::Name(bname, _) => {
+                                    let field_ty = self.llvm_ty(&payload_fields[j])?;
+                                    let fptr = self.builder
+                                        .build_struct_gep(pt, payload_area, j as u32, "pf_ptr")
+                                        .map_err(|e| e.to_string())?;
+                                    let fval = self.builder
+                                        .build_load(field_ty, fptr, bname)
+                                        .map_err(|e| e.to_string())?;
+                                    let falloca = self.builder
+                                        .build_alloca(field_ty, bname)
+                                        .map_err(|e| e.to_string())?;
+                                    self.builder.build_store(falloca, fval)
+                                        .map_err(|e| e.to_string())?;
+                                    arm_env.insert(bname, (falloca, field_ty));
+                                }
+                                Pattern::Wildcard(_) => { /* no binding */ }
+                                _ => {
+                                    return Err(
+                                        "nested sub-patterns (literals, constructors, or-patterns) \
+                                         not yet supported in codegen — use a guard instead \
+                                         (e.g. `Some(x) if x == 0`)"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(guard_expr) = &arm.guard {
+                    let gval = self.lower_expr(guard_expr, &arm_env, loop_ctx)?
+                        .into_int_value();
+                    self.builder
+                        .build_conditional_branch(gval, body_bbs[i], guard_fail_bb)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    self.builder
+                        .build_unconditional_branch(body_bbs[i])
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Arm body.
+                self.builder.position_at_end(body_bbs[i]);
+                let body_val = self.lower_expr(&arm.body, &arm_env, loop_ctx)?;
+                let exit_bb = self.builder.get_insert_block().unwrap();
+                if exit_bb.get_terminator().is_none() {
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| e.to_string())?;
+                }
+                if result_ty.is_some() {
+                    arm_exits.push((body_val, exit_bb));
+                }
+            }
+        }
+
+        // ── Default block ─────────────────────────────────────────────────────
+        self.builder.position_at_end(default_bb);
+        if let Some(arm) = default_arm_opt {
+            let mut def_env = env.clone();
+            if let Pattern::Name(bname, _) = &arm.pattern {
+                let val = self.builder
+                    .build_load(enum_ty, subject_ptr, "enum_val")
+                    .map_err(|e| e.to_string())?;
+                let falloca = self.builder
+                    .build_alloca(enum_ty, bname)
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(falloca, val).map_err(|e| e.to_string())?;
+                def_env.insert(bname, (falloca, enum_ty.into()));
+            }
+            let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
+            let exit_bb = self.builder.get_insert_block().unwrap();
+            if exit_bb.get_terminator().is_none() {
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| e.to_string())?;
+            }
+            if result_ty.is_some() {
+                arm_exits.push((body_val, exit_bb));
+            }
+        } else {
+            self.builder.build_unreachable().map_err(|e| e.to_string())?;
+        }
+
+        // ── Phi in merge ──────────────────────────────────────────────────────
+        self.builder.position_at_end(merge_bb);
+        match result_ty {
+            None => Ok(unit_value(self.ctx)),
+            Some(llvm_ty) => {
+                let phi = self.builder
+                    .build_phi(llvm_ty, "match_result")
+                    .map_err(|e| e.to_string())?;
+                for (val, bb) in &arm_exits {
+                    phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
+                }
+                Ok(phi.as_basic_value())
+            }
+        }
+    }
+
+    fn lower_switch_match<'src>(
+        &self,
+        subject: &Expr<'src>,
+        arms: &[MatchArm<'src>],
+        match_span: Span,
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let subject_val = self.lower_expr(subject, env, loop_ctx)?;
+        let int_val = subject_val.into_int_value();
+
+        let merge_bb = self.ctx.append_basic_block(self.fn_val, "switch_merge");
+        let default_bb = self.ctx.append_basic_block(self.fn_val, "switch_default");
+
+        let result_ty: Option<BasicTypeEnum<'ctx>> = {
+            let ty = self.types.type_of(match_span).unwrap_or(&Ty::Unit);
+            match ty {
+                Ty::Unit => None,
+                other => Some(self.llvm_ty(other)?),
+            }
+        };
+
+        // Collect all literal cases + blocks first, then build switch with slice.
+        let mut case_blocks: Vec<(IntValue<'ctx>, BasicBlock<'ctx>, &MatchArm<'src>)> = Vec::new();
+        let mut default_arm_opt: Option<&MatchArm<'src>> = None;
+
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard(_) | Pattern::Name(_, _) => {
+                    default_arm_opt = Some(arm);
+                }
+                Pattern::Literal(Literal::Bool(b), _) => {
+                    let case_bb = self.ctx.append_basic_block(self.fn_val, "switch_case");
+                    case_blocks.push((
+                        self.ctx.bool_type().const_int(*b as u64, false),
+                        case_bb,
+                        arm,
+                    ));
+                }
+                Pattern::Literal(Literal::Integer(n), _) => {
+                    let case_bb = self.ctx.append_basic_block(self.fn_val, "switch_case");
+                    case_blocks.push((
+                        self.ctx.i32_type().const_int(*n as u64, true),
+                        case_bb,
+                        arm,
+                    ));
+                }
+                other => {
+                    return Err(format!("pattern {other:?} not supported in scalar match"));
+                }
+            }
+        }
+
+        let switch_cases: Vec<(IntValue<'ctx>, BasicBlock<'ctx>)> =
+            case_blocks.iter().map(|(k, bb, _)| (*k, *bb)).collect();
+        self.builder
+            .build_switch(int_val, default_bb, &switch_cases)
+            .map_err(|e| e.to_string())?;
+
+        let mut arm_exits: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+
+        for (_, case_bb, arm) in &case_blocks {
+            self.builder.position_at_end(*case_bb);
+            let body_val = self.lower_expr(&arm.body, env, loop_ctx)?;
+            let exit_bb = self.builder.get_insert_block().unwrap();
+            if exit_bb.get_terminator().is_none() {
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| e.to_string())?;
+            }
+            if result_ty.is_some() {
+                arm_exits.push((body_val, exit_bb));
+            }
+        }
+
+        self.builder.position_at_end(default_bb);
+        if let Some(arm) = default_arm_opt {
+            let mut def_env = env.clone();
+            if let Pattern::Name(bname, _) = &arm.pattern {
+                let bty = self.types.type_of(subject.span())
+                    .ok_or_else(|| "ICE: no type for match subject".to_string())?;
+                let bllvm_ty = self.llvm_ty(bty)?;
+                let ptr = self.builder
+                    .build_alloca(bllvm_ty, bname)
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(ptr, subject_val).map_err(|e| e.to_string())?;
+                def_env.insert(bname, (ptr, bllvm_ty));
+            }
+            let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
+            let exit_bb = self.builder.get_insert_block().unwrap();
+            if exit_bb.get_terminator().is_none() {
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| e.to_string())?;
+            }
+            if result_ty.is_some() {
+                arm_exits.push((body_val, exit_bb));
+            }
+        } else {
+            self.builder.build_unreachable().map_err(|e| e.to_string())?;
+        }
+
+        self.builder.position_at_end(merge_bb);
+        match result_ty {
+            None => Ok(unit_value(self.ctx)),
+            Some(llvm_ty) => {
+                let phi = self.builder
+                    .build_phi(llvm_ty, "switch_result")
+                    .map_err(|e| e.to_string())?;
+                for (val, bb) in &arm_exits {
+                    phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
+                }
+                Ok(phi.as_basic_value())
+            }
+        }
+    }
+
     // ── Expression lowering ───────────────────────────────────────────────────
 
     fn lower_expr<'src>(
@@ -673,7 +1197,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, span) => {
+                // Bare unit variant (§20): `North` where `North ∈ Dir`.
+                // env.contains_key check first so local bindings shadow variant names.
+                if !env.contains_key(*name) {
+                    if let Some(Ty::Named(ename)) = self.types.type_of(*span) {
+                        if self.enum_types.contains_key(ename.as_str()) {
+                            return self.lower_enum_construction(ename, name, &[], env, loop_ctx);
+                        }
+                    }
+                }
                 let &(ptr, llvm_ty) = env
                     .get(*name)
                     .ok_or_else(|| format!("undefined variable in codegen: `{name}`"))?;
@@ -892,7 +1425,22 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, span } => {
+                // Bare tuple variant construction (§20): `Circle(3.14)`.
+                // Fire before function lookup — callee name is a variant, not a function.
+                if let Expr::Ident(vname, _) = callee.as_ref() {
+                    if !env.contains_key(*vname) {
+                        if let Some(Ty::Named(ename)) = self.types.type_of(*span) {
+                            if self.enum_types.contains_key(ename.as_str())
+                                && self.types.variant_to_enum().contains_key(*vname)
+                            {
+                                return self.lower_enum_construction(
+                                    ename, vname, args, env, loop_ctx,
+                                );
+                            }
+                        }
+                    }
+                }
                 let Expr::Ident(name, _) = callee.as_ref() else {
                     return Err(
                         "only direct function calls supported in PR 32 (no closures or fn pointers)"
@@ -927,6 +1475,19 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::Field { object, field, .. } => {
+                // Qualified unit variant construction (§20): `Dir.North`.
+                // Typechecker records the type_name ident span as Ty::Named(enum_name).
+                if let Expr::Ident(type_name, _) = object.as_ref() {
+                    if !env.contains_key(*type_name) {
+                        if let Some(Ty::Named(ename)) = self.types.type_of(object.span()) {
+                            if self.enum_types.contains_key(ename.as_str()) {
+                                return self.lower_enum_construction(
+                                    ename, field, &[], env, loop_ctx,
+                                );
+                            }
+                        }
+                    }
+                }
                 let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
                 let struct_name = self.struct_name_of(object.span())?;
                 let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
@@ -957,6 +1518,18 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::MethodCall { object, method, args, .. } => {
+                // Qualified tuple variant construction (§20): `Shape.Circle(3.14)`.
+                // Typechecker skips infer_expr(object) for this form, so object.span()
+                // has no type recorded — check enum_types by name directly.
+                if let Expr::Ident(type_name, _) = object.as_ref() {
+                    if !env.contains_key(*type_name)
+                        && self.enum_types.contains_key(*type_name)
+                    {
+                        return self.lower_enum_construction(
+                            type_name, method, args, env, loop_ctx,
+                        );
+                    }
+                }
                 let struct_name = self.struct_name_of(object.span())?;
                 let mangled = format!("{struct_name}_{method}");
                 let callee = self.module.get_function(&mangled).ok_or_else(|| {
@@ -975,12 +1548,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 Ok(call.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
             }
 
-            Expr::Match { span, .. } => Err(format!(
-                "match lowering not yet implemented at byte {} — \
-                 enum value representation is not yet designed; \
-                 match expressions type-check correctly but cannot be compiled in this version",
-                span.start
-            )),
+            Expr::Match { subject, arms, span } => {
+                self.lower_match(subject, arms, *span, env, loop_ctx)
+            }
 
             _ => Err(format!(
                 "expression not supported in this PR (at byte {}): \
@@ -1255,8 +1825,72 @@ fn lower_to_module<'ctx>(
         }
     }
 
+    // Pass 0c: create opaque LLVM struct types for each enum (tagged union shell).
+    // Done before 0d so enum types can be referenced in variant payload fields.
+    let mut enum_types: HashMap<String, StructType<'ctx>> = HashMap::new();
+    for enum_name in types.enum_defs().keys() {
+        enum_types.insert(enum_name.clone(), ctx.opaque_struct_type(enum_name));
+    }
+    // Merge enum opaques into struct_types so resolve_ty handles enum-typed fields/params.
+    for (name, ty) in &enum_types {
+        struct_types.insert(name.clone(), *ty);
+    }
+
+    // Pass 0d: create and populate variant payload structs (one per non-unit variant).
+    let mut variant_payload_types: HashMap<String, HashMap<String, StructType<'ctx>>> = HashMap::new();
+    for (enum_name, enum_info) in types.enum_defs() {
+        for variant_name in &enum_info.variant_order {
+            let payload = &enum_info.variants[variant_name];
+            if payload.is_empty() {
+                continue;
+            }
+            let payload_type_name = format!("{enum_name}_{variant_name}_payload");
+            let payload_ty = ctx.opaque_struct_type(&payload_type_name);
+            let field_tys: Vec<BasicTypeEnum<'ctx>> = payload
+                .iter()
+                .map(|ty| resolve_ty(ty, ctx, &struct_types))
+                .collect::<Result<_, _>>()?;
+            payload_ty.set_body(&field_tys, false);
+            variant_payload_types
+                .entry(enum_name.clone())
+                .or_default()
+                .insert(variant_name.clone(), payload_ty);
+        }
+    }
+
+    // Pass 0e: compute N and set each enum's top-level body to `{ i32, [N x i8] }`.
+    // N = max ABI store size across all variant payloads (0 for unit-only enums → tag only).
+    let target_data = host_target_data()?;
+    for (enum_name, enum_info) in types.enum_defs() {
+        let variant_map = variant_payload_types.get(enum_name.as_str());
+        let max_bytes: u64 = enum_info
+            .variant_order
+            .iter()
+            .filter_map(|vn| variant_map.and_then(|m| m.get(vn.as_str())))
+            .map(|pt| target_data.get_store_size(pt))
+            .max()
+            .unwrap_or(0);
+        // Round up to i64 units so the payload area is 8-byte aligned on x86-64.
+        // All basic types (i32, f64, bool, ptr) need ≤ 8-byte alignment, so
+        // { i32, [N x i64] } ensures payload fields are always correctly aligned.
+        let n_i64 = max_bytes.div_ceil(8);
+        let body: Vec<BasicTypeEnum<'ctx>> = if n_i64 == 0 {
+            vec![ctx.i32_type().into()]
+        } else {
+            vec![
+                ctx.i32_type().into(),
+                ctx.i64_type().array_type(n_i64 as u32).into(),
+            ]
+        };
+        enum_types
+            .get(enum_name.as_str())
+            .expect("ICE: enum type not in map after Pass 0c")
+            .set_body(&body, false);
+    }
+
     // Pass 1: declare all function and method signatures before lowering any body.
     // Required for forward calls and mutual recursion.
+    // struct_types now includes enum types (merged above), so enum-typed params resolve.
     for item in &ast.items {
         match item {
             Item::Function(func) => declare_function_sig(func, ctx, &module, &struct_types)?,
@@ -1272,10 +1906,12 @@ fn lower_to_module<'ctx>(
     // Pass 2: lower function and method bodies (all callees already visible in module).
     for item in &ast.items {
         match item {
-            Item::Function(func) => lower_function(func, types, ctx, &module, &struct_types)?,
+            Item::Function(func) => {
+                lower_function(func, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
+            }
             Item::Impl(block) => {
                 for method in &block.methods {
-                    lower_method(block.type_name, method, types, ctx, &module, &struct_types)?;
+                    lower_method(block.type_name, method, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
                 }
             }
             Item::Struct(_) | Item::Enum(_) => {}
@@ -1344,12 +1980,15 @@ fn declare_method_sig<'ctx>(
 }
 
 /// Construct an `FnLower` for `func` and drive the lowering of its body.
+#[allow(clippy::too_many_arguments)]
 fn lower_function<'ctx, 'b, 'src>(
     func: &FunctionDef<'src>,
     types: &'b InferResult,
     ctx: &'ctx Context,
     module: &'b Module<'ctx>,
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
 ) -> Result<(), String> {
     // Retrieve the pre-declared LLVM function from pass 1.
     let fn_val = module
@@ -1361,7 +2000,7 @@ fn lower_function<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types,
+        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -1433,6 +2072,7 @@ fn lower_function<'ctx, 'b, 'src>(
 /// Drive lowering of a method body. Mirrors `lower_function` but:
 /// - Uses the mangled name to look up the pre-declared LLVM function.
 /// - Inserts the self pointer as the first environment entry under `"self"`.
+#[allow(clippy::too_many_arguments)]
 fn lower_method<'ctx, 'b, 'src>(
     type_name: &str,
     method: &FunctionDef<'src>,
@@ -1440,6 +2080,8 @@ fn lower_method<'ctx, 'b, 'src>(
     ctx: &'ctx Context,
     module: &'b Module<'ctx>,
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
 ) -> Result<(), String> {
     let mangled = format!("{type_name}_{}", method.name);
     let fn_val = module
@@ -1451,7 +2093,7 @@ fn lower_method<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types,
+        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -1606,6 +2248,25 @@ fn basic_type_from_ast<'ctx>(
         // SelfTy is only valid as a receiver, never as a value-type param in declare
         other => Err(format!("type not supported in codegen: {other:?}")),
     }
+}
+
+/// Create a TargetData for the host machine using the same x86 init pattern as
+/// `emit_module`. Used in Pass 0e to compute ABI-aware payload sizes for enum layout.
+fn host_target_data() -> Result<TargetData, String> {
+    Target::initialize_x86(&InitializationConfig::default());
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::None,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| "failed to create target machine for TargetData".to_string())
+        .map(|tm| tm.get_target_data())
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -2200,5 +2861,248 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 1, "flag>3 is true (old flag=5), branch should return 1, got {result}");
+    }
+
+    // ── Enum codegen JIT tests ────────────────────────────────────────────────
+
+    /// T_en_cg_01: unit variant construction + match, returns 1 for matched arm.
+    #[test]
+    fn test_enum_unit_variant_match_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Dir { North, South }
+            fn f() -> i32 {
+                let d = North;
+                match d {
+                    North => 1,
+                    South => 2,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 1);
+    }
+
+    /// T_en_cg_02: tuple variant construction + payload binding in match.
+    #[test]
+    fn test_enum_tuple_variant_payload_bind_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Shape { Circle(f64), Empty }
+            fn f() -> i32 {
+                let s = Circle(3.14);
+                match s {
+                    Circle(r) => if r > 3.0 { 1 } else { 0 },
+                    Empty => 0,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 1);
+    }
+
+    /// T_en_cg_03: three-variant enum, explicit match on each.
+    #[test]
+    fn test_enum_three_variants_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Color { Red, Green, Blue }
+            fn pick(c: Color) -> i32 {
+                match c {
+                    Red   => 10,
+                    Green => 20,
+                    Blue  => 30,
+                }
+            }
+            fn f() -> i32 {
+                let a = pick(Red);
+                let b = pick(Green);
+                let c = pick(Blue);
+                a + b + c
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 60); // 10 + 20 + 30
+    }
+
+    /// T_en_cg_04: wildcard arm catches unmatched variant.
+    #[test]
+    fn test_enum_wildcard_arm_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Coin { Heads, Tails }
+            fn f() -> i32 {
+                let c = Tails;
+                match c {
+                    Heads => 1,
+                    _     => 99,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 99);
+    }
+
+    /// T_en_cg_05: qualified unit variant construction `Dir.South`.
+    #[test]
+    fn test_enum_qualified_unit_variant_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Dir { North, South }
+            fn f() -> i32 {
+                let d = Dir.South;
+                match d {
+                    North => 0,
+                    South => 7,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 7);
+    }
+
+    /// T_en_cg_06: guarded arm — Some(x) if x > 0.
+    #[test]
+    fn test_enum_guarded_arm_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Opt { Some(i32), None }
+            fn classify(o: Opt) -> i32 {
+                match o {
+                    Some(x) if x > 0 =>  1,
+                    Some(_)          =>  0,
+                    None             => -1,
+                }
+            }
+            fn f() -> i32 {
+                let a = classify(Some(5));
+                let b = classify(Some(-3));
+                let c = classify(None);
+                a + b + c
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 0); // 1 + 0 + (-1)
+    }
+
+    /// T_en_cg_07: or-pattern `North | South => 0, East | West => 1`.
+    #[test]
+    fn test_enum_or_pattern_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Compass { North, South, East, West }
+            fn axis(d: Compass) -> i32 {
+                match d {
+                    North | South => 0,
+                    East  | West  => 1,
+                }
+            }
+            fn f() -> i32 {
+                axis(North) + axis(South) + axis(East) + axis(West)
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 2); // 0 + 0 + 1 + 1
+    }
+
+    /// T_en_cg_08: match as value-producing expression used in arithmetic.
+    #[test]
+    fn test_enum_match_as_expr_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Step { Up, Down }
+            fn f() -> i32 {
+                let x = 10 + match Up { Up => 5, Down => -5 };
+                x
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 15);
+    }
+
+    /// T_en_cg_09: match over bool subject.
+    #[test]
+    fn test_match_bool_subject_jit() {
+        let ctx = Context::create();
+        let src = "
+            fn f() -> i32 {
+                let a = match true  { true => 1, false => 0 };
+                let b = match false { true => 1, false => 0 };
+                a + b
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 1);
+    }
+
+    /// T_en_cg_10: enum passed to function, matched inside callee.
+    #[test]
+    fn test_enum_pass_to_fn_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Light { On, Off }
+            fn brightness(l: Light) -> i32 {
+                match l {
+                    On  => 100,
+                    Off => 0,
+                }
+            }
+            fn f() -> i32 {
+                brightness(On) - brightness(Off)
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 100);
+    }
+
+    /// T_en_cg_11: all variant arms guarded; all guards fail at runtime; wildcard fires.
+    #[test]
+    fn test_enum_all_guards_fail_wildcard_fires_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Opt { Some(i32), None }
+            fn f() -> i32 {
+                let o = Some(-5);
+                match o {
+                    Some(x) if x > 0 => 1,
+                    _                => 42,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 =
+            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        assert_eq!(result, 42);
     }
 }

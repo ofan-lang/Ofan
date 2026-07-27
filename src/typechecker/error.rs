@@ -343,6 +343,20 @@ pub enum TypeError {
         span.start)]
     TupleVariantMissingPatternPayload { enum_name: String, variant_name: String, span: Span },
 
+    /// Enum variant payload contains the enum's own type by value — infinite size.
+    #[error("enum `{enum_name}` variant `{variant_name}` has infinite size at byte {} \
+        — the payload contains `{enum_name}` by value (directly or through other types)\n\
+        suggestion: wrap the recursive payload in `Box<{enum_name}>` to give it a fixed size",
+        span.start)]
+    InfiniteSizeEnumVariant { enum_name: String, variant_name: String, span: Span },
+
+    /// Struct field contains the struct's own type by value — infinite size.
+    #[error("struct `{struct_name}` field `{field_name}` has infinite size at byte {} \
+        — the field type contains `{struct_name}` by value (directly or through other types)\n\
+        suggestion: wrap the recursive field in `Box<{struct_name}>` to give it a fixed size",
+        span.start)]
+    InfiniteSizeStructField { struct_name: String, field_name: String, span: Span },
+
     /// Wrong number of sub-patterns in a constructor pattern.
     #[error("pattern for `{enum_name}::{variant_name}` has {found} sub-pattern(s) at byte {}, \
         but the variant has {expected}\n\
