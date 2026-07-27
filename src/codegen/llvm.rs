@@ -6,7 +6,7 @@ use inkwell::{
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
-    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
+    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine},
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType},
     values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue},
 };
@@ -138,7 +138,12 @@ struct FnLower<'ctx, 'b> {
     /// The LLVM function currently being populated; `Copy`.
     fn_val: FunctionValue<'ctx>,
     /// LLVM named struct types, keyed by Ofan struct name. Built in Pass 0.
+    /// After Pass 0e, also contains enum top-level types (merged in for resolve_ty).
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    /// LLVM tagged-union types keyed by enum name — `{ i32, [N x i8] }`. Built in Pass 0c/0e.
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    /// LLVM payload struct types keyed by `(enum_name, variant_name)`. Built in Pass 0d.
+    variant_payload_types: &'b HashMap<(String, String), StructType<'ctx>>,
     /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
     /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
     alloca_slots: HashMap<Span, PointerValue<'ctx>>,
@@ -1255,8 +1260,65 @@ fn lower_to_module<'ctx>(
         }
     }
 
+    // Pass 0c: create opaque LLVM struct types for each enum (tagged union shell).
+    // Done before 0d so enum types can be referenced in variant payload fields.
+    let mut enum_types: HashMap<String, StructType<'ctx>> = HashMap::new();
+    for (enum_name, _) in types.enum_defs() {
+        enum_types.insert(enum_name.clone(), ctx.opaque_struct_type(enum_name));
+    }
+    // Merge enum opaques into struct_types so resolve_ty handles enum-typed fields/params.
+    for (name, ty) in &enum_types {
+        struct_types.insert(name.clone(), *ty);
+    }
+
+    // Pass 0d: create and populate variant payload structs (one per non-unit variant).
+    let mut variant_payload_types: HashMap<(String, String), StructType<'ctx>> = HashMap::new();
+    for (enum_name, enum_info) in types.enum_defs() {
+        for variant_name in &enum_info.variant_order {
+            let payload = &enum_info.variants[variant_name];
+            if payload.is_empty() {
+                continue;
+            }
+            let payload_type_name = format!("{enum_name}_{variant_name}_payload");
+            let payload_ty = ctx.opaque_struct_type(&payload_type_name);
+            let field_tys: Vec<BasicTypeEnum<'ctx>> = payload
+                .iter()
+                .map(|ty| resolve_ty(ty, ctx, &struct_types))
+                .collect::<Result<_, _>>()?;
+            payload_ty.set_body(&field_tys, false);
+            variant_payload_types
+                .insert((enum_name.clone(), variant_name.clone()), payload_ty);
+        }
+    }
+
+    // Pass 0e: compute N and set each enum's top-level body to `{ i32, [N x i8] }`.
+    // N = max ABI store size across all variant payloads (0 for unit-only enums → tag only).
+    let target_data = host_target_data()?;
+    for (enum_name, enum_info) in types.enum_defs() {
+        let max_bytes: u64 = enum_info
+            .variant_order
+            .iter()
+            .filter_map(|vn| variant_payload_types.get(&(enum_name.clone(), vn.clone())))
+            .map(|pt| target_data.get_store_size(pt))
+            .max()
+            .unwrap_or(0);
+        let body: Vec<BasicTypeEnum<'ctx>> = if max_bytes == 0 {
+            vec![ctx.i32_type().into()]
+        } else {
+            vec![
+                ctx.i32_type().into(),
+                ctx.i8_type().array_type(max_bytes as u32).into(),
+            ]
+        };
+        enum_types
+            .get(enum_name.as_str())
+            .expect("ICE: enum type not in map after Pass 0c")
+            .set_body(&body, false);
+    }
+
     // Pass 1: declare all function and method signatures before lowering any body.
     // Required for forward calls and mutual recursion.
+    // struct_types now includes enum types (merged above), so enum-typed params resolve.
     for item in &ast.items {
         match item {
             Item::Function(func) => declare_function_sig(func, ctx, &module, &struct_types)?,
@@ -1272,10 +1334,12 @@ fn lower_to_module<'ctx>(
     // Pass 2: lower function and method bodies (all callees already visible in module).
     for item in &ast.items {
         match item {
-            Item::Function(func) => lower_function(func, types, ctx, &module, &struct_types)?,
+            Item::Function(func) => {
+                lower_function(func, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
+            }
             Item::Impl(block) => {
                 for method in &block.methods {
-                    lower_method(block.type_name, method, types, ctx, &module, &struct_types)?;
+                    lower_method(block.type_name, method, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
                 }
             }
             Item::Struct(_) | Item::Enum(_) => {}
@@ -1350,6 +1414,8 @@ fn lower_function<'ctx, 'b, 'src>(
     ctx: &'ctx Context,
     module: &'b Module<'ctx>,
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    variant_payload_types: &'b HashMap<(String, String), StructType<'ctx>>,
 ) -> Result<(), String> {
     // Retrieve the pre-declared LLVM function from pass 1.
     let fn_val = module
@@ -1361,7 +1427,7 @@ fn lower_function<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types,
+        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -1440,6 +1506,8 @@ fn lower_method<'ctx, 'b, 'src>(
     ctx: &'ctx Context,
     module: &'b Module<'ctx>,
     struct_types: &'b HashMap<String, StructType<'ctx>>,
+    enum_types: &'b HashMap<String, StructType<'ctx>>,
+    variant_payload_types: &'b HashMap<(String, String), StructType<'ctx>>,
 ) -> Result<(), String> {
     let mangled = format!("{type_name}_{}", method.name);
     let fn_val = module
@@ -1451,7 +1519,7 @@ fn lower_method<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types,
+        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -1606,6 +1674,25 @@ fn basic_type_from_ast<'ctx>(
         // SelfTy is only valid as a receiver, never as a value-type param in declare
         other => Err(format!("type not supported in codegen: {other:?}")),
     }
+}
+
+/// Create a TargetData for the host machine using the same x86 init pattern as
+/// `emit_module`. Used in Pass 0e to compute ABI-aware payload sizes for enum layout.
+fn host_target_data() -> Result<TargetData, String> {
+    Target::initialize_x86(&InitializationConfig::default());
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::None,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| "failed to create target machine for TargetData".to_string())
+        .map(|tm| tm.get_target_data())
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
