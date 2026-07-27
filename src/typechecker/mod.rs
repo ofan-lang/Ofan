@@ -9,7 +9,7 @@ pub(crate) mod infer;
 
 use crate::ast::Ast;
 use crate::lexer::token::Span;
-use env::StructInfo;
+use env::{EnumInfo, StructInfo};
 use std::collections::HashMap;
 
 /// Opaque result returned by a successful inference pass.
@@ -26,6 +26,8 @@ pub struct InferResult {
     /// node to codegen without this signal would violate pillar 1.
     pub deferred: Vec<TypeError>,
     pub(crate) struct_defs: HashMap<String, StructInfo>,
+    pub(crate) enum_defs: HashMap<String, EnumInfo>,
+    pub(crate) variant_to_enum: HashMap<String, Vec<String>>,
     #[allow(dead_code)] // reserved for future method/associated-fn lookup in codegen
     pub(crate) impl_sigs: HashMap<String, HashMap<String, (FnSig, Span)>>,
     // PHASE2: pub(crate) region_solution: RegionSolution,
@@ -58,6 +60,14 @@ impl InferResult {
     /// Field names in source declaration order.
     pub fn struct_field_names(&self, type_name: &str) -> Option<&[String]> {
         self.struct_defs.get(type_name).map(|info| info.field_order.as_slice())
+    }
+
+    pub(crate) fn enum_defs(&self) -> &HashMap<String, EnumInfo> {
+        &self.enum_defs
+    }
+
+    pub(crate) fn variant_to_enum(&self) -> &HashMap<String, Vec<String>> {
+        &self.variant_to_enum
     }
 }
 

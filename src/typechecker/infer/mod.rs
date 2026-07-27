@@ -73,6 +73,8 @@ pub(crate) fn run(ast: &Ast<'_>) -> Result<InferResult, Vec<TypeError>> {
             type_map: ctx.type_map,
             deferred,
             struct_defs: ctx.struct_defs,
+            enum_defs: ctx.enum_defs,
+            variant_to_enum: ctx.variant_to_enum,
             impl_sigs: ctx.impl_sigs,
         })
     }
