@@ -3,6 +3,67 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-07-26 — enum codegen: tagged union layout + match lowering (PR #46)
+
+**Branch:** `feat/enum-codegen` (PR #46, open)
+
+**What was done:**
+
+Full enum codegen pipeline: tagged union LLVM layout, enum construction, match lowering, JIT tests.
+
+### Typechecker additions
+
+**`InferResult` now exposes `enum_defs` + `variant_to_enum`** (previously only `struct_defs` was accessible to codegen). Both fields were already collected in `InferCtx`; this just threads them through to `InferResult`.
+
+**Infinite-size type cycle detection** — DFS over the complete struct+enum type graph. Edges = `Ty::Named` direct refs (Box/Ref break cycles). Emits `InfiniteSizeEnumVariant` or `InfiniteSizeStructField` at the first cycle found per root. Closes the pre-existing unprotected struct mutual-recursion gap as part of the same pass. DFS stack is `Vec<String>` (not `Vec<(String, Option<(String, Span)>)>` — the tuple variant was dead weight, removed per rust-idiom-reviewer finding).
+
+### Codegen additions (`src/codegen/llvm.rs`)
+
+**Tagged union LLVM layout**: `{ i32, [N x i64] }` where N = `ceil(max_payload_ABI_bytes / 8)`. Using i64 array (not i8) ensures 8-byte alignment of the payload area after the 4-byte i32 tag (LLVM inserts 4-byte pad). N computed via `host_target_data()` which creates a TargetMachine using the same x86 init as `emit_module` — no hand-rolled size calculator.
+
+**Pass 0c/0d/0e in `lower_to_module`**:
+- 0c: opaque LLVM struct per enum; merged into `struct_types` so `resolve_ty` handles enum-typed fields/params.
+- 0d: opaque payload struct per non-unit variant; bodies populated with field types.
+- 0e: enum struct bodies set to `{ i32, [N x i64] }` using TargetData ABI sizes.
+
+**`variant_payload_types`**: restructured to `HashMap<String, HashMap<String, StructType>>` (nested map by enum name then variant name) to eliminate per-lookup `(String, String)` key clones. Applied per rust-idiom-reviewer finding.
+
+**Enum construction** (`lower_enum_construction`): alloca enum_ty → GEP [0,0] store tag → GEP [0,1] bitreinterpret payload area → store fields. Returns loaded aggregate (consistent with struct construction).
+
+**Four construction hooks** in `lower_expr`: bare unit (`Expr::Ident`), bare tuple (`Expr::Call`), qualified unit (`Expr::Field`), qualified tuple (`Expr::MethodCall`). Each hook fires before the existing env/function lookup path. Subject pointer for `Expr::Ident` falls back to `lower_expr` if name not in env (handles `match Circle(3.14) { ... }` where subject is inline construction).
+
+**`emit_allocas_in_expr`**: extended to recurse into match arms (was previously a no-op skip).
+
+**Match lowering** (`lower_match` → `lower_enum_match` / `lower_switch_match`):
+- Dispatch by subject type: `Ty::Named(e)` → enum switch; scalar → scalar switch.
+- Enum match: LLVM switch built from a `&[(IntValue, BasicBlock)]` slice collected upfront (inkwell `build_switch` takes all cases at once, no `add_case` method).
+- Arm groups by tag, chained with optional guards; guard failure branches to next arm or wildcard default.
+- Or-patterns: multiple tags routed to one shared body block.
+- Payload binding: `match sub_pat { Name(b) => bind, Wildcard => skip, _ => explicit Err(...) }` — nested sub-patterns (literals, constructors, or-patterns inside Constructor) explicitly rejected with a "use a guard instead" message. This was the pillar-1 fix: previously `if let Pattern::Name` silently dropped non-name sub-patterns, causing type-checked programs to return wrong results at runtime.
+- Phi merge in `match_merge` block.
+
+### Design decisions
+
+- **Explicit rejection of nested sub-patterns**: `Circle(0.0)` in a pattern sub-position would have silently matched anything (the `0.0` literal was never compiled into a comparison). Replaced with an explicit codegen error. Future work: emit `SomeNested_sub_pattern` support.
+- **`build_switch` API**: inkwell requires ALL cases as a slice upfront. Restructured to collect cases then call once — removed all `add_case` call sites.
+- **`phi.add_incoming` fix**: `bb` must be passed by value (`*bb`), not by reference.
+
+### Reviews run
+
+- **pillars-reviewer**: caught pillar-1 violation — nested sub-patterns silently produced wrong runtime results. Fixed before merge.
+- **rust-idiom-reviewer**: (1) dead `Option<(String, Span)>` in DFS stack → simplified to `Vec<String>`; (2) `HashMap<(String,String), _>` key → nested `HashMap<String, HashMap<String, _>>` to eliminate clones; (3) `for (k, _)` → `.keys()`; (4) manual div_ceil → `.div_ceil(8)`.
+
+**Test state:** 328 passed, 0 failed (`cargo test --features codegen`). Clippy clean (`-D warnings`). 11 new JIT tests (T_en_cg_01–T_en_cg_11) + 4 cycle-detection typechecker tests.
+
+**What's next:**
+- Merge PR #46 when CI green
+- Nested sub-pattern support in match lowering (literal/constructor/or sub-patterns inside Constructor pattern)
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- `For` loop codegen (currently deferred)
+
+---
+
 ## Last session: 2026-07-26 — match/pattern-matching typechecking (PR #45)
 
 **Branch:** `feat/match-typechecking` (PR #45, open)
