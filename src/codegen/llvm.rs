@@ -641,6 +641,67 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         Ok(())
     }
 
+    // ── Enum helpers ──────────────────────────────────────────────────────────
+
+    fn get_variant_tag(&self, enum_name: &str, variant_name: &str) -> Result<u32, String> {
+        self.types
+            .enum_defs()
+            .get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?
+            .variant_order
+            .iter()
+            .position(|n| n == variant_name)
+            .map(|i| i as u32)
+            .ok_or_else(|| format!("ICE: variant `{variant_name}` not in `{enum_name}`"))
+    }
+
+    /// Lower an enum construction: allocate, write tag + payload, return loaded aggregate.
+    fn lower_enum_construction<'src>(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        payload_exprs: &[Expr<'src>],
+        env: &CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let enum_ty = *self.enum_types.get(enum_name)
+            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_types"))?;
+        let tag = self.get_variant_tag(enum_name, variant_name)?;
+
+        let ptr = self.builder.build_alloca(enum_ty, "enum_tmp")
+            .map_err(|e| e.to_string())?;
+
+        // Write tag at GEP [0, 0].
+        let tag_ptr = self.builder.build_struct_gep(enum_ty, ptr, 0, "tag_ptr")
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_store(tag_ptr, self.ctx.i32_type().const_int(tag as u64, false))
+            .map_err(|e| e.to_string())?;
+
+        // Write payload fields at GEP [0, 1] (the [N x i64] area).
+        if !payload_exprs.is_empty() {
+            let payload_ty = *self.variant_payload_types
+                .get(&(enum_name.to_string(), variant_name.to_string()))
+                .ok_or_else(|| {
+                    format!("ICE: payload for `{enum_name}::{variant_name}` not found")
+                })?;
+            let payload_area = self.builder
+                .build_struct_gep(enum_ty, ptr, 1, "payload_area")
+                .map_err(|e| e.to_string())?;
+            for (i, field_expr) in payload_exprs.iter().enumerate() {
+                let field_val = self.lower_expr(field_expr, env, loop_ctx)?;
+                let field_ptr = self.builder
+                    .build_struct_gep(payload_ty, payload_area, i as u32, "payload_field")
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(field_ptr, field_val)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        self.builder.build_load(enum_ty, ptr, "enum_val")
+            .map_err(|e| e.to_string())
+    }
+
     // ── Expression lowering ───────────────────────────────────────────────────
 
     fn lower_expr<'src>(
@@ -678,7 +739,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, span) => {
+                // Bare unit variant (§20): `North` where `North ∈ Dir`.
+                // env.contains_key check first so local bindings shadow variant names.
+                if !env.contains_key(*name) {
+                    if let Some(Ty::Named(ename)) = self.types.type_of(*span) {
+                        if self.enum_types.contains_key(ename.as_str()) {
+                            return self.lower_enum_construction(ename, name, &[], env, loop_ctx);
+                        }
+                    }
+                }
                 let &(ptr, llvm_ty) = env
                     .get(*name)
                     .ok_or_else(|| format!("undefined variable in codegen: `{name}`"))?;
@@ -897,7 +967,22 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, span } => {
+                // Bare tuple variant construction (§20): `Circle(3.14)`.
+                // Fire before function lookup — callee name is a variant, not a function.
+                if let Expr::Ident(vname, _) = callee.as_ref() {
+                    if !env.contains_key(*vname) {
+                        if let Some(Ty::Named(ename)) = self.types.type_of(*span) {
+                            if self.enum_types.contains_key(ename.as_str())
+                                && self.types.variant_to_enum().contains_key(*vname)
+                            {
+                                return self.lower_enum_construction(
+                                    ename, vname, args, env, loop_ctx,
+                                );
+                            }
+                        }
+                    }
+                }
                 let Expr::Ident(name, _) = callee.as_ref() else {
                     return Err(
                         "only direct function calls supported in PR 32 (no closures or fn pointers)"
@@ -932,6 +1017,19 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::Field { object, field, .. } => {
+                // Qualified unit variant construction (§20): `Dir.North`.
+                // Typechecker records the type_name ident span as Ty::Named(enum_name).
+                if let Expr::Ident(type_name, _) = object.as_ref() {
+                    if !env.contains_key(*type_name) {
+                        if let Some(Ty::Named(ename)) = self.types.type_of(object.span()) {
+                            if self.enum_types.contains_key(ename.as_str()) {
+                                return self.lower_enum_construction(
+                                    ename, field, &[], env, loop_ctx,
+                                );
+                            }
+                        }
+                    }
+                }
                 let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
                 let struct_name = self.struct_name_of(object.span())?;
                 let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
@@ -962,6 +1060,18 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             Expr::MethodCall { object, method, args, .. } => {
+                // Qualified tuple variant construction (§20): `Shape.Circle(3.14)`.
+                // Typechecker skips infer_expr(object) for this form, so object.span()
+                // has no type recorded — check enum_types by name directly.
+                if let Expr::Ident(type_name, _) = object.as_ref() {
+                    if !env.contains_key(*type_name)
+                        && self.enum_types.contains_key(*type_name)
+                    {
+                        return self.lower_enum_construction(
+                            type_name, method, args, env, loop_ctx,
+                        );
+                    }
+                }
                 let struct_name = self.struct_name_of(object.span())?;
                 let mangled = format!("{struct_name}_{method}");
                 let callee = self.module.get_function(&mangled).ok_or_else(|| {
@@ -1302,12 +1412,16 @@ fn lower_to_module<'ctx>(
             .map(|pt| target_data.get_store_size(pt))
             .max()
             .unwrap_or(0);
-        let body: Vec<BasicTypeEnum<'ctx>> = if max_bytes == 0 {
+        // Round up to i64 units so the payload area is 8-byte aligned on x86-64.
+        // All basic types (i32, f64, bool, ptr) need ≤ 8-byte alignment, so
+        // { i32, [N x i64] } ensures payload fields are always correctly aligned.
+        let n_i64 = (max_bytes + 7) / 8;
+        let body: Vec<BasicTypeEnum<'ctx>> = if n_i64 == 0 {
             vec![ctx.i32_type().into()]
         } else {
             vec![
                 ctx.i32_type().into(),
-                ctx.i8_type().array_type(max_bytes as u32).into(),
+                ctx.i64_type().array_type(n_i64 as u32).into(),
             ]
         };
         enum_types
