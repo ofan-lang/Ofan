@@ -63,19 +63,6 @@ cargo clippy -- -D warnings
 cargo run -- <file.ofn>
 ```
 
-## Compiler internals layout
-
-```
-src/
-├── main.rs          — CLI entry point, drives compilation pipeline
-├── lexer/           — tokenizer (Lexer, Token)
-├── parser/          — recursive-descent parser (Parser, ParseError)
-├── ast/             — AST node types (Expr, Stmt, Decl)
-├── typechecker/     — type inference + lifetime inference engine
-└── codegen/         — LLVM codegen via inkwell
-    └── llvm.rs
-```
-
 ## Design decisions
 
 Syntax decisions (token shapes, keywords, operators, literals) belong in
@@ -84,7 +71,9 @@ belong in `docs/PHILOSOPHY.md`. Read both before touching lexer/parser/type-chec
 
 ## Workflow
 
-See `CLAUDE.md` for the agent-assisted workflow (plan mode, pillars-reviewer, etc.).
+Feature development lifecycle → [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
+Agent-specific rules (plan mode, pillars-reviewer) → [CLAUDE.md](CLAUDE.md).
+
 Non-agent contributors: the same conventions apply — plan before large changes, never
 commit failing tests.
 

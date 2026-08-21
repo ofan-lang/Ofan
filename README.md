@@ -50,34 +50,13 @@ integration and CI where the full build chain is not available.
 
 ## Building
 
-**Prerequisites:**
-
-- Rust (stable toolchain)
-- LLVM 18 — must be installed separately; not bundled
-
-**Type-check only (no LLVM needed):**
+Prerequisites: Rust (stable) and LLVM 18. Full setup, Windows workaround, and contribution workflow → [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ```sh
-cargo build
-cargo test
+cargo build                    # type-check only (no LLVM required)
+cargo build --features codegen # full build — produces real binaries
+cargo test --features codegen  # full test suite
 ```
-
-**Full build with codegen** (required to actually compile `.ofn` files to binaries):
-
-```sh
-# Point LLVM_SYS_181_PREFIX at your LLVM 18 install, then:
-cargo build --features codegen
-cargo test --features codegen
-```
-
-> **Windows:** If LLVM is installed at a path containing a space (e.g.
-> `C:\Program Files (x86)\LLVM-18.1.8`), the build script splits on the space and breaks.
-> Install LLVM 18 to a space-free path (e.g. `C:\LLVM18`) and point `LLVM_SYS_181_PREFIX`
-> there. The `.cargo/config.toml.example` file in the repo shows the recommended local
-> config.
-
-Full setup instructions, toolchain notes, and the contribution workflow →
-[CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Design
 
@@ -92,21 +71,9 @@ detectable, documented runtime panic if not.
 | [docs/SYNTAX_SPEC.md](docs/SYNTAX_SPEC.md) | Token shapes, keywords, operators, literal forms |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Compiler phases, cross-cutting patterns, codegen decisions |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | Session log, decision history, what's next |
+| [docs/METHODOLOGY.md](docs/METHODOLOGY.md) | Feature development lifecycle, doc ownership, doc update-trigger rules |
 | [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md) | Branching, commit conventions, direct-push policy |
 
 ## What's not built yet
 
-The compiler handles a real subset of the language today. Missing pieces:
-
-- **Enum declarations** — `Token::Enum` lexed; `Item::Enum` AST node and parser not yet implemented
-- **Structs as field types** — a struct containing another struct hits a codegen gap
-- **Generics in codegen** — generic functions defer through the pipeline; no lowering yet
-- **Standard library / prelude** — no `Option<T>`, I/O, or `println!`
-- **`for` / `match` / `?` / `as`** — parser complete; typechecking deferred
-- **Traits and trait bounds**
-- **Modules and namespaces** (`mod`, `use`)
-- **C interop** — `extern` blocks decided and designed; not implemented
-- **Lifetime annotations** — region inference is phase 2; `'a` syntax is reserved
-
-See [docs/ARCHITECTURE.md § Not yet designed](docs/ARCHITECTURE.md#not-yet-designed) for
-the full canonical list and [docs/PROGRESS.md](docs/PROGRESS.md) for the active roadmap.
+The compiler handles a real subset of the language today. Full list → [docs/ARCHITECTURE.md §"Not yet designed"](docs/ARCHITECTURE.md#not-yet-designed). Active roadmap → [docs/PROGRESS.md](docs/PROGRESS.md).

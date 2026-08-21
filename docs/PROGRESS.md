@@ -3,6 +3,68 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-08-21 — doc ownership, METHODOLOGY.md, GitHub configuration (docs: direct-to-main)
+
+**Branch:** `main` (direct — docs-only, no src/ touched)
+
+**What was done:**
+
+### Audit
+
+Full read-only audit of all docs at root and `docs/`. Key findings:
+- `METHODOLOGY.md` did not exist (referenced in prior planning but never created).
+- 6 overlap/contradiction issues across existing docs (build instructions duplicated in README+CONTRIBUTING, "what's not built yet" list in README+ARCHITECTURE+SYNTAX_SPEC, compiler layout in CONTRIBUTING stale vs. ARCHITECTURE, SYNTAX_SPEC stale note on ARCHITECTURE).
+- Two GitHub config gaps: `allow_rebase_merge: true` (gap per GIT_WORKFLOW), `delete_branch_on_merge: false` (documented policy not enforced).
+- Branch protection: none. Phase 3 trigger met by PR #46 — compiler compiles real programs.
+
+### Files created
+
+**`docs/METHODOLOGY.md`** — new source of truth for:
+- Feature development lifecycle (plan mode, checkpoints, agent reviews, PROGRESS updates)
+- Documentation ownership table (one sentence per doc)
+- Doc update trigger rules (same PR, not follow-up)
+- Direct-to-main vs. branch+PR policy for doc-only changes
+
+DOCS_POLICY.md rejected as a standalone file — rules only make sense in lifecycle context; embedded as sections in METHODOLOGY.md instead.
+
+### Files edited
+
+- **`README.md`**: §Building collapsed to 3-line command block + CONTRIBUTING pointer (Windows workaround and prereq list removed — live in CONTRIBUTING). §"What's not built yet" collapsed to 1-line pointer to `ARCHITECTURE.md §"Not yet designed"` (eliminates drift risk). METHODOLOGY added to doc table.
+- **`CONTRIBUTING.md`**: §"Compiler internals layout" tree removed (stale since PR #21/#23/#29 submodule splits; ARCHITECTURE is authoritative). §Workflow updated to separate METHODOLOGY and CLAUDE.md pointers.
+- **`CLAUDE.md`**: Commits convention line now cross-references `docs/GIT_WORKFLOW.md`.
+- **`docs/SYNTAX_SPEC.md`**: stale "(not yet created)" parenthetical on ARCHITECTURE link removed; now a proper link.
+
+### Reorganization
+
+Root = GitHub community + tool files only (`README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CLAUDE.md`).
+`docs/` = all project documentation (`METHODOLOGY.md`, `GIT_WORKFLOW.md`, `PHILOSOPHY.md`, `SYNTAX_SPEC.md`, `ARCHITECTURE.md`, `PROGRESS.md`).
+
+`METHODOLOGY.md` moved from root → `docs/METHODOLOGY.md`. CONTRIBUTING link updated.
+
+### GitHub configuration (via `gh api`)
+
+| Setting | Before | After |
+|---------|--------|-------|
+| `allow_rebase_merge` | `true` | `false` |
+| `delete_branch_on_merge` | `false` | `true` |
+| Branch protection | None | `Test & Lint` required; `enforce_admins: false` |
+| Topics | ofan, compiler, language | + `systems-language` |
+| Description | "...fast compilation..." | "...compile-time memory safety and a low learning curve." |
+
+Phase 3 branch protection active. `enforce_admins: false` preserves docs:/chore: direct-to-main for repo owner.
+
+**Manual action still needed:** org profile repo pinning at `github.com/ofan-lang` → Edit profile → Pin repos (no `gh` CLI equivalent).
+
+**What's next (carried forward from PR #46):**
+- Merge PR #46 when CI green
+- Nested sub-pattern support in match lowering
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- `For` loop codegen (currently deferred)
+- Manual: pin repos on org profile (web UI)
+
+---
+
 ## Last session: 2026-07-26 — enum codegen: tagged union layout + match lowering (PR #46)
 
 **Branch:** `feat/enum-codegen` (PR #46, open)

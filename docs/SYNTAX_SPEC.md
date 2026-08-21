@@ -3,7 +3,7 @@
 > **What this file is:** The canonical home for Ofan's concrete syntax — keyword shapes,
 > operator forms, literal rules, and token-level decisions. For the *why* behind the
 > pillars that motivate these decisions, see [`docs/PHILOSOPHY.md`](PHILOSOPHY.md). For
-> compiler implementation details, see `docs/ARCHITECTURE.md` (not yet created).
+> compiler implementation details, see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 > **Status legend:**
 > - **Decided** — locked, unless a future design session explicitly reopens it with a

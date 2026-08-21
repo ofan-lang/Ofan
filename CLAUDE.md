@@ -30,6 +30,7 @@ even if nobody asked.
 - All other language design decisions (semantics, type system, memory model) belong in
   `/docs/PHILOSOPHY.md` with their reasoning.
 - Commits: imperative mood, explain the *why* of the change, not just the what.
+  Full format and types → [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md)
 - Never mark a task complete without showing evidence (real test output).
 
 ## Expected workflow
