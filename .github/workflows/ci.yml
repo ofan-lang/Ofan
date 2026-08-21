@@ -50,3 +50,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --features codegen -- -D warnings
 
+      - name: Format check
+        run: cargo fmt --check
+
