@@ -3,6 +3,65 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-09-09 — Windows linker support (PR fix/windows-linker)
+
+**Branch:** `fix/windows-linker` (PR open, awaiting review)
+
+**What was done:**
+
+Three real gaps exposed by a collaborator's first Windows build were fixed together.
+
+### `src/codegen/mod.rs`
+- Added `pub(crate) const ENTRY_FN: &str = "main"` (gated under `codegen` feature).
+  Ties the linker `/ENTRY:` flag and the IR symbol to one constant; prevents silent drift.
+
+### `src/codegen/llvm.rs`
+- Replaced the `Vec<PathBuf>` linker candidate list with a typed `LinkerKind` enum
+  (`Msvc` variant `#[cfg(windows)]`, `Unix(PathBuf)` on all platforms).
+- `link_object()` now dispatches on kind: MSVC path calls
+  `cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe")` which
+  locates `link.exe` via the Windows registry (no `vcvars64.bat` required) and spawns
+  it with `/NOLOGO /SUBSYSTEM:CONSOLE /ENTRY:main /OUT:<path> <obj>`.
+  Unix path unchanged (`-o` syntax, `cc`/`clang` candidates).
+- Windows candidate priority: `link.exe` first, `clang.exe` (from LLVM prefix) as
+  fallback — matches the vovkos/llvm-package-windows install which ships no `clang.exe`.
+- Error messages updated: all Windows no-linker errors now cite VS Build Tools +
+  "Desktop development with C++" workload + CONTRIBUTING.md (pillar 5).
+- Added entry-function validation in `lower_to_module` after Pass 2: if no
+  `fn main` exists in the IR, returns a typed error before the linker sees it.
+- `ctx.create_module("main")` → `ctx.create_module(super::ENTRY_FN)` for consistency.
+
+### `Cargo.toml`
+- Added `cc = { version = "1", optional = true }` gated under `codegen` feature.
+  `cc` already transitive as a build-dep via `llvm-sys`; adding as a runtime dep for
+  `cc::windows_registry` does not conflict.
+
+### `CONTRIBUTING.md`
+- Replaced incorrect llvm.org Windows recommendation with vovkos/llvm-package-windows,
+  specifying the `release/msvcrt` variant explicitly.
+- Added explicit Windows prerequisite: VS Build Tools + "Desktop development with C++"
+  workload. Documented that `cc::windows_registry` handles discovery automatically —
+  `vcvars64.bat` not needed.
+
+### `tests/cli_diagnostics.rs`
+- Added TODO comment for `daily_total.ofn` integration test (collaborator to share
+  source; wired up in a follow-up PR).
+
+**Agent reviews:** pillars-reviewer — no violations. rust-idiom-reviewer — no blockers;
+two notes: (1) bare-string errors in codegen (pre-existing acknowledged debt, see
+`CodegenError` TODO in llvm.rs:30); (2) MSVC triple `"x86_64-pc-windows-msvc"` duplicates
+the x86-only assumption in `emit_module` — to be unified when multi-target lands.
+
+**What's next:**
+- Collaborator shares `daily_total.ofn` → wire up as integration test (follow-up PR)
+- `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- Nested sub-pattern support in match lowering
+- `For` loop codegen (currently deferred)
+- Manual: pin repos on org profile (web UI)
+
+---
+
 ## Last session: 2026-08-21 — doc ownership, METHODOLOGY.md, GitHub configuration (docs: direct-to-main)
 
 **Branch:** `main` (direct — docs-only, no src/ touched)

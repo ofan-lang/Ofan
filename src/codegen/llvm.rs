@@ -71,30 +71,91 @@ fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
+enum LinkerKind {
+    /// Windows MSVC link.exe, located via the Windows registry.
+    /// The registry lookup provides the correct PATH/LIB/INCLUDE environment
+    /// without requiring the developer to run vcvars64.bat manually.
+    #[cfg(windows)]
+    Msvc,
+    /// Unix-style linker (cc, clang, or a prefix-qualified clang.exe on Windows).
+    /// Invoked with `-o <out> <obj>` flag syntax.
+    Unix(std::path::PathBuf),
+}
+
 fn link_object(obj: &Path, out: &Path) -> Result<(), String> {
     let mut last_error: Option<String> = None;
-    for linker in linker_candidates() {
-        match std::process::Command::new(&linker).arg(obj).arg("-o").arg(out).status() {
-            Ok(s) if s.success() => return Ok(()),
-            Ok(s) => last_error = Some(format!("{} exited with {s}", linker.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => last_error = Some(format!("failed to spawn {}: {e}", linker.display())),
+    for candidate in linker_candidates() {
+        match candidate {
+            LinkerKind::Unix(ref path) => {
+                match std::process::Command::new(path).arg(obj).arg("-o").arg(out).status() {
+                    Ok(s) if s.success() => return Ok(()),
+                    Ok(s) => last_error = Some(format!("{} exited with {s}", path.display())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => last_error = Some(format!("failed to spawn {}: {e}", path.display())),
+                }
+            }
+            #[cfg(windows)]
+            LinkerKind::Msvc => {
+                let Some(tool) =
+                    cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe")
+                else {
+                    last_error = Some(
+                        "link.exe not found; install Visual Studio Build Tools with the \
+                         \"Desktop development with C++\" workload and restart your terminal; \
+                         see CONTRIBUTING.md for full Windows setup instructions"
+                            .to_string(),
+                    );
+                    continue;
+                };
+                match tool
+                    .to_command()
+                    .arg("/NOLOGO")
+                    .arg("/SUBSYSTEM:CONSOLE")
+                    .arg(format!("/ENTRY:{}", super::ENTRY_FN))
+                    .arg(format!("/OUT:{}", out.display()))
+                    .arg(obj)
+                    .status()
+                {
+                    Ok(s) if s.success() => return Ok(()),
+                    Ok(s) => last_error = Some(format!("link.exe exited with {s}")),
+                    Err(e) => last_error = Some(format!("failed to spawn link.exe: {e}")),
+                }
+            }
         }
     }
     Err(last_error.unwrap_or_else(|| {
-        "no system linker found; install cc or clang and ensure it is in PATH".to_string()
+        #[cfg(windows)]
+        {
+            "no system linker found; install Visual Studio Build Tools with the \
+             \"Desktop development with C++\" workload; \
+             see CONTRIBUTING.md for full Windows setup instructions"
+                .to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "no system linker found; install cc or clang and ensure it is in PATH".to_string()
+        }
     }))
 }
 
-fn linker_candidates() -> Vec<std::path::PathBuf> {
-    let mut v: Vec<std::path::PathBuf> = vec!["cc".into(), "clang".into()];
-    // Windows: also probe $LLVM_SYS_181_PREFIX\bin\clang.exe (set at build time).
-    if cfg!(windows) {
+fn linker_candidates() -> Vec<LinkerKind> {
+    #[cfg(windows)]
+    {
+        let mut v = vec![LinkerKind::Msvc];
+        // Fallback: clang.exe from the LLVM package that ships inkwell's static libs.
+        // vovkos/llvm-package-windows does not include clang.exe, so this fires only
+        // for developers on an alternative LLVM distribution that does.
         if let Ok(prefix) = std::env::var("LLVM_SYS_181_PREFIX") {
-            v.push(std::path::PathBuf::from(prefix).join("bin").join("clang.exe"));
+            v.push(LinkerKind::Unix(
+                std::path::PathBuf::from(prefix).join("bin").join("clang.exe"),
+            ));
         }
+        v
     }
-    v
+    #[cfg(not(windows))]
+    {
+        vec![LinkerKind::Unix("cc".into()), LinkerKind::Unix("clang".into())]
+    }
 }
 
 // ─── AST → LLVM IR lowering ───────────────────────────────────────────────────
@@ -1793,7 +1854,7 @@ fn lower_to_module<'ctx>(
     ast: &Ast<'_>,
     types: &InferResult,
 ) -> Result<Module<'ctx>, String> {
-    let module = ctx.create_module("main");
+    let module = ctx.create_module(super::ENTRY_FN);
 
     // Pass 0: register LLVM named struct types.
     // Sub-pass 0a: create opaque types so forward references resolve.
@@ -1916,6 +1977,16 @@ fn lower_to_module<'ctx>(
             }
             Item::Struct(_) | Item::Enum(_) => {}
         }
+    }
+
+    // Validate that the program defines the entry function expected by the linker.
+    // This ties ENTRY_FN (used in /ENTRY: on Windows) to the IR symbol actually emitted.
+    if module.get_function(super::ENTRY_FN).is_none() {
+        return Err(format!(
+            "no `fn {}` found; Ofan programs must define an entry function named `{}`",
+            super::ENTRY_FN,
+            super::ENTRY_FN,
+        ));
     }
 
     Ok(module)
