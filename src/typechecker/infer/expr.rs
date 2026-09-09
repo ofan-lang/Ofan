@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
 use crate::ast::{Expr, Literal, MatchArm, Pattern, StructFieldInit};
 use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{Region, Ty};
+use std::collections::{HashMap, HashSet};
 
 // ─── Expression inference ─────────────────────────────────────────────────────
 
@@ -19,7 +19,10 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         Expr::Literal(lit, span) => {
             if let Literal::Integer(n) = lit {
                 if *n > i32::MAX as i64 {
-                    ctx.error(TypeError::IntegerOutOfRange { value: *n, span: *span });
+                    ctx.error(TypeError::IntegerOutOfRange {
+                        value: *n,
+                        span: *span,
+                    });
                     return Ty::Error;
                 }
             }
@@ -50,7 +53,9 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
                 let (is_generic, variant_is_unit) = {
                     let info = ctx.enum_defs.get(&enum_name);
                     let gen = info.map(|i| i.is_generic).unwrap_or(false);
-                    let unit = info.and_then(|i| i.variants.get(*name)).map(|f| f.is_empty());
+                    let unit = info
+                        .and_then(|i| i.variants.get(*name))
+                        .map(|f| f.is_empty());
                     (gen, unit)
                 };
                 if is_generic {
@@ -85,9 +90,12 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         Expr::Unary { op, expr, span } => super::ops::infer_unary(*op, expr, *span, ctx, env),
 
         // ── Binary ───────────────────────────────────────────────────────────
-        Expr::Binary { op, left, right, span } => {
-            super::ops::infer_binary(*op, left, right, *span, ctx, env)
-        }
+        Expr::Binary {
+            op,
+            left,
+            right,
+            span,
+        } => super::ops::infer_binary(*op, left, right, *span, ctx, env),
 
         // ── Function call ─────────────────────────────────────────────────────
         Expr::Call { callee, args, span } => infer_call(callee, args, *span, ctx, env),
@@ -102,10 +110,18 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         }
 
         // ── If expression ─────────────────────────────────────────────────────
-        Expr::If { condition, then_block, else_branch, span } => {
+        Expr::If {
+            condition,
+            then_block,
+            else_branch,
+            span,
+        } => {
             let cond_ty = infer_expr(condition, ctx, env);
             if !matches!(cond_ty, Ty::Bool | Ty::Error) {
-                ctx.error(TypeError::NonBoolCondition { found: cond_ty, span: *span });
+                ctx.error(TypeError::NonBoolCondition {
+                    found: cond_ty,
+                    span: *span,
+                });
             }
             let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
             let then_ty = super::infer_block(then_block, &ret, ctx, env);
@@ -129,10 +145,17 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         }
 
         // ── While loop ────────────────────────────────────────────────────────
-        Expr::While { condition, body, span } => {
+        Expr::While {
+            condition,
+            body,
+            span,
+        } => {
             let cond_ty = infer_expr(condition, ctx, env);
             if !matches!(cond_ty, Ty::Bool | Ty::Error) {
-                ctx.error(TypeError::NonBoolCondition { found: cond_ty, span: *span });
+                ctx.error(TypeError::NonBoolCondition {
+                    found: cond_ty,
+                    span: *span,
+                });
             }
             let ret = ctx.current_return_ty.last().cloned().unwrap_or(Ty::Unit);
             super::infer_block(body, &ret, ctx, env);
@@ -148,14 +171,20 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         }
 
         // ── Deferred expressions ──────────────────────────────────────────────
+        Expr::MethodCall {
+            object,
+            method,
+            method_span,
+            args,
+            span,
+        } => infer_method_call(object, method, *method_span, args, *span, ctx, env),
 
-        Expr::MethodCall { object, method, method_span, args, span } => {
-            infer_method_call(object, method, *method_span, args, *span, ctx, env)
-        }
-
-        Expr::Field { object, field, field_span, span } => {
-            infer_field_access(object, field, *field_span, *span, ctx, env)
-        }
+        Expr::Field {
+            object,
+            field,
+            field_span,
+            span,
+        } => infer_field_access(object, field, *field_span, *span, ctx, env),
 
         // PHASE2: cast rules not yet spec'd
         Expr::Cast { span, .. } => super::defer(ctx, "cast (as) — rules not yet spec'd", *span),
@@ -168,11 +197,18 @@ fn infer_expr_inner(expr: &Expr<'_>, ctx: &mut InferCtx, env: &mut Env) -> Ty {
         // PHASE2: requires iterator trait
         Expr::For { span, .. } => super::defer(ctx, "for loops — requires iterator trait", *span),
 
-        Expr::Match { subject, arms, span } => infer_match(subject, arms, *span, ctx, env),
+        Expr::Match {
+            subject,
+            arms,
+            span,
+        } => infer_match(subject, arms, *span, ctx, env),
 
-        Expr::StructLit { name, name_span, fields, span } => {
-            infer_struct_lit(name, *name_span, fields, *span, ctx, env)
-        }
+        Expr::StructLit {
+            name,
+            name_span,
+            fields,
+            span,
+        } => infer_struct_lit(name, *name_span, fields, *span, ctx, env),
     }
 }
 
@@ -298,7 +334,8 @@ fn infer_method_call(
         Some((s, _)) => s.clone(),
         None => {
             infer_all(args, ctx, env);
-            let available: Vec<String> = ctx.impl_sigs
+            let available: Vec<String> = ctx
+                .impl_sigs
                 .get(&type_name)
                 .map(|ns| {
                     let mut names: Vec<String> = ns.keys().cloned().collect();
@@ -337,7 +374,11 @@ fn infer_method_call(
 
     if sig.is_generic {
         infer_all(args, ctx, env);
-        return super::defer(ctx, "generic method call instantiation — unification not yet implemented", span);
+        return super::defer(
+            ctx,
+            "generic method call instantiation — unification not yet implemented",
+            span,
+        );
     }
 
     // sig.params does NOT include self (stripped in collect_impl_sigs).
@@ -360,8 +401,7 @@ fn infer_method_call(
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
         // Skip FieldOwnNonCopy when expected type is a ref — type-mismatch fires instead.
-        if !matches!(expected_ty, Ty::Ref { .. })
-            && super::check_tail_field_own_non_copy(arg, ctx)
+        if !matches!(expected_ty, Ty::Ref { .. }) && super::check_tail_field_own_non_copy(arg, ctx)
         {
             any_error = true;
             continue;
@@ -380,11 +420,17 @@ fn infer_method_call(
         }
     }
 
-    if any_error { Ty::Error } else { sig.return_ty.clone() }
+    if any_error {
+        Ty::Error
+    } else {
+        sig.return_ty.clone()
+    }
 }
 
 fn infer_all(args: &[Expr<'_>], ctx: &mut InferCtx, env: &mut Env) {
-    for arg in args { infer_expr(arg, ctx, env); }
+    for arg in args {
+        infer_expr(arg, ctx, env);
+    }
 }
 
 // ─── Field access typing ──────────────────────────────────────────────────────
@@ -444,7 +490,9 @@ fn infer_field_access(
     }
 
     let obj_ty = infer_expr(object, ctx, env);
-    if matches!(obj_ty, Ty::Error) { return Ty::Error; }
+    if matches!(obj_ty, Ty::Error) {
+        return Ty::Error;
+    }
 
     // Auto-deref one Ref layer to find the underlying struct type.
     let effective_ty = match &obj_ty {
@@ -463,7 +511,11 @@ fn infer_field_access(
     };
 
     if info.is_generic {
-        return super::defer(ctx, "field access on generic struct — requires type instantiation", span);
+        return super::defer(
+            ctx,
+            "field access on generic struct — requires type instantiation",
+            span,
+        );
     }
 
     match info.fields.get(field) {
@@ -471,7 +523,10 @@ fn infer_field_access(
         None => {
             let available = info.field_order.clone();
             ctx.error(TypeError::FieldNotFound {
-                type_name, field_name: field.to_string(), span: field_span, available,
+                type_name,
+                field_name: field.to_string(),
+                span: field_span,
+                available,
             });
             Ty::Error
         }
@@ -484,7 +539,11 @@ fn dispatch_type_name(ty: &Ty) -> Option<&str> {
     match ty {
         Ty::Named(n) => Some(n.as_str()),
         Ty::Ref { inner, .. } => {
-            if let Ty::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
+            if let Ty::Named(n) = inner.as_ref() {
+                Some(n.as_str())
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -508,7 +567,11 @@ fn infer_call(
             for arg in args {
                 infer_expr(arg, ctx, env);
             }
-            return super::defer(ctx, "non-identifier callees (function pointers, closures)", span);
+            return super::defer(
+                ctx,
+                "non-identifier callees (function pointers, closures)",
+                span,
+            );
         }
     };
 
@@ -518,7 +581,11 @@ fn infer_call(
         for arg in args {
             infer_expr(arg, ctx, env);
         }
-        return super::defer(ctx, "calling local variables as functions (closures/fn pointers)", span);
+        return super::defer(
+            ctx,
+            "calling local variables as functions (closures/fn pointers)",
+            span,
+        );
     }
 
     // Bare tuple variant constructor: `Circle(3.14)` where Circle ∈ variant_to_enum (§20).
@@ -536,12 +603,19 @@ fn infer_call(
         let (enum_is_generic, field_tys) = {
             let info = ctx.enum_defs.get(&enum_name);
             let gen = info.map(|i| i.is_generic).unwrap_or(false);
-            let tys = info.and_then(|i| i.variants.get(name)).cloned().unwrap_or_default();
+            let tys = info
+                .and_then(|i| i.variants.get(name))
+                .cloned()
+                .unwrap_or_default();
             (gen, tys)
         };
         if enum_is_generic {
             infer_all(args, ctx, env);
-            return super::defer(ctx, "bare variant on generic enum — requires type instantiation", span);
+            return super::defer(
+                ctx,
+                "bare variant on generic enum — requires type instantiation",
+                span,
+            );
         }
         if field_tys.is_empty() {
             infer_all(args, ctx, env);
@@ -628,8 +702,7 @@ fn infer_call(
     for (i, (arg, expected_ty)) in args.iter().zip(&sig.params).enumerate() {
         let arg_ty = infer_expr(arg, ctx, env);
         // Skip FieldOwnNonCopy when expected type is a ref — type-mismatch fires instead.
-        if !matches!(expected_ty, Ty::Ref { .. })
-            && super::check_tail_field_own_non_copy(arg, ctx)
+        if !matches!(expected_ty, Ty::Ref { .. }) && super::check_tail_field_own_non_copy(arg, ctx)
         {
             any_error = true;
             continue;
@@ -648,7 +721,11 @@ fn infer_call(
         }
     }
 
-    if any_error { Ty::Error } else { sig.return_ty.clone() }
+    if any_error {
+        Ty::Error
+    } else {
+        sig.return_ty.clone()
+    }
 }
 
 // ─── Struct literal inference ─────────────────────────────────────────────────
@@ -664,7 +741,10 @@ fn infer_struct_lit(
     // Extract what we need from the borrow before any &mut ctx calls.
     let (field_order, field_types, is_generic) = match ctx.struct_defs.get(name) {
         None => {
-            ctx.error(TypeError::UndefinedStruct { name: name.to_string(), span: name_span });
+            ctx.error(TypeError::UndefinedStruct {
+                name: name.to_string(),
+                span: name_span,
+            });
             return Ty::Error;
         }
         Some(info) => {
@@ -675,7 +755,11 @@ fn infer_struct_lit(
                     span,
                 );
             }
-            (info.field_order.clone(), info.fields.clone(), info.is_generic)
+            (
+                info.field_order.clone(),
+                info.fields.clone(),
+                info.is_generic,
+            )
         }
     };
     let _ = is_generic; // extracted for symmetry; used as early-return guard above
@@ -721,7 +805,8 @@ fn infer_struct_lit(
         }
     }
 
-    let missing: Vec<String> = field_order.iter()
+    let missing: Vec<String> = field_order
+        .iter()
         .filter(|f| !seen.contains_key(f.as_str()))
         .cloned()
         .collect();
@@ -759,7 +844,10 @@ fn infer_match(
     for arm in arms {
         // Unreachable arm detection — flag but keep inferring for error recovery.
         if let Some(cs) = catchall_span {
-            ctx.error(TypeError::UnreachableArm { span: arm.span, catch_all_span: cs });
+            ctx.error(TypeError::UnreachableArm {
+                span: arm.span,
+                catch_all_span: cs,
+            });
         }
 
         env.push_scope();
@@ -776,21 +864,16 @@ fn infer_match(
             (&mut covered, &mut true_covered, &mut false_covered)
         };
 
-        let mut arm_is_catchall = check_pattern(
-            &arm.pattern,
-            &subject_ty,
-            ctx,
-            env,
-            cov,
-            tc,
-            fc,
-        );
+        let mut arm_is_catchall = check_pattern(&arm.pattern, &subject_ty, ctx, env, cov, tc, fc);
 
         // Guard: must produce bool; a guarded arm never counts as a catch-all.
         if let Some(guard) = &arm.guard {
             let guard_ty = infer_expr(guard, ctx, env);
             if !matches!(guard_ty, Ty::Bool | Ty::Error) {
-                ctx.error(TypeError::NonBoolCondition { found: guard_ty, span: guard.span() });
+                ctx.error(TypeError::NonBoolCondition {
+                    found: guard_ty,
+                    span: guard.span(),
+                });
             }
             arm_is_catchall = false;
         }
@@ -821,7 +904,15 @@ fn infer_match(
         }
     }
 
-    exhaustiveness_check(&subject_ty, span, catchall_span.is_some(), &covered, true_covered, false_covered, ctx);
+    exhaustiveness_check(
+        &subject_ty,
+        span,
+        catchall_span.is_some(),
+        &covered,
+        true_covered,
+        false_covered,
+        ctx,
+    );
 
     first_arm_ty.unwrap_or(Ty::Error)
 }
@@ -879,7 +970,12 @@ fn check_pattern(
             }
         }
 
-        Pattern::Constructor { name, name_span, sub_patterns, span } => {
+        Pattern::Constructor {
+            name,
+            name_span,
+            sub_patterns,
+            span,
+        } => {
             match subject_ty {
                 Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
                     // Read what we need from the immutable borrow before any &mut ctx calls.
@@ -923,8 +1019,9 @@ fn check_pattern(
                                 let mut _sc = HashSet::new();
                                 let mut _st = false;
                                 let mut _sf = false;
-                                check_pattern(sub, payload_ty, ctx, env,
-                                              &mut _sc, &mut _st, &mut _sf);
+                                check_pattern(
+                                    sub, payload_ty, ctx, env, &mut _sc, &mut _st, &mut _sf,
+                                );
                             }
                             covered.insert((*name).to_string());
                         }
@@ -955,7 +1052,11 @@ fn check_pattern(
             }
             // Track bool literal coverage for exhaustiveness.
             if let Literal::Bool(b) = lit {
-                if *b { *true_covered = true; } else { *false_covered = true; }
+                if *b {
+                    *true_covered = true;
+                } else {
+                    *false_covered = true;
+                }
             }
             false // literal pattern is never a catch-all
         }
@@ -963,7 +1064,15 @@ fn check_pattern(
         Pattern::Or(pats, _span) => {
             let mut any_catchall = false;
             for p in pats {
-                if check_pattern(p, subject_ty, ctx, env, covered, true_covered, false_covered) {
+                if check_pattern(
+                    p,
+                    subject_ty,
+                    ctx,
+                    env,
+                    covered,
+                    true_covered,
+                    false_covered,
+                ) {
                     any_catchall = true;
                 }
             }
@@ -993,15 +1102,25 @@ fn exhaustiveness_check(
                 .cloned()
                 .collect();
             if !missing.is_empty() {
-                ctx.error(TypeError::NonExhaustiveMatch { missing, span: match_span });
+                ctx.error(TypeError::NonExhaustiveMatch {
+                    missing,
+                    span: match_span,
+                });
             }
         }
         Ty::Bool => {
             let mut missing = Vec::new();
-            if !true_covered  { missing.push("true".to_string()); }
-            if !false_covered { missing.push("false".to_string()); }
+            if !true_covered {
+                missing.push("true".to_string());
+            }
+            if !false_covered {
+                missing.push("false".to_string());
+            }
             if !missing.is_empty() {
-                ctx.error(TypeError::NonExhaustiveMatch { missing, span: match_span });
+                ctx.error(TypeError::NonExhaustiveMatch {
+                    missing,
+                    span: match_span,
+                });
             }
         }
         Ty::Error => {}

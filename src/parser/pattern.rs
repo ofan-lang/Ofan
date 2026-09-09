@@ -18,7 +18,11 @@ impl<'src> Parser<'src> {
         }
 
         let end = self.eat(&Token::RBrace)?.end;
-        Ok(Expr::Match { subject, arms, span: Span { start, end } })
+        Ok(Expr::Match {
+            subject,
+            arms,
+            span: Span { start, end },
+        })
     }
 
     fn parse_match_arm(&mut self) -> Result<MatchArm<'src>, ParseError> {
@@ -37,9 +41,11 @@ impl<'src> Parser<'src> {
         if matches!(self.peek(), Token::Dot) {
             return Err(self.error_expected(
                 "=> or if",
-                Some("qualified patterns (EnumName.Variant) are not supported in match arms \
+                Some(
+                    "qualified patterns (EnumName.Variant) are not supported in match arms \
                       — use the bare variant name (Variant) directly; the subject type \
-                      determines which enum is searched"),
+                      determines which enum is searched",
+                ),
             ));
         }
 
@@ -64,7 +70,12 @@ impl<'src> Parser<'src> {
             self.eat(&Token::Comma)?;
         }
 
-        Ok(MatchArm { pattern, guard, body, span: Span { start, end } })
+        Ok(MatchArm {
+            pattern,
+            guard,
+            body,
+            span: Span { start, end },
+        })
     }
 
     /// Parse an or-pattern: `A | B | C`
@@ -177,7 +188,9 @@ mod tests {
         let expr = parse_expr("match opt { Some(x) => x, None => 0, }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert_eq!(arms.len(), 2);
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
@@ -185,7 +198,9 @@ mod tests {
         let expr = parse_expr("match n { 0 => zero(), _ => other(), }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert!(matches!(arms[1].pattern, Pattern::Wildcard(_)));
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
@@ -195,7 +210,9 @@ mod tests {
         if let Expr::Match { arms, .. } = expr {
             assert!(arms[0].guard.is_some());
             assert!(arms[1].guard.is_none());
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
@@ -203,15 +220,20 @@ mod tests {
         let expr = parse_expr("match d { North | South => v(), East | West => h(), }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert!(matches!(arms[0].pattern, Pattern::Or(_, _)));
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
     fn parse_match_nested_pattern() {
-        let expr = parse_expr("match opt { Some(Some(x)) => x, Some(None) => 0, None => 1, }").unwrap();
+        let expr =
+            parse_expr("match opt { Some(Some(x)) => x, Some(None) => 0, None => 1, }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert_eq!(arms.len(), 3);
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
@@ -219,7 +241,9 @@ mod tests {
         let expr = parse_expr("match x { 1 => { let y = 2; y }, _ => 0, }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert!(matches!(arms[0].body, Expr::Block(_)));
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 
     #[test]
@@ -228,6 +252,8 @@ mod tests {
         let expr = parse_expr("match x { 1 => 1, _ => 0 }").unwrap();
         if let Expr::Match { arms, .. } = expr {
             assert_eq!(arms.len(), 2);
-        } else { panic!("expected Match"); }
+        } else {
+            panic!("expected Match");
+        }
     }
 }

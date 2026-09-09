@@ -34,8 +34,16 @@ pub(super) fn infer_self_access_mode(
     let inner = Ty::Named(type_name.to_string());
     match (scan.consuming.is_some(), scan.mutating.is_some()) {
         (true, _) => inner,
-        (false, true) => Ty::Ref { mutable: true, region: None, inner: Box::new(inner) },
-        (false, false) => Ty::Ref { mutable: false, region: None, inner: Box::new(inner) },
+        (false, true) => Ty::Ref {
+            mutable: true,
+            region: None,
+            inner: Box::new(inner),
+        },
+        (false, false) => Ty::Ref {
+            mutable: false,
+            region: None,
+            inner: Box::new(inner),
+        },
     }
 }
 
@@ -48,7 +56,11 @@ struct SelfUsageScan {
 /// Pure AST scan — no type information used. Walks the full block recursively,
 /// classifying each occurrence of `self` by its syntactic usage context.
 fn scan_self_usage(block: &Block<'_>) -> SelfUsageScan {
-    let mut scan = SelfUsageScan { consuming: None, mutating: None, non_consuming: None };
+    let mut scan = SelfUsageScan {
+        consuming: None,
+        mutating: None,
+        non_consuming: None,
+    };
     scan_block(block, &mut scan);
     scan
 }
@@ -84,7 +96,9 @@ fn scan_stmt(stmt: &Stmt<'_>, scan: &mut SelfUsageScan) {
                 scan_expr(v, scan);
             }
         }
-        Stmt::Return { value: None, .. } | Stmt::Continue { .. } | Stmt::Break { value: None, .. } => {}
+        Stmt::Return { value: None, .. }
+        | Stmt::Continue { .. }
+        | Stmt::Break { value: None, .. } => {}
         Stmt::Break { value: Some(v), .. } => scan_expr(v, scan),
         Stmt::Assign { target, value, .. } => {
             // `self.field = x` → mutating; `self = x` → non-self (lvalue assignment, unusual)
@@ -112,7 +126,11 @@ fn scan_expr(expr: &Expr<'_>, scan: &mut SelfUsageScan) {
         Expr::Ident("self", span) => set_non_consuming(*span, scan),
         Expr::Ident(_, _) | Expr::Literal(_, _) => {}
 
-        Expr::Unary { op: UnaryOp::BorrowMut, expr: inner, .. } => {
+        Expr::Unary {
+            op: UnaryOp::BorrowMut,
+            expr: inner,
+            ..
+        } => {
             // `&mut self` is a mutating use.
             if is_self_ident(inner) {
                 set_mutating(inner.span(), scan);
@@ -163,12 +181,21 @@ fn scan_expr(expr: &Expr<'_>, scan: &mut SelfUsageScan) {
 
         Expr::Block(b) => scan_block(b, scan),
 
-        Expr::If { condition, then_block, else_branch, .. } => {
+        Expr::If {
+            condition,
+            then_block,
+            else_branch,
+            ..
+        } => {
             scan_expr(condition, scan);
             scan_block(then_block, scan);
-            if let Some(e) = else_branch { scan_expr(e, scan); }
+            if let Some(e) = else_branch {
+                scan_expr(e, scan);
+            }
         }
-        Expr::While { condition, body, .. } => {
+        Expr::While {
+            condition, body, ..
+        } => {
             scan_expr(condition, scan);
             scan_block(body, scan);
         }
@@ -181,11 +208,15 @@ fn scan_expr(expr: &Expr<'_>, scan: &mut SelfUsageScan) {
             scan_expr(subject, scan);
             for arm in arms {
                 scan_expr(&arm.body, scan);
-                if let Some(g) = &arm.guard { scan_expr(g, scan); }
+                if let Some(g) = &arm.guard {
+                    scan_expr(g, scan);
+                }
             }
         }
         Expr::StructLit { fields, .. } => {
-            for f in fields { scan_expr(&f.value, scan); }
+            for f in fields {
+                scan_expr(&f.value, scan);
+            }
         }
     }
 }
@@ -195,11 +226,17 @@ fn is_self_ident(expr: &Expr<'_>) -> bool {
 }
 
 fn set_consuming(span: Span, scan: &mut SelfUsageScan) {
-    if scan.consuming.is_none() { scan.consuming = Some(span); }
+    if scan.consuming.is_none() {
+        scan.consuming = Some(span);
+    }
 }
 fn set_mutating(span: Span, scan: &mut SelfUsageScan) {
-    if scan.mutating.is_none() { scan.mutating = Some(span); }
+    if scan.mutating.is_none() {
+        scan.mutating = Some(span);
+    }
 }
 fn set_non_consuming(span: Span, scan: &mut SelfUsageScan) {
-    if scan.non_consuming.is_none() { scan.non_consuming = Some(span); }
+    if scan.non_consuming.is_none() {
+        scan.non_consuming = Some(span);
+    }
 }

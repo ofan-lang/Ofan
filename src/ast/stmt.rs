@@ -1,5 +1,5 @@
-use crate::lexer::Span;
 use super::{BinOp, Expr, Type};
+use crate::lexer::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt<'src> {
@@ -21,9 +21,15 @@ pub enum Stmt<'src> {
         span: Span,
     },
     /// `return [expr];`
-    Return { value: Option<Box<Expr<'src>>>, span: Span },
+    Return {
+        value: Option<Box<Expr<'src>>>,
+        span: Span,
+    },
     /// `break [expr];` — `expr` only valid inside `loop`
-    Break { value: Option<Box<Expr<'src>>>, span: Span },
+    Break {
+        value: Option<Box<Expr<'src>>>,
+        span: Span,
+    },
     /// `continue;`
     Continue { span: Span },
     /// `lvalue [op]= rhs;`  —  `op` is None for plain `=`, Some for compound
@@ -39,5 +45,9 @@ pub enum Stmt<'src> {
     ///   block's return value. Invariant: this variant only appears in `Block::stmts`
     ///   when `has_semicolon` is `true`; a semicolon-less expr is extracted into
     ///   `Block::tail` by `parse_block` and never left in the `stmts` vec.
-    Expr { expr: Box<Expr<'src>>, has_semicolon: bool, span: Span },
+    Expr {
+        expr: Box<Expr<'src>>,
+        has_semicolon: bool,
+        span: Span,
+    },
 }

@@ -25,17 +25,13 @@ fn type_check_ok(src: &str) {
 
 #[test]
 fn diag_field_not_found_with_available() {
-    let errors = type_errors(
-        "struct Point { x: f64, y: f64 } fn f(p: Point) -> f64 { p.z }",
-    );
+    let errors = type_errors("struct Point { x: f64, y: f64 } fn f(p: Point) -> f64 { p.z }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 
 #[test]
 fn diag_field_not_found_type_has_no_fields() {
-    let errors = type_errors(
-        "struct Empty {} fn f(e: Empty) -> i32 { e.x }",
-    );
+    let errors = type_errors("struct Empty {} fn f(e: Empty) -> i32 { e.x }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 
@@ -43,9 +39,8 @@ fn diag_field_not_found_type_has_no_fields() {
 
 #[test]
 fn diag_missing_struct_fields() {
-    let errors = type_errors(
-        "struct Point { x: f64, y: f64 } fn f() { let _ = Point { x = 1.0 }; }",
-    );
+    let errors =
+        type_errors("struct Point { x: f64, y: f64 } fn f() { let _ = Point { x = 1.0 }; }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 
@@ -78,9 +73,8 @@ fn diag_self_access_ambiguity() {
 
 #[test]
 fn diag_consume_via_ref() {
-    let errors = type_errors(
-        "impl Foo { fn consume(move self) {} fn caller(self) { self.consume(); } }",
-    );
+    let errors =
+        type_errors("impl Foo { fn consume(move self) {} fn caller(self) { self.consume(); } }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 
@@ -88,9 +82,7 @@ fn diag_consume_via_ref() {
 
 #[test]
 fn diag_duplicate_method() {
-    let errors = type_errors(
-        "impl Foo { fn bar(self) {} } impl Foo { fn bar(self) {} }",
-    );
+    let errors = type_errors("impl Foo { fn bar(self) {} } impl Foo { fn bar(self) {} }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 
@@ -115,9 +107,7 @@ fn diag_mismatch_let_annotation() {
 
 #[test]
 fn diag_field_write_via_shared_ref() {
-    let errors = type_errors(
-        "struct Point { x: f64 } fn f(r: &Point) { r.x = 1.0; }",
-    );
+    let errors = type_errors("struct Point { x: f64 } fn f(r: &Point) { r.x = 1.0; }");
     insta::assert_snapshot!(errors[0].to_string());
 }
 

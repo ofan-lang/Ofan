@@ -1,16 +1,19 @@
 use crate::lexer::Span;
 
-mod ty;
-mod pattern;
 mod expr;
-mod stmt;
 mod item;
+mod pattern;
+mod stmt;
+mod ty;
 
-pub use ty::{Type, RefRegion};
+pub use expr::{BinOp, BorrowKind, Expr, MatchArm, StructFieldInit, UnaryOp};
+pub use item::{
+    Ast, CopyMove, EnumDef, EnumVariant, FunctionDef, ImplBlock, Item, Param, StructDef,
+    StructField,
+};
 pub use pattern::Pattern;
-pub use expr::{Expr, MatchArm, StructFieldInit, BinOp, UnaryOp, BorrowKind};
 pub use stmt::Stmt;
-pub use item::{Ast, Item, FunctionDef, ImplBlock, Param, StructDef, StructField, CopyMove, EnumDef, EnumVariant};
+pub use ty::{RefRegion, Type};
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 // Block and Literal live here, not in a submodule, because each is needed by

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use crate::ast::CopyMove;
 use crate::lexer::token::Span;
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Ty};
+use std::collections::HashMap;
 
 /// Lexical scope stack. Each scope maps a variable name to its inferred type.
 /// `push_scope` / `pop_scope` bracket every block; `lookup` walks inward → outward.
@@ -12,7 +12,9 @@ pub(crate) struct Env {
 
 impl Env {
     pub(crate) fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env {
+            scopes: vec![HashMap::new()],
+        }
     }
 
     pub(crate) fn push_scope(&mut self) {
@@ -24,7 +26,10 @@ impl Env {
     }
 
     pub(crate) fn define(&mut self, name: &str, ty: Ty) {
-        self.scopes.last_mut().expect("scope stack empty").insert(name.to_string(), ty);
+        self.scopes
+            .last_mut()
+            .expect("scope stack empty")
+            .insert(name.to_string(), ty);
     }
 
     pub(crate) fn lookup(&self, name: &str) -> Option<&Ty> {
@@ -99,7 +104,6 @@ pub(crate) struct InferCtx {
     /// misbehave the moment nested functions are added. Pushed on entry to
     /// `infer_fn`/`infer_method`, popped on exit — every push/pop is paired.
     pub(crate) current_return_ty: Vec<Ty>,
-
     // ── Phase 2 hooks (not yet implemented) ───────────────────────────────────
     // Uncomment when Hindley-Milner unification is introduced:
     // ty_var_count: u32,

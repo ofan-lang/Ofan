@@ -11,19 +11,17 @@ impl<'src> Parser<'src> {
     /// Higher = tighter binding. Left-associative: right = left + 1.
     fn binary_bp(tok: &Token<'_>) -> Option<(u8, u8)> {
         Some(match tok {
-            Token::QuestionColon              => (1, 2),
-            Token::PipePipe                   => (3, 4),
-            Token::AmpAmp                     => (5, 6),
-            Token::EqEq | Token::BangEq       => (7, 8),
-            Token::Lt | Token::Gt
-            | Token::LtEq | Token::GtEq       => (9, 10),
-            Token::Pipe                       => (11, 12),
-            Token::Caret                      => (13, 14),
-            Token::Amp                        => (15, 16),
-            Token::Shl | Token::Shr           => (17, 18),
-            Token::Plus | Token::Minus        => (19, 20),
-            Token::Star | Token::Slash
-            | Token::Percent                  => (21, 22),
+            Token::QuestionColon => (1, 2),
+            Token::PipePipe => (3, 4),
+            Token::AmpAmp => (5, 6),
+            Token::EqEq | Token::BangEq => (7, 8),
+            Token::Lt | Token::Gt | Token::LtEq | Token::GtEq => (9, 10),
+            Token::Pipe => (11, 12),
+            Token::Caret => (13, 14),
+            Token::Amp => (15, 16),
+            Token::Shl | Token::Shr => (17, 18),
+            Token::Plus | Token::Minus => (19, 20),
+            Token::Star | Token::Slash | Token::Percent => (21, 22),
             _ => return None,
         })
     }
@@ -31,24 +29,24 @@ impl<'src> Parser<'src> {
     fn tok_to_binop(tok: &Token<'_>) -> BinOp {
         match tok {
             Token::QuestionColon => BinOp::Fallback,
-            Token::PipePipe      => BinOp::Or,
-            Token::AmpAmp        => BinOp::And,
-            Token::EqEq          => BinOp::Eq,
-            Token::BangEq        => BinOp::Ne,
-            Token::Lt            => BinOp::Lt,
-            Token::Gt            => BinOp::Gt,
-            Token::LtEq          => BinOp::Le,
-            Token::GtEq          => BinOp::Ge,
-            Token::Pipe          => BinOp::BitOr,
-            Token::Caret         => BinOp::BitXor,
-            Token::Amp           => BinOp::BitAnd,
-            Token::Shl           => BinOp::Shl,
-            Token::Shr           => BinOp::Shr,
-            Token::Plus          => BinOp::Add,
-            Token::Minus         => BinOp::Sub,
-            Token::Star          => BinOp::Mul,
-            Token::Slash         => BinOp::Div,
-            Token::Percent       => BinOp::Mod,
+            Token::PipePipe => BinOp::Or,
+            Token::AmpAmp => BinOp::And,
+            Token::EqEq => BinOp::Eq,
+            Token::BangEq => BinOp::Ne,
+            Token::Lt => BinOp::Lt,
+            Token::Gt => BinOp::Gt,
+            Token::LtEq => BinOp::Le,
+            Token::GtEq => BinOp::Ge,
+            Token::Pipe => BinOp::BitOr,
+            Token::Caret => BinOp::BitXor,
+            Token::Amp => BinOp::BitAnd,
+            Token::Shl => BinOp::Shl,
+            Token::Shr => BinOp::Shr,
+            Token::Plus => BinOp::Add,
+            Token::Minus => BinOp::Sub,
+            Token::Star => BinOp::Mul,
+            Token::Slash => BinOp::Div,
+            Token::Percent => BinOp::Mod,
             _ => unreachable!("tok_to_binop called on non-binary token"),
         }
     }
@@ -63,8 +61,16 @@ impl<'src> Parser<'src> {
             let op = Self::tok_to_binop(self.peek());
             self.advance();
             let rhs = self.parse_expr_prec(right_bp)?;
-            let span = Span { start: lhs.span().start, end: rhs.span().end };
-            lhs = Expr::Binary { op, left: Box::new(lhs), right: Box::new(rhs), span };
+            let span = Span {
+                start: lhs.span().start,
+                end: rhs.span().end,
+            };
+            lhs = Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+                span,
+            };
         }
 
         Ok(lhs)
@@ -77,27 +83,52 @@ impl<'src> Parser<'src> {
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
-                Ok(Expr::Unary { op: UnaryOp::Neg, expr: Box::new(expr), span: Span { start, end } })
+                Ok(Expr::Unary {
+                    op: UnaryOp::Neg,
+                    expr: Box::new(expr),
+                    span: Span { start, end },
+                })
             }
             Token::Bang => {
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
-                Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(expr), span: Span { start, end } })
+                Ok(Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(expr),
+                    span: Span { start, end },
+                })
             }
             Token::Tilde => {
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
-                Ok(Expr::Unary { op: UnaryOp::BitNot, expr: Box::new(expr), span: Span { start, end } })
+                Ok(Expr::Unary {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                    span: Span { start, end },
+                })
             }
             Token::Amp => {
                 self.advance();
-                let mutable = if matches!(self.peek(), Token::Mut) { self.advance(); true } else { false };
+                let mutable = if matches!(self.peek(), Token::Mut) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
-                let op = if mutable { UnaryOp::BorrowMut } else { UnaryOp::Borrow };
-                Ok(Expr::Unary { op, expr: Box::new(expr), span: Span { start, end } })
+                let op = if mutable {
+                    UnaryOp::BorrowMut
+                } else {
+                    UnaryOp::Borrow
+                };
+                Ok(Expr::Unary {
+                    op,
+                    expr: Box::new(expr),
+                    span: Span { start, end },
+                })
             }
             _ => self.parse_postfix(),
         }
@@ -110,8 +141,14 @@ impl<'src> Parser<'src> {
             match self.peek() {
                 Token::Question => {
                     let end = self.advance().1.end;
-                    let span = Span { start: expr.span().start, end };
-                    expr = Expr::Propagate { expr: Box::new(expr), span };
+                    let span = Span {
+                        start: expr.span().start,
+                        end,
+                    };
+                    expr = Expr::Propagate {
+                        expr: Box::new(expr),
+                        span,
+                    };
                 }
                 Token::Dot => {
                     let _ = self.advance();
@@ -130,22 +167,44 @@ impl<'src> Parser<'src> {
                             span: Span { start, end },
                         };
                     } else {
-                        let span = Span { start, end: field_span.end };
-                        expr = Expr::Field { object: Box::new(expr), field, field_span, span };
+                        let span = Span {
+                            start,
+                            end: field_span.end,
+                        };
+                        expr = Expr::Field {
+                            object: Box::new(expr),
+                            field,
+                            field_span,
+                            span,
+                        };
                     }
                 }
                 Token::LParen => {
                     self.advance();
                     let args = self.parse_call_args()?;
                     let end = self.eat(&Token::RParen)?.end;
-                    let span = Span { start: expr.span().start, end };
-                    expr = Expr::Call { callee: Box::new(expr), args, span };
+                    let span = Span {
+                        start: expr.span().start,
+                        end,
+                    };
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        args,
+                        span,
+                    };
                 }
                 Token::As => {
                     self.advance();
                     let ty = self.parse_type()?;
-                    let span = Span { start: expr.span().start, end: ty.span().end };
-                    expr = Expr::Cast { expr: Box::new(expr), ty: Box::new(ty), span };
+                    let span = Span {
+                        start: expr.span().start,
+                        end: ty.span().end,
+                    };
+                    expr = Expr::Cast {
+                        expr: Box::new(expr),
+                        ty: Box::new(ty),
+                        span,
+                    };
                 }
                 _ => break,
             }
@@ -168,9 +227,16 @@ impl<'src> Parser<'src> {
             self.no_struct_lit = prev;
             args.push(result?);
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RParen => break,
-                _ => return Err(self.error_expected("`,` or `)`", Some("add `,` to separate arguments or `)` to close the argument list"))),
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `)`",
+                        Some("add `,` to separate arguments or `)` to close the argument list"),
+                    ))
+                }
             }
         }
         Ok(args)
@@ -248,19 +314,35 @@ impl<'src> Parser<'src> {
             let (field_name, field_name_span) = self.eat_ident()?;
             self.eat(&Token::Equals)?;
             let value = Box::new(self.parse_expr()?);
-            fields.push(StructFieldInit { name: field_name, name_span: field_name_span, value });
+            fields.push(StructFieldInit {
+                name: field_name,
+                name_span: field_name_span,
+                value,
+            });
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RBrace => break,
-                _ => return Err(self.error_expected(
-                    "`,` or `}`",
-                    Some("add `,` to separate fields or `}` to close the struct literal"),
-                )),
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `}`",
+                        Some("add `,` to separate fields or `}` to close the struct literal"),
+                    ))
+                }
             }
         }
         let end = self.eat(&Token::RBrace)?;
-        let span = Span { start: start.start, end: end.end };
-        Ok(Expr::StructLit { name, name_span, fields, span })
+        let span = Span {
+            start: start.start,
+            end: end.end,
+        };
+        Ok(Expr::StructLit {
+            name,
+            name_span,
+            fields,
+            span,
+        })
     }
 }
 
@@ -275,28 +357,46 @@ mod tests {
 
     #[test]
     fn parse_integer_literal() {
-        assert!(matches!(parse_expr("42").unwrap(), Expr::Literal(Literal::Integer(42), _)));
+        assert!(matches!(
+            parse_expr("42").unwrap(),
+            Expr::Literal(Literal::Integer(42), _)
+        ));
     }
 
     #[test]
     fn parse_float_literal() {
-        assert!(matches!(parse_expr("3.14").unwrap(), Expr::Literal(Literal::Float(_), _)));
+        assert!(matches!(
+            parse_expr("3.14").unwrap(),
+            Expr::Literal(Literal::Float(_), _)
+        ));
     }
 
     #[test]
     fn parse_bool_literals() {
-        assert!(matches!(parse_expr("true").unwrap(), Expr::Literal(Literal::Bool(true), _)));
-        assert!(matches!(parse_expr("false").unwrap(), Expr::Literal(Literal::Bool(false), _)));
+        assert!(matches!(
+            parse_expr("true").unwrap(),
+            Expr::Literal(Literal::Bool(true), _)
+        ));
+        assert!(matches!(
+            parse_expr("false").unwrap(),
+            Expr::Literal(Literal::Bool(false), _)
+        ));
     }
 
     #[test]
     fn parse_string_literal() {
-        assert!(matches!(parse_expr(r#""hello""#).unwrap(), Expr::Literal(Literal::Str("hello"), _)));
+        assert!(matches!(
+            parse_expr(r#""hello""#).unwrap(),
+            Expr::Literal(Literal::Str("hello"), _)
+        ));
     }
 
     #[test]
     fn parse_char_literal() {
-        assert!(matches!(parse_expr("'x'").unwrap(), Expr::Literal(Literal::Char('x'), _)));
+        assert!(matches!(
+            parse_expr("'x'").unwrap(),
+            Expr::Literal(Literal::Char('x'), _)
+        ));
     }
 
     #[test]
@@ -308,98 +408,189 @@ mod tests {
 
     #[test]
     fn parse_unary_neg() {
-        assert!(matches!(parse_expr("-5").unwrap(), Expr::Unary { op: UnaryOp::Neg, .. }));
+        assert!(matches!(
+            parse_expr("-5").unwrap(),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_unary_not() {
-        assert!(matches!(parse_expr("!flag").unwrap(), Expr::Unary { op: UnaryOp::Not, .. }));
+        assert!(matches!(
+            parse_expr("!flag").unwrap(),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_unary_bitnot() {
-        assert!(matches!(parse_expr("~mask").unwrap(), Expr::Unary { op: UnaryOp::BitNot, .. }));
+        assert!(matches!(
+            parse_expr("~mask").unwrap(),
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_borrow() {
-        assert!(matches!(parse_expr("&x").unwrap(), Expr::Unary { op: UnaryOp::Borrow, .. }));
+        assert!(matches!(
+            parse_expr("&x").unwrap(),
+            Expr::Unary {
+                op: UnaryOp::Borrow,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_borrow_mut() {
-        assert!(matches!(parse_expr("&mut x").unwrap(), Expr::Unary { op: UnaryOp::BorrowMut, .. }));
+        assert!(matches!(
+            parse_expr("&mut x").unwrap(),
+            Expr::Unary {
+                op: UnaryOp::BorrowMut,
+                ..
+            }
+        ));
     }
 
     // --- Binary / precedence ---
 
     #[test]
     fn parse_binary_add() {
-        assert!(matches!(parse_expr("a + b").unwrap(), Expr::Binary { op: BinOp::Add, .. }));
+        assert!(matches!(
+            parse_expr("a + b").unwrap(),
+            Expr::Binary { op: BinOp::Add, .. }
+        ));
     }
 
     #[test]
     fn parse_precedence_mul_over_add() {
         let expr = parse_expr("a + b * c").unwrap();
-        if let Expr::Binary { op: BinOp::Add, right, .. } = expr {
+        if let Expr::Binary {
+            op: BinOp::Add,
+            right,
+            ..
+        } = expr
+        {
             assert!(matches!(*right, Expr::Binary { op: BinOp::Mul, .. }));
-        } else { panic!("expected Add at top"); }
+        } else {
+            panic!("expected Add at top");
+        }
     }
 
     #[test]
     fn parse_precedence_logical() {
         let expr = parse_expr("a || b && c").unwrap();
-        if let Expr::Binary { op: BinOp::Or, right, .. } = expr {
+        if let Expr::Binary {
+            op: BinOp::Or,
+            right,
+            ..
+        } = expr
+        {
             assert!(matches!(*right, Expr::Binary { op: BinOp::And, .. }));
-        } else { panic!("expected Or at top"); }
+        } else {
+            panic!("expected Or at top");
+        }
     }
 
     #[test]
     fn parse_precedence_comparison_over_logical() {
         let expr = parse_expr("a && b == c").unwrap();
-        if let Expr::Binary { op: BinOp::And, right, .. } = expr {
+        if let Expr::Binary {
+            op: BinOp::And,
+            right,
+            ..
+        } = expr
+        {
             assert!(matches!(*right, Expr::Binary { op: BinOp::Eq, .. }));
-        } else { panic!("expected And at top"); }
+        } else {
+            panic!("expected And at top");
+        }
     }
 
     #[test]
     fn parse_grouped_expr() {
-        assert!(matches!(parse_expr("(a + b) * c").unwrap(), Expr::Binary { op: BinOp::Mul, .. }));
+        assert!(matches!(
+            parse_expr("(a + b) * c").unwrap(),
+            Expr::Binary { op: BinOp::Mul, .. }
+        ));
     }
 
     #[test]
     fn parse_fallback_operator() {
-        assert!(matches!(parse_expr("opt ?: 0").unwrap(), Expr::Binary { op: BinOp::Fallback, .. }));
+        assert!(matches!(
+            parse_expr("opt ?: 0").unwrap(),
+            Expr::Binary {
+                op: BinOp::Fallback,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_fallback_left_assoc() {
         let expr = parse_expr("a ?: b ?: c").unwrap();
-        if let Expr::Binary { op: BinOp::Fallback, left, .. } = expr {
-            assert!(matches!(*left, Expr::Binary { op: BinOp::Fallback, .. }));
-        } else { panic!("expected Fallback at top"); }
+        if let Expr::Binary {
+            op: BinOp::Fallback,
+            left,
+            ..
+        } = expr
+        {
+            assert!(matches!(
+                *left,
+                Expr::Binary {
+                    op: BinOp::Fallback,
+                    ..
+                }
+            ));
+        } else {
+            panic!("expected Fallback at top");
+        }
     }
 
     // --- Postfix ---
 
     #[test]
     fn parse_propagate() {
-        assert!(matches!(parse_expr("result?").unwrap(), Expr::Propagate { .. }));
+        assert!(matches!(
+            parse_expr("result?").unwrap(),
+            Expr::Propagate { .. }
+        ));
     }
 
     #[test]
     fn parse_field_access() {
-        assert!(matches!(parse_expr("obj.field").unwrap(), Expr::Field { field: "field", .. }));
+        assert!(matches!(
+            parse_expr("obj.field").unwrap(),
+            Expr::Field { field: "field", .. }
+        ));
     }
 
     #[test]
     fn parse_method_call() {
-        assert!(matches!(parse_expr("obj.method(a, b)").unwrap(), Expr::MethodCall { method: "method", .. }));
+        assert!(matches!(
+            parse_expr("obj.method(a, b)").unwrap(),
+            Expr::MethodCall {
+                method: "method",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_function_call() {
-        assert!(matches!(parse_expr("foo(1, 2)").unwrap(), Expr::Call { .. }));
+        assert!(matches!(
+            parse_expr("foo(1, 2)").unwrap(),
+            Expr::Call { .. }
+        ));
     }
 
     #[test]
@@ -412,7 +603,9 @@ mod tests {
         let expr = parse_expr("f()?.field").unwrap();
         if let Expr::Field { object, .. } = &expr {
             assert!(matches!(**object, Expr::Propagate { .. }));
-        } else { panic!("expected Field at top"); }
+        } else {
+            panic!("expected Field at top");
+        }
     }
 
     // --- Struct literals ---
@@ -425,7 +618,9 @@ mod tests {
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].name, "x");
             assert_eq!(fields[1].name, "y");
-        } else { panic!("expected StructLit"); }
+        } else {
+            panic!("expected StructLit");
+        }
     }
 
     #[test]
@@ -434,7 +629,9 @@ mod tests {
         if let Expr::StructLit { name, fields, .. } = expr {
             assert_eq!(name, "Point");
             assert_eq!(fields.len(), 2);
-        } else { panic!("expected StructLit"); }
+        } else {
+            panic!("expected StructLit");
+        }
     }
 
     #[test]
@@ -443,7 +640,9 @@ mod tests {
         if let Expr::StructLit { name, fields, .. } = expr {
             assert_eq!(name, "Empty");
             assert!(fields.is_empty());
-        } else { panic!("expected StructLit"); }
+        } else {
+            panic!("expected StructLit");
+        }
     }
 
     #[test]
@@ -452,8 +651,13 @@ mod tests {
         if let Expr::StructLit { name, fields, .. } = expr {
             assert_eq!(name, "Outer");
             assert_eq!(fields.len(), 1);
-            assert!(matches!(*fields[0].value, Expr::StructLit { name: "Inner", .. }));
-        } else { panic!("expected StructLit"); }
+            assert!(matches!(
+                *fields[0].value,
+                Expr::StructLit { name: "Inner", .. }
+            ));
+        } else {
+            panic!("expected StructLit");
+        }
     }
 
     #[test]
@@ -461,7 +665,9 @@ mod tests {
         let expr = parse_expr("if Point { 1 }").unwrap();
         if let Expr::If { condition, .. } = expr {
             assert!(matches!(*condition, Expr::Ident("Point", _)));
-        } else { panic!("expected If"); }
+        } else {
+            panic!("expected If");
+        }
     }
 
     // Struct literals are also allowed inside function call arguments even in restricted contexts.
@@ -472,8 +678,12 @@ mod tests {
         if let Expr::If { condition, .. } = expr {
             if let Expr::Call { args, .. } = *condition {
                 assert!(matches!(args[0], Expr::StructLit { name: "Point", .. }));
-            } else { panic!("expected Call"); }
-        } else { panic!("expected If"); }
+            } else {
+                panic!("expected Call");
+            }
+        } else {
+            panic!("expected If");
+        }
     }
 
     // Parens re-enable struct literals in restricted positions, same as Rust.
@@ -482,7 +692,9 @@ mod tests {
         let expr = parse_expr("if (Point { x = 1.0, y = 2.0 }) { 1 }").unwrap();
         if let Expr::If { condition, .. } = expr {
             assert!(matches!(*condition, Expr::StructLit { name: "Point", .. }));
-        } else { panic!("expected If"); }
+        } else {
+            panic!("expected If");
+        }
     }
 
     #[test]
@@ -490,6 +702,8 @@ mod tests {
         let expr = parse_expr("if flag { 1 }").unwrap();
         if let Expr::If { condition, .. } = expr {
             assert!(matches!(*condition, Expr::Ident("flag", _)));
-        } else { panic!("expected If"); }
+        } else {
+            panic!("expected If");
+        }
     }
 }

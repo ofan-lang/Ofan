@@ -1,12 +1,12 @@
 pub mod error;
 pub use error::ParseError;
 
-mod item;
-mod types;
-mod stmt;
-mod expr;
 mod control_flow;
+mod expr;
+mod item;
 mod pattern;
+mod stmt;
+mod types;
 
 use crate::ast::Ast;
 use crate::lexer::token::{Span, Token};
@@ -23,7 +23,11 @@ pub struct Parser<'src> {
 
 impl<'src> Parser<'src> {
     pub fn new(tokens: Vec<(Token<'src>, Span)>) -> Self {
-        Parser { tokens, pos: 0, no_struct_lit: false }
+        Parser {
+            tokens,
+            pos: 0,
+            no_struct_lit: false,
+        }
     }
 
     // --- Cursor primitives ---
@@ -59,16 +63,16 @@ impl<'src> Parser<'src> {
     fn structural_suggestion(tok: &Token<'_>) -> Option<&'static str> {
         match tok {
             Token::Semicolon => Some("add `;` to end the statement"),
-            Token::LBrace    => Some("add `{` to open the block body"),
-            Token::RBrace    => Some("add `}` to close the block"),
-            Token::LParen    => Some("add `(` to open the parameter list"),
-            Token::RParen    => Some("add `)` to close the parenthesized expression"),
-            Token::FatArrow  => Some("add `=>` after the pattern"),
-            Token::Arrow     => Some("add `->` to specify the return type"),
-            Token::Colon     => Some("add `:` to separate the name from its type"),
-            Token::Equals    => Some("add `=` to begin the initializer"),
-            Token::In        => Some("add `in` between the binding and the iterable"),
-            Token::Comma     => Some("add `,` to separate items"),
+            Token::LBrace => Some("add `{` to open the block body"),
+            Token::RBrace => Some("add `}` to close the block"),
+            Token::LParen => Some("add `(` to open the parameter list"),
+            Token::RParen => Some("add `)` to close the parenthesized expression"),
+            Token::FatArrow => Some("add `=>` after the pattern"),
+            Token::Arrow => Some("add `->` to specify the return type"),
+            Token::Colon => Some("add `:` to separate the name from its type"),
+            Token::Equals => Some("add `=` to begin the initializer"),
+            Token::In => Some("add `in` between the binding and the iterable"),
+            Token::Comma => Some("add `,` to separate items"),
             _ => None,
         }
     }
@@ -83,7 +87,10 @@ impl<'src> Parser<'src> {
                     _ => unreachable!(),
                 }
             }
-            _ => Err(self.error_expected("an identifier", Some("identifiers start with a letter or `_`, followed by letters, digits, or `_`"))),
+            _ => Err(self.error_expected(
+                "an identifier",
+                Some("identifiers start with a letter or `_`, followed by letters, digits, or `_`"),
+            )),
         }
     }
 
@@ -94,9 +101,17 @@ impl<'src> Parser<'src> {
         let found = format!("{}", self.peek());
         let suggestion = suggestion.map(|s| s.to_string());
         if matches!(self.peek(), Token::Eof) {
-            ParseError::UnexpectedEof { expected: expected.to_string(), suggestion }
+            ParseError::UnexpectedEof {
+                expected: expected.to_string(),
+                suggestion,
+            }
         } else {
-            ParseError::UnexpectedToken { span, found, expected: expected.to_string(), suggestion }
+            ParseError::UnexpectedToken {
+                span,
+                found,
+                expected: expected.to_string(),
+                suggestion,
+            }
         }
     }
 
@@ -155,7 +170,12 @@ pub fn parse_struct(src: &str) -> Result<crate::ast::StructDef<'_>, ParseError> 
     use crate::ast::Item;
     let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
     let ast = Parser::new(tokens).parse()?;
-    match ast.items.into_iter().next().expect("parse_struct: no items in source") {
+    match ast
+        .items
+        .into_iter()
+        .next()
+        .expect("parse_struct: no items in source")
+    {
         Item::Struct(def) => Ok(def),
         _ => panic!("parse_struct: first item is not a struct"),
     }
@@ -166,7 +186,12 @@ pub fn parse_enum(src: &str) -> Result<crate::ast::EnumDef<'_>, ParseError> {
     use crate::ast::Item;
     let tokens = Lexer::new(src).lex().expect("lex failed in test helper");
     let ast = Parser::new(tokens).parse()?;
-    match ast.items.into_iter().next().expect("parse_enum: no items in source") {
+    match ast
+        .items
+        .into_iter()
+        .next()
+        .expect("parse_enum: no items in source")
+    {
         Item::Enum(def) => Ok(def),
         _ => panic!("parse_enum: first item is not an enum"),
     }

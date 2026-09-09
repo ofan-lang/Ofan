@@ -1,4 +1,7 @@
-use crate::ast::{CopyMove, EnumDef, EnumVariant, FunctionDef, ImplBlock, Item, Param, StructDef, StructField, Type};
+use crate::ast::{
+    CopyMove, EnumDef, EnumVariant, FunctionDef, ImplBlock, Item, Param, StructDef, StructField,
+    Type,
+};
 use crate::lexer::token::{Span, Token};
 use crate::parser::{ParseError, Parser};
 
@@ -63,10 +66,12 @@ impl<'src> Parser<'src> {
         loop {
             match self.peek() {
                 Token::RBrace => break,
-                Token::Eof => return Err(self.error_expected(
-                    "`}` or a field name",
-                    Some("add `}` to close the struct body"),
-                )),
+                Token::Eof => {
+                    return Err(self.error_expected(
+                        "`}` or a field name",
+                        Some("add `}` to close the struct body"),
+                    ))
+                }
                 _ => {}
             }
             let field_start = self.peek_span().start;
@@ -78,15 +83,22 @@ impl<'src> Parser<'src> {
                 name: fname,
                 name_span: fname_span,
                 ty,
-                span: Span { start: field_start, end: field_end },
+                span: Span {
+                    start: field_start,
+                    end: field_end,
+                },
             });
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RBrace => break,
-                _ => return Err(self.error_expected(
-                    "`,` or `}`",
-                    Some("add `,` to separate fields or `}` to close the struct"),
-                )),
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `}`",
+                        Some("add `,` to separate fields or `}` to close the struct"),
+                    ))
+                }
             }
         }
 
@@ -97,7 +109,10 @@ impl<'src> Parser<'src> {
             copy_move,
             generic_params,
             fields,
-            span: Span { start: outer_start, end },
+            span: Span {
+                start: outer_start,
+                end,
+            },
         })
     }
 
@@ -117,10 +132,12 @@ impl<'src> Parser<'src> {
         loop {
             match self.peek() {
                 Token::RBrace => break,
-                Token::Eof => return Err(self.error_expected(
-                    "`}` or a variant name",
-                    Some("add `}` to close the enum body"),
-                )),
+                Token::Eof => {
+                    return Err(self.error_expected(
+                        "`}` or a variant name",
+                        Some("add `}` to close the enum body"),
+                    ))
+                }
                 _ => {}
             }
             let variant_start = self.peek_span().start;
@@ -154,16 +171,23 @@ impl<'src> Parser<'src> {
                 name: vname,
                 name_span: vname_span,
                 fields,
-                span: Span { start: variant_start, end: vname_span.end },
+                span: Span {
+                    start: variant_start,
+                    end: vname_span.end,
+                },
             });
 
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RBrace => break,
-                _ => return Err(self.error_expected(
-                    "`,` or `}`",
-                    Some("add `,` to separate variants or `}` to close the enum"),
-                )),
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `}`",
+                        Some("add `,` to separate variants or `}` to close the enum"),
+                    ))
+                }
             }
         }
 
@@ -174,7 +198,10 @@ impl<'src> Parser<'src> {
             copy_move,
             generic_params,
             variants,
-            span: Span { start: outer_start, end },
+            span: Span {
+                start: outer_start,
+                end,
+            },
         })
     }
 
@@ -190,23 +217,31 @@ impl<'src> Parser<'src> {
             match self.peek() {
                 Token::RBrace => break,
                 Token::Fn => methods.push(self.parse_function()?),
-                Token::Eof => return Err(self.error_expected(
-                    "`}` or `fn`",
-                    Some("add `}` to close the impl block"),
-                )),
-                _ => return Err(self.error_expected(
-                    "`fn`",
-                    Some(
-                        "impl blocks are declaration namespaces — only `fn` declarations \
+                Token::Eof => {
+                    return Err(
+                        self.error_expected("`}` or `fn`", Some("add `}` to close the impl block"))
+                    )
+                }
+                _ => {
+                    return Err(self.error_expected(
+                        "`fn`",
+                        Some(
+                            "impl blocks are declaration namespaces — only `fn` declarations \
                          are valid inside; variables, expressions, and statements are not \
                          permitted here (§22)",
-                    ),
-                )),
+                        ),
+                    ))
+                }
             }
         }
 
         let end = self.eat(&Token::RBrace)?.end;
-        Ok(ImplBlock { type_name, type_name_span, methods, span: Span { start, end } })
+        Ok(ImplBlock {
+            type_name,
+            type_name_span,
+            methods,
+            span: Span { start, end },
+        })
     }
 
     /// `fn name[<T, r1, ...>](params) [-> RetType] { body }`
@@ -226,7 +261,15 @@ impl<'src> Parser<'src> {
         };
         let body = self.parse_block()?;
         let end = body.span.end;
-        Ok(FunctionDef { name, name_span, generic_params, params, return_ty, body, span: Span { start, end } })
+        Ok(FunctionDef {
+            name,
+            name_span,
+            generic_params,
+            params,
+            return_ty,
+            body,
+            span: Span { start, end },
+        })
     }
 
     /// Optional `<T, r1, E, ...>` — returns empty vec if not present
@@ -244,9 +287,19 @@ impl<'src> Parser<'src> {
             let (name, _) = self.eat_ident()?;
             params.push(name);
             match self.peek() {
-                Token::Comma => { self.advance(); }
-                Token::Gt => { self.advance(); break; }
-                _ => return Err(self.error_expected("`,` or `>`", Some("add `,` to separate generic parameters or `>` to close the list"))),
+                Token::Comma => {
+                    self.advance();
+                }
+                Token::Gt => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `>`",
+                        Some("add `,` to separate generic parameters or `>` to close the list"),
+                    ))
+                }
             }
         }
         Ok(params)
@@ -276,7 +329,10 @@ impl<'src> Parser<'src> {
                     name_span: self_span,
                     ty: Type::SelfTy(self_span),
                     consuming: true,
-                    span: Span { start: move_span.start, end: self_span.end },
+                    span: Span {
+                        start: move_span.start,
+                        end: self_span.end,
+                    },
                 });
             } else if matches!(self.peek(), Token::SelfKw) {
                 // bare `self` — inferred-access receiver (§18)
@@ -296,12 +352,22 @@ impl<'src> Parser<'src> {
                 // token that the cursor happens to sit on after consuming `&`/`mut`/`self`.
                 let amp_span = self.peek_span();
                 self.advance(); // `&`
-                let has_mut = if matches!(self.peek(), Token::Mut) { self.advance(); true } else { false };
-                let has_self = if matches!(self.peek(), Token::SelfKw) { self.advance(); true } else { false };
+                let has_mut = if matches!(self.peek(), Token::Mut) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                let has_self = if matches!(self.peek(), Token::SelfKw) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let form = match (has_mut, has_self) {
-                    (false, true)  => "`&self`",
-                    (true,  true)  => "`&mut self`",
-                    (true,  false) => "`&mut`",
+                    (false, true) => "`&self`",
+                    (true, true) => "`&mut self`",
+                    (true, false) => "`&mut`",
                     (false, false) => "`&`",
                 };
                 return Err(ParseError::UnexpectedToken {
@@ -320,13 +386,26 @@ impl<'src> Parser<'src> {
                 self.eat(&Token::Colon)?;
                 let ty = self.parse_type()?;
                 let end = ty.span().end;
-                params.push(Param { name, name_span, ty, consuming: false, span: Span { start, end } });
+                params.push(Param {
+                    name,
+                    name_span,
+                    ty,
+                    consuming: false,
+                    span: Span { start, end },
+                });
             }
 
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RParen => break,
-                _ => return Err(self.error_expected("`,` or `)`", Some("add `,` to separate parameters or `)` to close the parameter list"))),
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `)`",
+                        Some("add `,` to separate parameters or `)` to close the parameter list"),
+                    ))
+                }
             }
         }
         Ok(params)

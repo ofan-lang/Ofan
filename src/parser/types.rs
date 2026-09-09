@@ -81,9 +81,19 @@ impl<'src> Parser<'src> {
             }
             args.push(self.parse_type()?);
             match self.peek() {
-                Token::Comma => { self.advance(); }
-                Token::Gt => { self.advance(); break; }
-                _ => return Err(self.error_expected("`,` or `>`", Some("add `,` to separate type arguments or `>` to close the list"))),
+                Token::Comma => {
+                    self.advance();
+                }
+                Token::Gt => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    return Err(self.error_expected(
+                        "`,` or `>`",
+                        Some("add `,` to separate type arguments or `>` to close the list"),
+                    ))
+                }
             }
         }
         Ok(args)
@@ -112,9 +122,16 @@ mod tests {
     #[test]
     fn parse_type_generic() {
         let ty = parse_type("Option<i32>").unwrap();
-        if let Type::Named { name: "Option", args, .. } = ty {
+        if let Type::Named {
+            name: "Option",
+            args,
+            ..
+        } = ty
+        {
             assert_eq!(args.len(), 1);
-        } else { panic!("expected Named"); }
+        } else {
+            panic!("expected Named");
+        }
     }
 
     #[test]
@@ -132,15 +149,27 @@ mod tests {
     #[test]
     fn parse_type_static_ref() {
         let ty = parse_type("&static str").unwrap();
-        if let Type::Ref { region: Some(RefRegion::Static), .. } = ty { }
-        else { panic!("expected static ref"); }
+        if let Type::Ref {
+            region: Some(RefRegion::Static),
+            ..
+        } = ty
+        {
+        } else {
+            panic!("expected static ref");
+        }
     }
 
     #[test]
     fn parse_type_region_tag() {
         let ty = parse_type("&r1 str").unwrap();
-        if let Type::Ref { region: Some(RefRegion::Named("r1")), .. } = ty { }
-        else { panic!("expected region tag r1"); }
+        if let Type::Ref {
+            region: Some(RefRegion::Named("r1")),
+            ..
+        } = ty
+        {
+        } else {
+            panic!("expected region tag r1");
+        }
     }
 
     #[test]
@@ -152,25 +181,46 @@ mod tests {
     #[test]
     fn parse_type_ref_self_ty() {
         let ty = parse_type("&Self").unwrap();
-        if let Type::Ref { mutable: false, region: None, inner, .. } = ty {
+        if let Type::Ref {
+            mutable: false,
+            region: None,
+            inner,
+            ..
+        } = ty
+        {
             assert!(matches!(*inner, Type::SelfTy(_)));
-        } else { panic!("expected &Self"); }
+        } else {
+            panic!("expected &Self");
+        }
     }
 
     #[test]
     fn parse_type_region_ref_self_ty() {
         let ty = parse_type("&r1 Self").unwrap();
-        if let Type::Ref { region: Some(RefRegion::Named("r1")), inner, .. } = ty {
+        if let Type::Ref {
+            region: Some(RefRegion::Named("r1")),
+            inner,
+            ..
+        } = ty
+        {
             assert!(matches!(*inner, Type::SelfTy(_)));
-        } else { panic!("expected &r1 Self"); }
+        } else {
+            panic!("expected &r1 Self");
+        }
     }
 
     #[test]
     fn parse_type_self_kw_in_type_position_is_error() {
         let err = parse_type("self").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("Self"), "error must mention `Self` (capital): {msg}");
-        assert!(msg.contains("receiver"), "error must explain `self` is a receiver, not a type: {msg}");
+        assert!(
+            msg.contains("Self"),
+            "error must mention `Self` (capital): {msg}"
+        );
+        assert!(
+            msg.contains("receiver"),
+            "error must explain `self` is a receiver, not a type: {msg}"
+        );
         assert!(msg.contains("§18"), "error must cite §18: {msg}");
     }
 }

@@ -16,14 +16,17 @@ pub enum Ty {
     Unit,
 
     // ── Compound types ────────────────────────────────────────────────────────
-
     /// Reference type `&[mut] [region] T`.
     ///
     /// `region` is `None` in phase 1 — lifetime tracking is deferred.
     /// Phase 2: populate `region` and enforce borrow/lifetime rules.
     /// The field is present now so pattern matches on `Ref` don't need updating
     /// when phase 2 introduces region vars.
-    Ref { mutable: bool, region: Option<Region>, inner: Box<Ty> },
+    Ref {
+        mutable: bool,
+        region: Option<Region>,
+        inner: Box<Ty>,
+    },
 
     /// Named/user-defined type (struct, enum) or an unrecognised name.
     /// Used when `ast::Type::Named` doesn't map to a primitive or generic param.
@@ -90,8 +93,16 @@ impl std::fmt::Display for Ty {
             Ty::Str => write!(f, "str"),
             Ty::Unit => write!(f, "unit"),
             Ty::Named(n) | Ty::Param(n) => write!(f, "{n}"),
-            Ty::Ref { mutable: true, inner, .. } => write!(f, "&mut {inner}"),
-            Ty::Ref { mutable: false, inner, .. } => write!(f, "&{inner}"),
+            Ty::Ref {
+                mutable: true,
+                inner,
+                ..
+            } => write!(f, "&mut {inner}"),
+            Ty::Ref {
+                mutable: false,
+                inner,
+                ..
+            } => write!(f, "&{inner}"),
             Ty::TyVar(id) => write!(f, "?{id}"),
             Ty::Error => write!(f, "<error>"),
         }
