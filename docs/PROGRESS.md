@@ -3,9 +3,9 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-09-09 — Windows linker support (PR fix/windows-linker)
+## Last session: 2026-09-09 — Windows linker support (PR #50, merged)
 
-**Branch:** `fix/windows-linker` (PR open, awaiting review)
+**Branch:** `fix/windows-linker` → merged to `main` at `7bd5abd`
 
 **What was done:**
 
@@ -43,9 +43,16 @@ Three real gaps exposed by a collaborator's first Windows build were fixed toget
   workload. Documented that `cc::windows_registry` handles discovery automatically —
   `vcvars64.bat` not needed.
 
-### `tests/cli_diagnostics.rs`
-- Added TODO comment for `daily_total.ofn` integration test (collaborator to share
-  source; wired up in a follow-up PR).
+### `rust-toolchain.toml` (new)
+- Pins toolchain to `1.96.0` with `rustfmt` and `clippy` components explicit.
+- Discovered during CI iteration that the codebase was formatted with a pre-1.96
+  rustfmt; CI's floating `stable` had drifted ahead and failed `cargo fmt --check`.
+  Pinning + one-time reformat of 34 files (`chore: apply rustfmt 1.96.0`) fixes the
+  check permanently and locks local and CI to the same version.
+
+**CI fixes required post-merge (in order):**
+1. JIT tests fired on `lower_to_module` entry-fn check — moved to `emit_module` (AOT only).
+2. `cargo fmt --check` failed due to rustfmt version drift — fixed via `rust-toolchain.toml` + full reformat.
 
 **Agent reviews:** pillars-reviewer — no violations. rust-idiom-reviewer — no blockers;
 two notes: (1) bare-string errors in codegen (pre-existing acknowledged debt, see
@@ -53,7 +60,6 @@ two notes: (1) bare-string errors in codegen (pre-existing acknowledged debt, se
 the x86-only assumption in `emit_module` — to be unified when multi-target lands.
 
 **What's next:**
-- Collaborator shares `daily_total.ofn` → wire up as integration test (follow-up PR)
 - `CodegenError` typed enum replacing `Result<(), String>` in `src/codegen/llvm.rs`
 - Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
 - Nested sub-pattern support in match lowering
