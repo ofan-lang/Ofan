@@ -21,27 +21,29 @@ pub(super) fn check_binary_op_types(
         return;
     }
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-            match (lhs_ty, rhs_ty) {
-                (Ty::I32, Ty::I32) | (Ty::F64, Ty::F64) => {}
-                _ => ctx.error(TypeError::Mismatch {
-                    expected: lhs_ty.clone(),
-                    found: rhs_ty.clone(),
-                    span,
-                    suggestion: Some(
-                        "compound arithmetic assignment requires both sides to be the \
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => match (lhs_ty, rhs_ty) {
+            (Ty::I32, Ty::I32) | (Ty::F64, Ty::F64) => {}
+            _ => ctx.error(TypeError::Mismatch {
+                expected: lhs_ty.clone(),
+                found: rhs_ty.clone(),
+                span,
+                suggestion: Some(
+                    "compound arithmetic assignment requires both sides to be the \
                          same numeric type (`i32` or `f64`)"
-                            .to_string(),
-                    ),
-                }),
-            }
-        }
+                        .to_string(),
+                ),
+            }),
+        },
         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
             match (lhs_ty, rhs_ty) {
                 (Ty::I32, Ty::I32) => {}
                 _ => ctx.error(TypeError::Mismatch {
                     expected: Ty::I32,
-                    found: if lhs_ty != &Ty::I32 { lhs_ty.clone() } else { rhs_ty.clone() },
+                    found: if lhs_ty != &Ty::I32 {
+                        lhs_ty.clone()
+                    } else {
+                        rhs_ty.clone()
+                    },
                     span,
                     suggestion: Some(
                         "compound bitwise assignment requires `i32` operands".to_string(),
@@ -123,12 +125,24 @@ pub(super) fn infer_unary(
             }
         },
         UnaryOp::Borrow => {
-            if matches!(operand_ty, Ty::Error) { return Ty::Error; }
-            Ty::Ref { mutable: false, region: None, inner: Box::new(operand_ty) }
+            if matches!(operand_ty, Ty::Error) {
+                return Ty::Error;
+            }
+            Ty::Ref {
+                mutable: false,
+                region: None,
+                inner: Box::new(operand_ty),
+            }
         }
         UnaryOp::BorrowMut => {
-            if matches!(operand_ty, Ty::Error) { return Ty::Error; }
-            Ty::Ref { mutable: true, region: None, inner: Box::new(operand_ty) }
+            if matches!(operand_ty, Ty::Error) {
+                return Ty::Error;
+            }
+            Ty::Ref {
+                mutable: true,
+                region: None,
+                inner: Box::new(operand_ty),
+            }
         }
     }
 }
@@ -157,25 +171,23 @@ pub(super) fn infer_binary(
     }
 
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-            match (&lhs, &rhs) {
-                (Ty::I32, Ty::I32) => Ty::I32,
-                (Ty::F64, Ty::F64) => Ty::F64,
-                _ => {
-                    ctx.error(TypeError::Mismatch {
-                        expected: lhs.clone(),
-                        found: rhs,
-                        span,
-                        suggestion: Some(
-                            "arithmetic operators require both operands to be the same \
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => match (&lhs, &rhs) {
+            (Ty::I32, Ty::I32) => Ty::I32,
+            (Ty::F64, Ty::F64) => Ty::F64,
+            _ => {
+                ctx.error(TypeError::Mismatch {
+                    expected: lhs.clone(),
+                    found: rhs,
+                    span,
+                    suggestion: Some(
+                        "arithmetic operators require both operands to be the same \
                              numeric type (`i32` or `f64`)"
-                                .to_string(),
-                        ),
-                    });
-                    Ty::Error
-                }
+                            .to_string(),
+                    ),
+                });
+                Ty::Error
             }
-        }
+        },
 
         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
             match (&lhs, &rhs) {
@@ -185,9 +197,7 @@ pub(super) fn infer_binary(
                         expected: Ty::I32,
                         found: if lhs != Ty::I32 { lhs } else { rhs },
                         span,
-                        suggestion: Some(
-                            "bitwise operators require `i32` operands".to_string(),
-                        ),
+                        suggestion: Some("bitwise operators require `i32` operands".to_string()),
                     });
                     Ty::Error
                 }
@@ -219,9 +229,7 @@ pub(super) fn infer_binary(
                     expected: Ty::Bool,
                     found: bad,
                     span,
-                    suggestion: Some(
-                        "logical `&&` / `||` require `bool` operands".to_string(),
-                    ),
+                    suggestion: Some("logical `&&` / `||` require `bool` operands".to_string()),
                 });
                 Ty::Error
             }

@@ -12,7 +12,6 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum TypeError {
     // ── Phase 1 errors ────────────────────────────────────────────────────────
-
     #[error("type mismatch at byte {}: expected {expected:?}, found {found:?}{}", span.start,
         suggestion.as_deref().map(|s| format!(" — {s}")).unwrap_or_default())]
     Mismatch {
@@ -258,7 +257,11 @@ pub enum TypeError {
     #[error("struct `{struct_name}` is missing fields at byte {}: {}\n\
         suggestion: add initializers for the missing fields",
         span.start, missing.join(", "))]
-    MissingStructFields { struct_name: String, missing: Vec<String>, span: Span },
+    MissingStructFields {
+        struct_name: String,
+        missing: Vec<String>,
+        span: Span,
+    },
 
     /// Field name not found in the struct's field table (§23).
     /// Emitted for `obj.field` when the struct has no field named `field`.
@@ -303,7 +306,6 @@ pub enum TypeError {
     },
 
     // ── Match / pattern errors ────────────────────────────────────────────────
-
     /// Match expression is non-exhaustive — one or more cases not covered by an unguarded arm.
     /// `missing` contains variant names for enums, "true"/"false" for bool,
     /// or ["_"] for open primitive types (i32, f64, etc.).
@@ -316,7 +318,11 @@ pub enum TypeError {
     #[error("match arm at byte {} has type {found_ty:?}, but earlier arms have type {first_ty:?}\n\
         suggestion: ensure all match arms produce the same type",
         arm_span.start)]
-    MatchArmMismatch { first_ty: Ty, found_ty: Ty, arm_span: Span },
+    MatchArmMismatch {
+        first_ty: Ty,
+        found_ty: Ty,
+        arm_span: Span,
+    },
 
     /// Pattern form cannot match the subject type (e.g. a literal int pattern on an enum subject).
     #[error("pattern at byte {} cannot match subject of type {subject_ty:?}\n\
@@ -335,27 +341,43 @@ pub enum TypeError {
     #[error("`{enum_name}::{variant_name}` is a unit variant and takes no payload at byte {}\n\
         suggestion: write `{variant_name}` without parentheses",
         span.start)]
-    UnitVariantInConstructorPattern { enum_name: String, variant_name: String, span: Span },
+    UnitVariantInConstructorPattern {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
 
     /// Tuple variant used without a payload pattern — bare `Variant` where `Variant(...)` is needed.
     #[error("`{enum_name}::{variant_name}` is a tuple variant and requires a payload pattern at byte {}\n\
         suggestion: write `{variant_name}(_)` to ignore the payload, or `{variant_name}(x)` to bind it",
         span.start)]
-    TupleVariantMissingPatternPayload { enum_name: String, variant_name: String, span: Span },
+    TupleVariantMissingPatternPayload {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
 
     /// Enum variant payload contains the enum's own type by value — infinite size.
     #[error("enum `{enum_name}` variant `{variant_name}` has infinite size at byte {} \
         — the payload contains `{enum_name}` by value (directly or through other types)\n\
         suggestion: wrap the recursive payload in `Box<{enum_name}>` to give it a fixed size",
         span.start)]
-    InfiniteSizeEnumVariant { enum_name: String, variant_name: String, span: Span },
+    InfiniteSizeEnumVariant {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
 
     /// Struct field contains the struct's own type by value — infinite size.
     #[error("struct `{struct_name}` field `{field_name}` has infinite size at byte {} \
         — the field type contains `{struct_name}` by value (directly or through other types)\n\
         suggestion: wrap the recursive field in `Box<{struct_name}>` to give it a fixed size",
         span.start)]
-    InfiniteSizeStructField { struct_name: String, field_name: String, span: Span },
+    InfiniteSizeStructField {
+        struct_name: String,
+        field_name: String,
+        span: Span,
+    },
 
     /// Wrong number of sub-patterns in a constructor pattern.
     #[error("pattern for `{enum_name}::{variant_name}` has {found} sub-pattern(s) at byte {}, \
@@ -397,7 +419,6 @@ pub enum TypeError {
     // ── Phase 2 placeholders ──────────────────────────────────────────────────
     // These variants are never constructed in phase 1 but must be in the enum
     // now to avoid a breaking change when phase 2 adds borrow/lifetime checking.
-
     /// Lifetime/region conflict — emitted when region constraint solving fails.
     /// Phase 2.
     #[allow(dead_code)]

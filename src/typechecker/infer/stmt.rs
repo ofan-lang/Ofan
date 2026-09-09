@@ -7,7 +7,13 @@ use crate::typechecker::ty::Ty;
 
 pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, env: &mut Env) {
     match stmt {
-        Stmt::Let { name, ty, init, span, .. } => {
+        Stmt::Let {
+            name,
+            ty,
+            init,
+            span,
+            ..
+        } => {
             let init_ty = super::expr::infer_expr(init, ctx, env);
 
             // FieldOwnNonCopy: detect partial moves through tail-position wrappers (§23).
@@ -33,7 +39,13 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
             env.define(name, binding_ty);
         }
 
-        Stmt::Const { name, ty, init, span, .. } => {
+        Stmt::Const {
+            name,
+            ty,
+            init,
+            span,
+            ..
+        } => {
             let ann_ty = super::convert::ast_ty_to_ty(ty, &[], None, *span, ctx);
             let init_ty = super::expr::infer_expr(init, ctx, env);
             super::check_types(&ann_ty, &init_ty, *span, ctx, || {
@@ -75,12 +87,28 @@ pub(super) fn infer_stmt(stmt: &Stmt<'_>, return_ty: &Ty, ctx: &mut InferCtx, en
             }
         }
 
-        Stmt::Assign { target, op, value, span } => {
+        Stmt::Assign {
+            target,
+            op,
+            value,
+            span,
+        } => {
             // FieldWriteViaSharedRef: detect `(&T).field [op]= ...` before full infer.
             // Applies to both plain and compound assignments.
-            if let Expr::Field { object, field, span: field_span, .. } = target.as_ref() {
+            if let Expr::Field {
+                object,
+                field,
+                span: field_span,
+                ..
+            } = target.as_ref()
+            {
                 let obj_ty = super::expr::infer_expr(object, ctx, env);
-                if let Ty::Ref { mutable: false, inner, .. } = &obj_ty {
+                if let Ty::Ref {
+                    mutable: false,
+                    inner,
+                    ..
+                } = &obj_ty
+                {
                     let type_name = match inner.as_ref() {
                         Ty::Named(n) => n.clone(),
                         t => format!("{t}"),

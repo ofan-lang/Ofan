@@ -49,7 +49,11 @@ impl InferResult {
 
     /// GEP index for `field_name` in `type_name`, in source declaration order.
     pub fn struct_field_index(&self, type_name: &str, field_name: &str) -> Option<usize> {
-        self.struct_defs.get(type_name)?.field_order.iter().position(|f| f == field_name)
+        self.struct_defs
+            .get(type_name)?
+            .field_order
+            .iter()
+            .position(|f| f == field_name)
     }
 
     /// Resolved `Ty` of `field_name` inside `type_name`.
@@ -59,7 +63,9 @@ impl InferResult {
 
     /// Field names in source declaration order.
     pub fn struct_field_names(&self, type_name: &str) -> Option<&[String]> {
-        self.struct_defs.get(type_name).map(|info| info.field_order.as_slice())
+        self.struct_defs
+            .get(type_name)
+            .map(|info| info.field_order.as_slice())
     }
 
     pub(crate) fn enum_defs(&self) -> &HashMap<String, EnumInfo> {

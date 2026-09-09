@@ -1,12 +1,14 @@
-mod stmt;
+mod convert;
 mod expr;
 mod ops;
-mod convert;
 mod self_access;
+mod stmt;
 
-use crate::ast::{Ast, Block, CopyMove, EnumDef, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type};
+use crate::ast::{
+    Ast, Block, CopyMove, EnumDef, Expr, FunctionDef, ImplBlock, Item, Stmt, StructDef, Type,
+};
 use crate::lexer::token::Span;
-use crate::typechecker::env::{Env, EnumInfo, InferCtx, StructInfo};
+use crate::typechecker::env::{EnumInfo, Env, InferCtx, StructInfo};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{FnSig, Ty};
 use crate::typechecker::InferResult;
@@ -98,7 +100,12 @@ fn collect_fn_sig(f: &FunctionDef<'_>, ctx: &mut InferCtx) {
         .as_ref()
         .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, None, f.span, ctx))
         .unwrap_or(Ty::Unit);
-    let sig = FnSig { params, return_ty, is_generic, self_consuming: false };
+    let sig = FnSig {
+        params,
+        return_ty,
+        is_generic,
+        self_consuming: false,
+    };
 
     if let Some((_, first_span)) = ctx.fn_sigs.get(f.name) {
         ctx.error(TypeError::DuplicateFn {
@@ -125,17 +132,27 @@ fn collect_impl_sigs(block: &ImplBlock<'_>, ctx: &mut InferCtx) {
 
         let params: Vec<Ty> = param_slice
             .iter()
-            .map(|p| convert::ast_ty_to_ty(&p.ty, &f.generic_params, Some(block.type_name), p.span, ctx))
+            .map(|p| {
+                convert::ast_ty_to_ty(&p.ty, &f.generic_params, Some(block.type_name), p.span, ctx)
+            })
             .collect();
         let return_ty = f
             .return_ty
             .as_ref()
-            .map(|t| convert::ast_ty_to_ty(t, &f.generic_params, Some(block.type_name), f.span, ctx))
+            .map(|t| {
+                convert::ast_ty_to_ty(t, &f.generic_params, Some(block.type_name), f.span, ctx)
+            })
             .unwrap_or(Ty::Unit);
-        let sig = FnSig { params, return_ty, is_generic, self_consuming };
+        let sig = FnSig {
+            params,
+            return_ty,
+            is_generic,
+            self_consuming,
+        };
 
         // Re-borrow each iteration to avoid holding &mut across ctx.error().
-        if let Some((_, first_span)) = ctx.impl_sigs
+        if let Some((_, first_span)) = ctx
+            .impl_sigs
             .get(block.type_name)
             .and_then(|ns| ns.get(f.name))
         {
@@ -165,13 +182,16 @@ fn collect_struct_name(def: &StructDef<'_>, ctx: &mut InferCtx) {
         });
         return;
     }
-    ctx.struct_defs.insert(def.name.to_string(), StructInfo {
-        name_span: def.name_span,
-        fields: std::collections::HashMap::new(),
-        field_order: Vec::new(),
-        copy_override: None,
-        is_generic: !def.generic_params.is_empty(),
-    });
+    ctx.struct_defs.insert(
+        def.name.to_string(),
+        StructInfo {
+            name_span: def.name_span,
+            fields: std::collections::HashMap::new(),
+            field_order: Vec::new(),
+            copy_override: None,
+            is_generic: !def.generic_params.is_empty(),
+        },
+    );
 }
 
 fn collect_struct_fields(def: &StructDef<'_>, ctx: &mut InferCtx) {
@@ -204,13 +224,16 @@ fn collect_enum_name(def: &EnumDef<'_>, ctx: &mut InferCtx) {
         });
         return;
     }
-    ctx.enum_defs.insert(def.name.to_string(), EnumInfo {
-        name_span: def.name_span,
-        variants: std::collections::HashMap::new(),
-        variant_order: Vec::new(),
-        copy_override: None,
-        is_generic: !def.generic_params.is_empty(),
-    });
+    ctx.enum_defs.insert(
+        def.name.to_string(),
+        EnumInfo {
+            name_span: def.name_span,
+            variants: std::collections::HashMap::new(),
+            variant_order: Vec::new(),
+            copy_override: None,
+            is_generic: !def.generic_params.is_empty(),
+        },
+    );
 }
 
 fn collect_enum_variants(def: &EnumDef<'_>, ctx: &mut InferCtx) {
@@ -232,7 +255,9 @@ fn collect_enum_variants(def: &EnumDef<'_>, ctx: &mut InferCtx) {
         }
         first_spans.insert(v.name.to_string(), v.name_span);
 
-        let field_tys: Vec<crate::typechecker::ty::Ty> = v.fields.iter()
+        let field_tys: Vec<crate::typechecker::ty::Ty> = v
+            .fields
+            .iter()
             .map(|ty| convert::ast_ty_to_ty(ty, &gp, None, v.span, ctx))
             .collect();
         variants.insert(v.name.to_string(), field_tys);
@@ -276,7 +301,9 @@ fn check_infinite_size_types(ctx: &mut InferCtx) {
         }
     }
 
-    let all_names: Vec<String> = ctx.struct_defs.keys()
+    let all_names: Vec<String> = ctx
+        .struct_defs
+        .keys()
         .chain(ctx.enum_defs.keys())
         .cloned()
         .collect();
@@ -353,7 +380,14 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     env.push_scope();
 
     for param in &f.params {
-        let ty = bind_param(param.name, &param.ty, &f.generic_params, param.span, ctx, env);
+        let ty = bind_param(
+            param.name,
+            &param.ty,
+            &f.generic_params,
+            param.span,
+            ctx,
+            env,
+        );
         env.define(param.name, ty);
     }
 
@@ -368,7 +402,10 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     ctx.current_return_ty.pop();
 
     // FieldOwnNonCopy: detect partial moves in implicit function return (tail expr, §23).
-    let tail_owns_non_copy = f.body.tail.as_ref()
+    let tail_owns_non_copy = f
+        .body
+        .tail
+        .as_ref()
         .is_some_and(|tail| check_tail_field_own_non_copy(tail, ctx));
 
     // Check that the body's tail type matches the declared return type.
@@ -377,11 +414,12 @@ fn infer_fn(f: &FunctionDef<'_>, ctx: &mut InferCtx, env: &mut Env) {
     // error is the root cause; the type error is noise on top of it.
     // Also suppress when the body has no tail but ends with an explicit `return` — the
     // block's Unit tail type is spurious because control flow never reaches the end.
-    let ends_with_return = f.body.tail.is_none()
-        && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
+    let ends_with_return =
+        f.body.tail.is_none() && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
     if !tail_owns_non_copy
         && !ends_with_return
-        && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
+        && !matches!(body_ty, Ty::Error)
+        && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
         ctx.error(TypeError::ReturnMismatch {
@@ -440,7 +478,13 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
             }
         } else {
             // Non-self param: Self in type position resolves via impl context.
-            convert::ast_ty_to_ty(&param.ty, &f.generic_params, Some(impl_type_name), param.span, ctx)
+            convert::ast_ty_to_ty(
+                &param.ty,
+                &f.generic_params,
+                Some(impl_type_name),
+                param.span,
+                ctx,
+            )
         };
         env.define(param.name, ty);
     }
@@ -456,14 +500,18 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
     ctx.current_return_ty.pop();
 
     // FieldOwnNonCopy: detect partial moves in implicit method return (tail expr, §23).
-    let tail_owns_non_copy = f.body.tail.as_ref()
+    let tail_owns_non_copy = f
+        .body
+        .tail
+        .as_ref()
         .is_some_and(|tail| check_tail_field_own_non_copy(tail, ctx));
 
-    let ends_with_return = f.body.tail.is_none()
-        && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
+    let ends_with_return =
+        f.body.tail.is_none() && matches!(f.body.stmts.last(), Some(Stmt::Return { .. }));
     if !tail_owns_non_copy
         && !ends_with_return
-        && !matches!(body_ty, Ty::Error) && !matches!(declared_return, Ty::Error)
+        && !matches!(body_ty, Ty::Error)
+        && !matches!(declared_return, Ty::Error)
         && body_ty != declared_return
     {
         ctx.error(TypeError::ReturnMismatch {
@@ -482,7 +530,12 @@ fn infer_method(f: &FunctionDef<'_>, impl_type_name: &str, ctx: &mut InferCtx, e
 
 // ─── Block inference ──────────────────────────────────────────────────────────
 
-pub(super) fn infer_block(block: &Block<'_>, return_ty: &Ty, ctx: &mut InferCtx, env: &mut Env) -> Ty {
+pub(super) fn infer_block(
+    block: &Block<'_>,
+    return_ty: &Ty,
+    ctx: &mut InferCtx,
+    env: &mut Env,
+) -> Ty {
     env.push_scope();
 
     for s in &block.stmts {
@@ -549,7 +602,11 @@ pub(super) fn check_field_own_non_copy(
     if matches!(field_ty, Ty::Error) {
         return false;
     }
-    let obj_ty = ctx.type_map.get(&object.span()).cloned().unwrap_or(Ty::Error);
+    let obj_ty = ctx
+        .type_map
+        .get(&object.span())
+        .cloned()
+        .unwrap_or(Ty::Error);
     let struct_ty = match &obj_ty {
         Ty::Ref { inner, .. } => inner.as_ref().clone(),
         t => t.clone(),
@@ -580,7 +637,12 @@ pub(super) fn check_field_own_non_copy(
 /// so `ctx.type_map` is populated for every `Expr::Field` span we encounter.
 pub(super) fn check_tail_field_own_non_copy(expr: &Expr<'_>, ctx: &mut InferCtx) -> bool {
     match expr {
-        Expr::Field { object, field, field_span, span } => {
+        Expr::Field {
+            object,
+            field,
+            field_span,
+            span,
+        } => {
             let field_ty = ctx.type_map.get(span).cloned().unwrap_or(Ty::Error);
             check_field_own_non_copy(object, field, *field_span, &field_ty, ctx)
         }
@@ -588,7 +650,11 @@ pub(super) fn check_tail_field_own_non_copy(expr: &Expr<'_>, ctx: &mut InferCtx)
             Some(e) => check_tail_field_own_non_copy(e, ctx),
             None => false,
         },
-        Expr::If { then_block, else_branch, .. } => {
+        Expr::If {
+            then_block,
+            else_branch,
+            ..
+        } => {
             let then_fired = match &then_block.tail {
                 Some(e) => check_tail_field_own_non_copy(e, ctx),
                 None => false,
@@ -599,9 +665,9 @@ pub(super) fn check_tail_field_own_non_copy(expr: &Expr<'_>, ctx: &mut InferCtx)
             };
             then_fired || else_fired
         }
-        Expr::Match { arms, .. } => {
-            arms.iter().any(|arm| check_tail_field_own_non_copy(&arm.body, ctx))
-        }
+        Expr::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| check_tail_field_own_non_copy(&arm.body, ctx)),
         // Any other expression is not a transparent tail wrapper (Unary, Binary, Call, etc.).
         _ => false,
     }
@@ -626,7 +692,9 @@ pub(super) fn is_copy(ty: &Ty, ctx: &InferCtx) -> bool {
                     Some(CopyMove::Copy) => true,
                     Some(CopyMove::Move) => false,
                     // Enum is Copy iff all variant field types are Copy.
-                    None => info.variants.values()
+                    None => info
+                        .variants
+                        .values()
                         .flat_map(|fields| fields.iter())
                         .all(|fty| is_copy(fty, ctx)),
                 }
@@ -668,7 +736,9 @@ mod tests {
         let result = typechecker::infer(&ast)?;
         // Return the type of the tail expression of the first function's body.
         // Fall back to Unit if no tail (void function).
-        let Item::Function(f) = &ast.items[0] else { panic!("first item must be a function") };
+        let Item::Function(f) = &ast.items[0] else {
+            panic!("first item must be a function")
+        };
         let tail_span = f
             .body
             .tail
@@ -726,12 +796,18 @@ mod tests {
 
     #[test]
     fn infer_binary_arithmetic() {
-        assert_eq!(check_fn("fn double(n: i32) -> i32 { n * 2 }").unwrap(), Ty::I32);
+        assert_eq!(
+            check_fn("fn double(n: i32) -> i32 { n * 2 }").unwrap(),
+            Ty::I32
+        );
     }
 
     #[test]
     fn infer_comparison_returns_bool() {
-        assert_eq!(check_fn("fn gt(a: i32, b: i32) -> bool { a > b }").unwrap(), Ty::Bool);
+        assert_eq!(
+            check_fn("fn gt(a: i32, b: i32) -> bool { a > b }").unwrap(),
+            Ty::Bool
+        );
     }
 
     #[test]
@@ -749,7 +825,10 @@ mod tests {
 
     #[test]
     fn infer_unary_not() {
-        assert_eq!(check_fn("fn inv(b: bool) -> bool { !b }").unwrap(), Ty::Bool);
+        assert_eq!(
+            check_fn("fn inv(b: bool) -> bool { !b }").unwrap(),
+            Ty::Bool
+        );
     }
 
     #[test]
@@ -795,7 +874,8 @@ mod tests {
     #[test]
     fn infer_while_is_unit() {
         assert_eq!(
-            check_fn("fn count(n: i32) { let mut x: i32 = 0; while x < n { x = x + 1; } }").unwrap(),
+            check_fn("fn count(n: i32) { let mut x: i32 = 0; while x < n { x = x + 1; } }")
+                .unwrap(),
             Ty::Unit
         );
     }
@@ -808,7 +888,11 @@ mod tests {
         assert!(!errs.is_empty());
         assert!(matches!(
             errs[0],
-            TypeError::ReturnMismatch { expected: Ty::I32, found: Ty::Bool, .. }
+            TypeError::ReturnMismatch {
+                expected: Ty::I32,
+                found: Ty::Bool,
+                ..
+            }
         ));
     }
 
@@ -825,7 +909,11 @@ mod tests {
         assert!(!errs.is_empty());
         assert!(matches!(
             errs[0],
-            TypeError::Mismatch { expected: Ty::Bool, found: Ty::I32, .. }
+            TypeError::Mismatch {
+                expected: Ty::Bool,
+                found: Ty::I32,
+                ..
+            }
         ));
     }
 
@@ -833,23 +921,23 @@ mod tests {
     fn error_non_bool_condition() {
         let errs = check_fn_errors("fn bad(n: i32) -> i32 { if n { 1 } else { 2 } }");
         assert!(!errs.is_empty());
-        assert!(matches!(errs[0], TypeError::NonBoolCondition { found: Ty::I32, .. }));
+        assert!(matches!(
+            errs[0],
+            TypeError::NonBoolCondition { found: Ty::I32, .. }
+        ));
     }
 
     #[test]
     fn error_branch_type_mismatch() {
-        let errs = check_fn_errors(
-            "fn bad(b: bool) -> i32 { if b { 1 } else { true } }",
-        );
+        let errs = check_fn_errors("fn bad(b: bool) -> i32 { if b { 1 } else { true } }");
         assert!(!errs.is_empty());
         assert!(matches!(errs[0], TypeError::BranchMismatch { .. }));
     }
 
     #[test]
     fn error_arg_count_mismatch() {
-        let errs = check_fn_errors(
-            "fn double(n: i32) -> i32 { n * 2 } fn bad() -> i32 { double(1, 2) }",
-        );
+        let errs =
+            check_fn_errors("fn double(n: i32) -> i32 { n * 2 } fn bad() -> i32 { double(1, 2) }");
         assert!(!errs.is_empty());
         assert!(matches!(errs[0], TypeError::ArgCountMismatch { .. }));
     }
@@ -866,7 +954,9 @@ mod tests {
     #[test]
     fn deferred_field_access_on_primitive_non_fatal() {
         // i32 is not a struct — deferred with "field access on non-struct type", still non-fatal.
-        let tokens = Lexer::new("fn f(n: i32) { let _x = n.foo; }").lex().expect("lex");
+        let tokens = Lexer::new("fn f(n: i32) { let _x = n.foo; }")
+            .lex()
+            .expect("lex");
         let ast = Parser::new(tokens).parse().expect("parse");
         assert!(typechecker::infer(&ast).is_ok());
     }
@@ -891,7 +981,9 @@ mod tests {
         // Previously `deferred_method_call_non_fatal`. Now that method calls are
         // resolved, calling `.abs()` on `i32` (which has no impl block) is a fatal error.
         let errs = infer_impl_errors("fn f(n: i32) { n.abs(); }");
-        assert!(errs.iter().any(|e| matches!(e, TypeError::MethodNotFound { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::MethodNotFound { .. })));
     }
 
     #[test]
@@ -910,9 +1002,13 @@ mod tests {
         let src = "impl Foo { fn other(self) {} fn bad(self) { self.missing(); } }";
         let errs = infer_impl_errors(src);
         assert!(errs.iter().any(|e| {
-            if let TypeError::MethodNotFound { method_name, suggestion, .. } = e {
-                method_name == "missing"
-                    && suggestion.as_deref().unwrap_or("").contains("other")
+            if let TypeError::MethodNotFound {
+                method_name,
+                suggestion,
+                ..
+            } = e
+            {
+                method_name == "missing" && suggestion.as_deref().unwrap_or("").contains("other")
             } else {
                 false
             }
@@ -990,8 +1086,13 @@ mod tests {
             fn test(self) { self.add(true); } \
         }";
         let errs = infer_impl_errors(src);
-        assert!(errs.iter().any(|e| matches!(e,
-            TypeError::Mismatch { expected: Ty::I32, found: Ty::Bool, .. }
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            TypeError::Mismatch {
+                expected: Ty::I32,
+                found: Ty::Bool,
+                ..
+            }
         )));
     }
 
@@ -1034,7 +1135,9 @@ mod tests {
     #[test]
     fn error_duplicate_free_fn() {
         let errs = check_fn_errors("fn foo() {} fn foo() {}");
-        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateFn { name, .. } if name == "foo")));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::DuplicateFn { name, .. } if name == "foo")));
     }
 
     #[test]
@@ -1085,8 +1188,12 @@ mod tests {
             Ok(_) => vec![],
             Err(e) => e,
         };
-        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateFn { .. })));
-        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateMethod { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::DuplicateFn { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::DuplicateMethod { .. })));
     }
 
     // ── Struct field access (§23) ─────────────────────────────────────────────
@@ -1125,7 +1232,9 @@ mod tests {
         let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
                    fn f(e: Entity) { let _s = e.sprite; }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+        assert!(errs.iter().any(
+            |e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")
+        ));
     }
 
     #[test]
@@ -1133,7 +1242,9 @@ mod tests {
         let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite } \
                    fn f(e: Entity) -> Sprite { return e.sprite; }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+        assert!(errs.iter().any(
+            |e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")
+        ));
     }
 
     #[test]
@@ -1142,7 +1253,9 @@ mod tests {
                    fn consume(s: Sprite) {} \
                    fn f(e: Entity) { consume(e.sprite); }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")));
+        assert!(errs.iter().any(
+            |e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "sprite")
+        ));
     }
 
     #[test]
@@ -1161,9 +1274,16 @@ mod tests {
         let src = "struct Point { x: f64, y: f64 } fn f(p: Point) -> f64 { p.z }";
         let errs = infer_program_errors(src);
         assert!(errs.iter().any(|e| {
-            if let TypeError::FieldNotFound { field_name, available, .. } = e {
+            if let TypeError::FieldNotFound {
+                field_name,
+                available,
+                ..
+            } = e
+            {
                 field_name == "z" && available.contains(&"x".to_string())
-            } else { false }
+            } else {
+                false
+            }
         }));
     }
 
@@ -1188,7 +1308,9 @@ mod tests {
         // `move struct` with an i32 field: the struct is Move despite i32 being Copy.
         let src = "move struct Fd { raw: i32 } fn f(s: Fd) { let _x = s.raw; }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "raw")));
+        assert!(errs.iter().any(
+            |e| matches!(e, TypeError::FieldOwnNonCopy { field_name, .. } if field_name == "raw")
+        ));
     }
 
     #[test]
@@ -1311,14 +1433,18 @@ mod tests {
         // helper hits _ => false → no FieldOwnNonCopy.
         let src = "move struct Sprite { id: i32 } struct Entity { sprite: Sprite }                    fn f(e: &Entity) { let _r = { &e.sprite }; }";
         let errs = infer_program_errors(src);
-        assert!(!errs.iter().any(|e| matches!(e, TypeError::FieldOwnNonCopy { .. })));
+        assert!(!errs
+            .iter()
+            .any(|e| matches!(e, TypeError::FieldOwnNonCopy { .. })));
     }
 
     #[test]
     fn error_duplicate_struct() {
         let src = "struct Foo { x: i32 } struct Foo { y: bool }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateStruct { name, .. } if name == "Foo")));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::DuplicateStruct { name, .. } if name == "Foo")));
     }
 
     // ── Struct literals ───────────────────────────────────────────────────────
@@ -1347,21 +1473,31 @@ mod tests {
     fn struct_lit_undefined_struct() {
         let src = "fn f() { let _ = Unknown { x = 1 }; }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::UndefinedStruct { name, .. } if name == "Unknown")));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::UndefinedStruct { name, .. } if name == "Unknown")));
     }
 
     #[test]
     fn struct_lit_unknown_field() {
         let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0, z = 2.0 }}; }}");
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::FieldNotFound { field_name, .. } if field_name == "z")));
+        assert!(errs.iter().any(
+            |e| matches!(e, TypeError::FieldNotFound { field_name, .. } if field_name == "z")
+        ));
     }
 
     #[test]
     fn struct_lit_wrong_field_type() {
         let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = true, y = 2.0 }}; }}");
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::Mismatch { expected: Ty::F64, .. })));
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            TypeError::Mismatch {
+                expected: Ty::F64,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1373,7 +1509,8 @@ mod tests {
 
     #[test]
     fn struct_lit_duplicate_field() {
-        let src = &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0, x = 2.0, y = 0.0 }}; }}");
+        let src =
+            &format!("{POINT_DEF} fn f() {{ let _ = Point {{ x = 1.0, x = 2.0, y = 0.0 }}; }}");
         let errs = infer_program_errors(src);
         assert!(errs.iter().any(|e| matches!(e, TypeError::DuplicateStructField { field_name, .. } if field_name == "x")),
             "expected DuplicateStructField for x, got: {:?}", errs);
@@ -1387,7 +1524,8 @@ mod tests {
 
     #[test]
     fn struct_lit_as_return_value() {
-        let src = &format!("{POINT_DEF} fn f() -> Point {{ return Point {{ x = 0.0, y = 0.0 }}; }}");
+        let src =
+            &format!("{POINT_DEF} fn f() -> Point {{ return Point {{ x = 0.0, y = 0.0 }}; }}");
         assert!(infer_program_errors(src).is_empty());
     }
 
@@ -1412,7 +1550,8 @@ mod tests {
         // Same bug in the else branch.
         assert!(check_fn_errors(
             "fn f(b: bool) -> i32 { if b { let _ = 1; } else { return 99; } 0 }"
-        ).is_empty());
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1423,7 +1562,8 @@ mod tests {
                 while i < 10 { if i == 5 { return i; } i = i + 1; } \
                 0 \
             }"
-        ).is_empty());
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1434,7 +1574,8 @@ mod tests {
                 loop { i = i + 1; if i >= 5 { return i; } } \
                 0 \
             }"
-        ).is_empty());
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1445,7 +1586,8 @@ mod tests {
                 if a { return 1; } else { if b { return 2; } } \
                 0 \
             }"
-        ).is_empty());
+        )
+        .is_empty());
     }
 
     // ── Bug 2 regression: compound assignment type checking ───────────────────
@@ -1461,9 +1603,18 @@ mod tests {
         // `x += true` must be a real Mismatch, not Deferred.
         // Proves Deferred was not silently hiding a genuine type-safety gap.
         let errs = check_fn_errors("fn f() -> i32 { let mut x = 0; x += true; x }");
-        assert!(errs.iter().any(|e| matches!(e,
-            TypeError::Mismatch { expected: Ty::I32, found: Ty::Bool, .. }
-        )), "expected Mismatch(I32, Bool), got: {:?}", errs);
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                TypeError::Mismatch {
+                    expected: Ty::I32,
+                    found: Ty::Bool,
+                    ..
+                }
+            )),
+            "expected Mismatch(I32, Bool), got: {:?}",
+            errs
+        );
     }
 
     #[test]
@@ -1481,9 +1632,13 @@ mod tests {
         let src = "struct Point { x: i32 } fn f(p: &Point) { p.x += 1; }";
         let errs = infer_program_errors(src);
         assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}", errs);
-        assert!(matches!(&errs[0],
-            TypeError::FieldWriteViaSharedRef { field_name, .. } if field_name == "x"
-        ), "expected FieldWriteViaSharedRef, got: {:?}", errs[0]);
+        assert!(
+            matches!(&errs[0],
+                TypeError::FieldWriteViaSharedRef { field_name, .. } if field_name == "x"
+            ),
+            "expected FieldWriteViaSharedRef, got: {:?}",
+            errs[0]
+        );
     }
 
     // ── Enum declarations (§20) ───────────────────────────────────────────────
@@ -1779,8 +1934,13 @@ mod tests {
                        match s { Circle(r, extra) => 0, }
                    }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e,
-            TypeError::PatternArgCountMismatch { expected: 1, found: 2, .. }
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            TypeError::PatternArgCountMismatch {
+                expected: 1,
+                found: 2,
+                ..
+            }
         )));
     }
 
@@ -1803,7 +1963,9 @@ mod tests {
                        match d { North => 1, South => true, }
                    }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::MatchArmMismatch { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::MatchArmMismatch { .. })));
     }
 
     // T_m_14: unreachable arm — explicit variant arm after unguarded wildcard.
@@ -1814,7 +1976,9 @@ mod tests {
                        match d { _ => 0, North => 1, }
                    }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::UnreachableArm { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::UnreachableArm { .. })));
     }
 
     // T_m_15: unreachable arm — explicit arm after unguarded binding.
@@ -1825,7 +1989,9 @@ mod tests {
                        match d { x => 0, North => 1, }
                    }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::UnreachableArm { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::UnreachableArm { .. })));
     }
 
     // T_m_16: qualified pattern in match arm — clear parse error, not "expected =>".
@@ -1835,8 +2001,10 @@ mod tests {
         let result = parse_expr("match s { Shape.Circle(r) => 0, _ => 1, }");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("qualified patterns") || msg.contains("bare variant"),
-            "expected qualified-pattern message, got: {msg}");
+        assert!(
+            msg.contains("qualified patterns") || msg.contains("bare variant"),
+            "expected qualified-pattern message, got: {msg}"
+        );
     }
 
     // T_m_17: or-pattern counts both variants for exhaustiveness.
@@ -1925,7 +2093,8 @@ mod tests {
     fn error_infinite_size_mixed_cycle() {
         let src = "enum A { X(B) } struct B { a: A }";
         let errs = infer_program_errors(src);
-        assert!(errs.iter().any(|e| matches!(e,
+        assert!(errs.iter().any(|e| matches!(
+            e,
             TypeError::InfiniteSizeEnumVariant { .. } | TypeError::InfiniteSizeStructField { .. }
         )));
     }
@@ -1938,5 +2107,4 @@ mod tests {
                    fn f(p: Pixel) -> i32 { 0 }";
         assert!(infer_program(src).is_ok());
     }
-
 }

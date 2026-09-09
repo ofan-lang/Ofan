@@ -18,7 +18,11 @@ impl<'src> Parser<'src> {
             let stmt = self.parse_stmt()?;
             match stmt {
                 // Expression immediately before `}` without `;` is the tail value.
-                Stmt::Expr { expr, has_semicolon: false, .. } => {
+                Stmt::Expr {
+                    expr,
+                    has_semicolon: false,
+                    ..
+                } => {
                     tail = Some(expr);
                     break;
                 }
@@ -27,24 +31,33 @@ impl<'src> Parser<'src> {
         }
 
         let end = self.eat(&Token::RBrace)?.end;
-        Ok(Block { stmts, tail, span: Span { start, end } })
+        Ok(Block {
+            stmts,
+            tail,
+            span: Span { start, end },
+        })
     }
 
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt<'src>, ParseError> {
         match self.peek() {
-            Token::Let      => self.parse_let(),
-            Token::Const    => self.parse_const(),
-            Token::Return   => self.parse_return(),
-            Token::Break    => self.parse_break(),
+            Token::Let => self.parse_let(),
+            Token::Const => self.parse_const(),
+            Token::Return => self.parse_return(),
+            Token::Break => self.parse_break(),
             Token::Continue => self.parse_continue(),
-            _               => self.parse_expr_stmt(),
+            _ => self.parse_expr_stmt(),
         }
     }
 
     fn parse_let(&mut self) -> Result<Stmt<'src>, ParseError> {
         let start = self.peek_span().start;
         self.eat(&Token::Let)?;
-        let mutable = if matches!(self.peek(), Token::Mut) { self.advance(); true } else { false };
+        let mutable = if matches!(self.peek(), Token::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let (name, name_span) = self.eat_ident()?;
         let ty = if matches!(self.peek(), Token::Colon) {
             self.advance();
@@ -55,7 +68,14 @@ impl<'src> Parser<'src> {
         self.eat(&Token::Equals)?;
         let init = Box::new(self.parse_expr()?);
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Let { mutable, name, name_span, ty, init, span: Span { start, end } })
+        Ok(Stmt::Let {
+            mutable,
+            name,
+            name_span,
+            ty,
+            init,
+            span: Span { start, end },
+        })
     }
 
     fn parse_const(&mut self) -> Result<Stmt<'src>, ParseError> {
@@ -67,7 +87,13 @@ impl<'src> Parser<'src> {
         self.eat(&Token::Equals)?;
         let init = Box::new(self.parse_expr()?);
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Const { name, name_span, ty, init, span: Span { start, end } })
+        Ok(Stmt::Const {
+            name,
+            name_span,
+            ty,
+            init,
+            span: Span { start, end },
+        })
     }
 
     fn parse_return(&mut self) -> Result<Stmt<'src>, ParseError> {
@@ -79,7 +105,10 @@ impl<'src> Parser<'src> {
             Some(Box::new(self.parse_expr()?))
         };
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Return { value, span: Span { start, end } })
+        Ok(Stmt::Return {
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_break(&mut self) -> Result<Stmt<'src>, ParseError> {
@@ -91,14 +120,19 @@ impl<'src> Parser<'src> {
             Some(Box::new(self.parse_expr()?))
         };
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Break { value, span: Span { start, end } })
+        Ok(Stmt::Break {
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_continue(&mut self) -> Result<Stmt<'src>, ParseError> {
         let start = self.peek_span().start;
         self.eat(&Token::Continue)?;
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Continue { span: Span { start, end } })
+        Ok(Stmt::Continue {
+            span: Span { start, end },
+        })
     }
 
     /// Expression statement — also handles assignment.
@@ -107,11 +141,11 @@ impl<'src> Parser<'src> {
         let expr = self.parse_expr()?;
 
         let assign_op: Option<Option<BinOp>> = match self.peek() {
-            Token::Equals    => Some(None),
-            Token::PlusEq    => Some(Some(BinOp::Add)),
-            Token::MinusEq   => Some(Some(BinOp::Sub)),
-            Token::StarEq    => Some(Some(BinOp::Mul)),
-            Token::SlashEq   => Some(Some(BinOp::Div)),
+            Token::Equals => Some(None),
+            Token::PlusEq => Some(Some(BinOp::Add)),
+            Token::MinusEq => Some(Some(BinOp::Sub)),
+            Token::StarEq => Some(Some(BinOp::Mul)),
+            Token::SlashEq => Some(Some(BinOp::Div)),
             Token::PercentEq => Some(Some(BinOp::Mod)),
             _ => None,
         };
@@ -120,7 +154,12 @@ impl<'src> Parser<'src> {
             self.advance();
             let value = Box::new(self.parse_expr()?);
             let end = self.eat(&Token::Semicolon)?.end;
-            return Ok(Stmt::Assign { target: Box::new(expr), op, value, span: Span { start, end } });
+            return Ok(Stmt::Assign {
+                target: Box::new(expr),
+                op,
+                value,
+                span: Span { start, end },
+            });
         }
 
         // Block-like expressions (if/while/loop/for/match/block) don't require a
@@ -145,17 +184,29 @@ impl<'src> Parser<'src> {
             };
             let has_semicolon = explicit_semi || !matches!(self.peek(), Token::RBrace | Token::Eof);
             let end = expr.span().end;
-            return Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon, span: Span { start, end } });
+            return Ok(Stmt::Expr {
+                expr: Box::new(expr),
+                has_semicolon,
+                span: Span { start, end },
+            });
         }
 
         // Tail position: expression immediately before `}` — no `;` needed.
         if matches!(self.peek(), Token::RBrace | Token::Eof) {
             let end = expr.span().end;
-            return Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon: false, span: Span { start, end } });
+            return Ok(Stmt::Expr {
+                expr: Box::new(expr),
+                has_semicolon: false,
+                span: Span { start, end },
+            });
         }
 
         let end = self.eat(&Token::Semicolon)?.end;
-        Ok(Stmt::Expr { expr: Box::new(expr), has_semicolon: true, span: Span { start, end } })
+        Ok(Stmt::Expr {
+            expr: Box::new(expr),
+            has_semicolon: true,
+            span: Span { start, end },
+        })
     }
 }
 
@@ -169,13 +220,28 @@ mod tests {
     #[test]
     fn parse_let_stmt() {
         let stmt = parse_stmt("let x: i32 = 5;").unwrap();
-        assert!(matches!(stmt, Stmt::Let { mutable: false, name: "x", ty: Some(_), .. }));
+        assert!(matches!(
+            stmt,
+            Stmt::Let {
+                mutable: false,
+                name: "x",
+                ty: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_let_mut_stmt() {
         let stmt = parse_stmt("let mut count: i32 = 0;").unwrap();
-        assert!(matches!(stmt, Stmt::Let { mutable: true, name: "count", .. }));
+        assert!(matches!(
+            stmt,
+            Stmt::Let {
+                mutable: true,
+                name: "count",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -217,14 +283,26 @@ mod tests {
     #[test]
     fn parse_expr_stmt() {
         let stmt = parse_stmt("foo();").unwrap();
-        assert!(matches!(stmt, Stmt::Expr { has_semicolon: true, .. }));
+        assert!(matches!(
+            stmt,
+            Stmt::Expr {
+                has_semicolon: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_expr_stmt_no_semicolon_at_eof() {
         // parse_expr_stmt sets has_semicolon: false at Eof (no enclosing block)
         let stmt = parse_stmt("foo()").unwrap();
-        assert!(matches!(stmt, Stmt::Expr { has_semicolon: false, .. }));
+        assert!(matches!(
+            stmt,
+            Stmt::Expr {
+                has_semicolon: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -240,7 +318,13 @@ mod tests {
         use crate::parser::parse_block;
         let block = parse_block("{ foo(); }").unwrap();
         assert!(block.tail.is_none());
-        assert!(matches!(block.stmts[0], Stmt::Expr { has_semicolon: true, .. }));
+        assert!(matches!(
+            block.stmts[0],
+            Stmt::Expr {
+                has_semicolon: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -252,7 +336,12 @@ mod tests {
     #[test]
     fn parse_compound_assignment() {
         let stmt = parse_stmt("x += 1;").unwrap();
-        assert!(matches!(stmt, Stmt::Assign { op: Some(BinOp::Add), .. }));
+        assert!(matches!(
+            stmt,
+            Stmt::Assign {
+                op: Some(BinOp::Add),
+                ..
+            }
+        ));
     }
 }
-

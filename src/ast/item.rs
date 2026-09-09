@@ -1,5 +1,5 @@
-use crate::lexer::Span;
 use super::{Block, Type};
+use crate::lexer::Span;
 
 /// Top-level output of the parser: an ordered list of top-level items.
 #[derive(Debug, Clone, PartialEq)]

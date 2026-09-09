@@ -260,6 +260,7 @@ dependencies = [
 name = "ofan"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "clap",
  "inkwell",
  "insta",

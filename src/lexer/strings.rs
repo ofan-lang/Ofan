@@ -41,7 +41,9 @@ mod tests {
     use crate::lexer::{LexError, Lexer, Token};
 
     fn lex(src: &str) -> Result<Vec<Token<'_>>, LexError> {
-        Lexer::new(src).lex().map(|ts| ts.into_iter().map(|(t, _)| t).collect())
+        Lexer::new(src)
+            .lex()
+            .map(|ts| ts.into_iter().map(|(t, _)| t).collect())
     }
 
     #[test]

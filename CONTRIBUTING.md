@@ -9,7 +9,45 @@
   Common installs:
   - Ubuntu/Debian: `apt install llvm-<version>-dev`
   - macOS: `brew install llvm`
-  - Windows: use the LLVM pre-built binaries from llvm.org and set `LLVM_SYS_<VER>_PREFIX`
+  - Windows: see the **Windows prerequisites** section below.
+
+### Windows prerequisites
+
+Two things are required on Windows in addition to Rust:
+
+**1. LLVM static libraries**
+
+The LLVM package from llvm.org does not include the static `.lib` files that `inkwell`
+requires. Use [vovkos/llvm-package-windows](https://github.com/vovkos/llvm-package-windows)
+instead. Download the variant that matches your compiler:
+
+- Build type: **release** (not debug)
+- C runtime: **msvcrt** (dynamic CRT — matches the Rust toolchain default)
+- Architecture: **windows-amd64**
+- MSVC version: match your installed Visual Studio (e.g. `msvc17` for VS 2022)
+
+Extract the archive to a space-free path (e.g. `C:\LLVM18`) and set the environment
+variable before building:
+
+```powershell
+$env:LLVM_SYS_181_PREFIX = "C:\LLVM18"   # adjust to your actual path
+cargo build --features codegen
+```
+
+To persist this automatically for the project, copy the provided template:
+
+```sh
+cp .cargo/config.toml.example .cargo/config.toml   # gitignored — machine-local
+```
+
+**2. Visual Studio Build Tools with the C++ workload**
+
+The Ofan compiler uses the MSVC linker (`link.exe`) to produce Windows binaries.
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+(free) and select the **"Desktop development with C++"** workload.
+
+The compiler locates `link.exe` automatically via the Windows registry — you do not
+need to run `vcvars64.bat` or open a Developer Command Prompt.
 
 ## Build
 

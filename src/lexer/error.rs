@@ -41,5 +41,9 @@ pub enum LexError {
     MisplacedDigitSeparator { byte: usize },
 
     #[error("numeric literal `{literal}` at byte {start} is immediately followed by `{ch}` — Ofan has no literal suffixes (§14); if these are separate tokens, add whitespace between them")]
-    IdentAfterNumericLiteral { start: usize, literal: String, ch: char },
+    IdentAfterNumericLiteral {
+        start: usize,
+        literal: String,
+        ch: char,
+    },
 }

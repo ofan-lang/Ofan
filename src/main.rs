@@ -52,9 +52,9 @@ fn main() {
 fn run() -> i32 {
     let cli = Cli::parse();
     match cli.command {
-        Command::Check { source }         => cmd_check(source),
+        Command::Check { source } => cmd_check(source),
         Command::Build { source, output } => cmd_build(source, output),
-        Command::Run   { source, args }   => cmd_run(source, args),
+        Command::Run { source, args } => cmd_run(source, args),
     }
 }
 
@@ -91,7 +91,9 @@ fn cmd_build(source: PathBuf, output: Option<PathBuf>) -> i32 {
     };
     run_pipeline(&source, move |ast, result| {
         if result.has_deferred() {
-            for d in &result.deferred { eprintln!("ofan: unsupported: {d}"); }
+            for d in &result.deferred {
+                eprintln!("ofan: unsupported: {d}");
+            }
             eprintln!("ofan: cannot compile: source contains unresolved constructs");
             return 1;
         }
@@ -122,7 +124,9 @@ fn cmd_run(source: PathBuf, args: Vec<String>) -> i32 {
     };
     run_pipeline(&source, move |ast, result| {
         if result.has_deferred() {
-            for d in &result.deferred { eprintln!("ofan: unsupported: {d}"); }
+            for d in &result.deferred {
+                eprintln!("ofan: unsupported: {d}");
+            }
             eprintln!("ofan: cannot compile: source contains unresolved constructs");
             return 1;
         }
@@ -169,16 +173,24 @@ where
     };
     let tokens = match lexer::Lexer::new(&src).lex() {
         Ok(t) => t,
-        Err(e) => { eprintln!("ofan: lex error: {e}"); return 1; }
+        Err(e) => {
+            eprintln!("ofan: lex error: {e}");
+            return 1;
+        }
     };
     let ast = match parser::Parser::new(tokens).parse() {
         Ok(a) => a,
-        Err(e) => { eprintln!("ofan: parse error: {e}"); return 1; }
+        Err(e) => {
+            eprintln!("ofan: parse error: {e}");
+            return 1;
+        }
     };
     match typechecker::infer(&ast) {
         Ok(result) => f(&ast, result),
         Err(errs) => {
-            for e in &errs { eprintln!("ofan: type error: {e}"); }
+            for e in &errs {
+                eprintln!("ofan: type error: {e}");
+            }
             1
         }
     }
@@ -187,11 +199,7 @@ where
 // ─── Codegen dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "codegen")]
-fn emit_to(
-    ast: &ast::Ast<'_>,
-    result: &typechecker::InferResult,
-    out: &Path,
-) -> Result<(), i32> {
+fn emit_to(ast: &ast::Ast<'_>, result: &typechecker::InferResult, out: &Path) -> Result<(), i32> {
     use ofan::codegen::llvm::LlvmContext;
     let ctx = LlvmContext::new();
     ctx.emit(ast, result, out).map_err(|e| {

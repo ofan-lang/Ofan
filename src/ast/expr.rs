@@ -1,5 +1,5 @@
-use crate::lexer::Span;
 use super::{Block, Literal, Pattern, Type};
+use crate::lexer::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
@@ -19,13 +19,27 @@ pub enum BorrowKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     // Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
     // Comparison
-    Eq, Ne, Lt, Gt, Le, Ge,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
     // Logical
-    And, Or,
+    And,
+    Or,
     // Bitwise
-    BitAnd, BitOr, BitXor, Shl, Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     // Fallback (§12 `?:`) — Option<T> only
     Fallback,
 }
@@ -36,14 +50,27 @@ pub enum Expr<'src> {
     Ident(&'src str, Span),
 
     // --- Unary ---
-    Unary { op: UnaryOp, expr: Box<Expr<'src>>, span: Span },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr<'src>>,
+        span: Span,
+    },
 
     // --- Binary (includes `?:` fallback, §12) ---
-    Binary { op: BinOp, left: Box<Expr<'src>>, right: Box<Expr<'src>>, span: Span },
+    Binary {
+        op: BinOp,
+        left: Box<Expr<'src>>,
+        right: Box<Expr<'src>>,
+        span: Span,
+    },
 
     // --- Postfix ---
     /// `callee(arg1, arg2, ...)` — free function call
-    Call { callee: Box<Expr<'src>>, args: Vec<Expr<'src>>, span: Span },
+    Call {
+        callee: Box<Expr<'src>>,
+        args: Vec<Expr<'src>>,
+        span: Span,
+    },
     /// `object.field` — field access
     Field {
         object: Box<Expr<'src>>,
@@ -60,9 +87,16 @@ pub enum Expr<'src> {
         span: Span,
     },
     /// `expr?` — propagate operator (§12)
-    Propagate { expr: Box<Expr<'src>>, span: Span },
+    Propagate {
+        expr: Box<Expr<'src>>,
+        span: Span,
+    },
     /// `expr as Type` — cast (§8)
-    Cast { expr: Box<Expr<'src>>, ty: Box<Type<'src>>, span: Span },
+    Cast {
+        expr: Box<Expr<'src>>,
+        ty: Box<Type<'src>>,
+        span: Span,
+    },
 
     // --- Structured expressions ---
     Block(Box<Block<'src>>),
@@ -74,8 +108,15 @@ pub enum Expr<'src> {
         else_branch: Option<Box<Expr<'src>>>,
         span: Span,
     },
-    While { condition: Box<Expr<'src>>, body: Box<Block<'src>>, span: Span },
-    Loop { body: Box<Block<'src>>, span: Span },
+    While {
+        condition: Box<Expr<'src>>,
+        body: Box<Block<'src>>,
+        span: Span,
+    },
+    Loop {
+        body: Box<Block<'src>>,
+        span: Span,
+    },
     /// `for binding in [&[mut]] iterable { body }`
     For {
         binding: &'src str,
@@ -86,7 +127,11 @@ pub enum Expr<'src> {
         body: Box<Block<'src>>,
         span: Span,
     },
-    Match { subject: Box<Expr<'src>>, arms: Vec<MatchArm<'src>>, span: Span },
+    Match {
+        subject: Box<Expr<'src>>,
+        arms: Vec<MatchArm<'src>>,
+        span: Span,
+    },
     /// `Name { field = expr, ... }` — struct literal (§10)
     StructLit {
         name: &'src str,

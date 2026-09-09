@@ -1,5 +1,5 @@
-use crate::lexer::Span;
 use super::Literal;
+use crate::lexer::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern<'src> {

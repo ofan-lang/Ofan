@@ -13,113 +13,293 @@ pub(super) fn scan_operator(
         '=' => match iter.peek() {
             Some(&(end_pos, '=')) => {
                 iter.next();
-                (Token::EqEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::EqEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
             Some(&(end_pos, '>')) => {
                 iter.next();
-                (Token::FatArrow, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::FatArrow,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
-            _ => (Token::Equals, Span { start: pos, end: pos + 1 }),
+            _ => (
+                Token::Equals,
+                Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            ),
         },
         '!' => {
             if iter.peek().is_some_and(|&(_, c)| c == '=') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::BangEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::BangEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Bang, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Bang,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '<' => match iter.peek() {
             Some(&(end_pos, '<')) => {
                 iter.next();
-                (Token::Shl, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::Shl,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
             Some(&(end_pos, '=')) => {
                 iter.next();
-                (Token::LtEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::LtEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
-            _ => (Token::Lt, Span { start: pos, end: pos + 1 }),
+            _ => (
+                Token::Lt,
+                Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            ),
         },
         '>' => match iter.peek() {
             Some(&(end_pos, '>')) => {
                 iter.next();
-                (Token::Shr, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::Shr,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
             Some(&(end_pos, '=')) => {
                 iter.next();
-                (Token::GtEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::GtEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
-            _ => (Token::Gt, Span { start: pos, end: pos + 1 }),
+            _ => (
+                Token::Gt,
+                Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            ),
         },
         '&' => {
             if iter.peek().is_some_and(|&(_, c)| c == '&') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::AmpAmp, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::AmpAmp,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Amp, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Amp,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '|' => {
             if iter.peek().is_some_and(|&(_, c)| c == '|') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::PipePipe, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::PipePipe,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Pipe, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Pipe,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '-' => match iter.peek() {
             Some(&(end_pos, '>')) => {
                 iter.next();
-                (Token::Arrow, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::Arrow,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
             Some(&(end_pos, '=')) => {
                 iter.next();
-                (Token::MinusEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::MinusEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             }
-            _ => (Token::Minus, Span { start: pos, end: pos + 1 }),
+            _ => (
+                Token::Minus,
+                Span {
+                    start: pos,
+                    end: pos + 1,
+                },
+            ),
         },
         '+' => {
             if iter.peek().is_some_and(|&(_, c)| c == '=') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::PlusEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::PlusEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Plus, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Plus,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '*' => {
             if iter.peek().is_some_and(|&(_, c)| c == '=') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::StarEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::StarEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Star, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Star,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '/' => {
             if iter.peek().is_some_and(|&(_, c)| c == '=') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::SlashEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::SlashEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Slash, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Slash,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '%' => {
             if iter.peek().is_some_and(|&(_, c)| c == '=') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::PercentEq, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::PercentEq,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Percent, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Percent,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
         '?' => {
             if iter.peek().is_some_and(|&(_, c)| c == ':') {
                 let (end_pos, _) = iter.next().unwrap();
-                (Token::QuestionColon, Span { start: pos, end: end_pos + 1 })
+                (
+                    Token::QuestionColon,
+                    Span {
+                        start: pos,
+                        end: end_pos + 1,
+                    },
+                )
             } else {
-                (Token::Question, Span { start: pos, end: pos + 1 })
+                (
+                    Token::Question,
+                    Span {
+                        start: pos,
+                        end: pos + 1,
+                    },
+                )
             }
         }
-        '^' => (Token::Caret, Span { start: pos, end: pos + 1 }),
-        '~' => (Token::Tilde, Span { start: pos, end: pos + 1 }),
+        '^' => (
+            Token::Caret,
+            Span {
+                start: pos,
+                end: pos + 1,
+            },
+        ),
+        '~' => (
+            Token::Tilde,
+            Span {
+                start: pos,
+                end: pos + 1,
+            },
+        ),
         _ => unreachable!("scan_operator called on non-operator char: {ch:?}"),
     }
 }
@@ -129,7 +309,9 @@ mod tests {
     use crate::lexer::{LexError, Lexer, Token};
 
     fn lex(src: &str) -> Result<Vec<Token<'_>>, LexError> {
-        Lexer::new(src).lex().map(|ts| ts.into_iter().map(|(t, _)| t).collect())
+        Lexer::new(src)
+            .lex()
+            .map(|ts| ts.into_iter().map(|(t, _)| t).collect())
     }
 
     #[test]
