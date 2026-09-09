@@ -45,6 +45,16 @@ impl Default for LlvmContext {
 // ─── Module emission ──────────────────────────────────────────────────────────
 
 fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), String> {
+    // Validate entry function before emitting object code. lower_to_module is also used
+    // by JIT tests (which have no entry function), so the check lives here, in the
+    // AOT-only path.
+    if module.get_function(super::ENTRY_FN).is_none() {
+        return Err(format!(
+            "no `fn {}` found; Ofan programs must define an entry function named `{}`",
+            super::ENTRY_FN,
+            super::ENTRY_FN,
+        ));
+    }
     Target::initialize_x86(&InitializationConfig::default()); // x86-only for now; extend when multi-target lands
 
     let triple = TargetMachine::get_default_triple();
@@ -1977,16 +1987,6 @@ fn lower_to_module<'ctx>(
             }
             Item::Struct(_) | Item::Enum(_) => {}
         }
-    }
-
-    // Validate that the program defines the entry function expected by the linker.
-    // This ties ENTRY_FN (used in /ENTRY: on Windows) to the IR symbol actually emitted.
-    if module.get_function(super::ENTRY_FN).is_none() {
-        return Err(format!(
-            "no `fn {}` found; Ofan programs must define an entry function named `{}`",
-            super::ENTRY_FN,
-            super::ENTRY_FN,
-        ));
     }
 
     Ok(module)
