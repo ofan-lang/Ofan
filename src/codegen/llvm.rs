@@ -1,19 +1,25 @@
 use inkwell::{
-    FloatPredicate, IntPredicate, OptimizationLevel,
-    AddressSpace,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
-    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine},
+    targets::{
+        CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+    },
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType},
-    values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue},
+    values::{
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    },
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
 };
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::ast::{Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, MatchArm, Pattern, Stmt, StructFieldInit, Type, UnaryOp};
+use crate::ast::{
+    Ast, BinOp, Block, Expr, FunctionDef, Item, Literal, MatchArm, Pattern, Stmt, StructFieldInit,
+    Type, UnaryOp,
+};
 use crate::lexer::token::Span;
 use crate::typechecker::{InferResult, Ty};
 
@@ -24,7 +30,9 @@ pub struct LlvmContext {
 
 impl LlvmContext {
     pub fn new() -> Self {
-        Self { inner: Context::create() }
+        Self {
+            inner: Context::create(),
+        }
     }
 
     // TODO: promote errors to a typed CodegenError enum (PR 33+).
@@ -97,7 +105,12 @@ fn link_object(obj: &Path, out: &Path) -> Result<(), String> {
     for candidate in linker_candidates() {
         match candidate {
             LinkerKind::Unix(ref path) => {
-                match std::process::Command::new(path).arg(obj).arg("-o").arg(out).status() {
+                match std::process::Command::new(path)
+                    .arg(obj)
+                    .arg("-o")
+                    .arg(out)
+                    .status()
+                {
                     Ok(s) if s.success() => return Ok(()),
                     Ok(s) => last_error = Some(format!("{} exited with {s}", path.display())),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -157,14 +170,19 @@ fn linker_candidates() -> Vec<LinkerKind> {
         // for developers on an alternative LLVM distribution that does.
         if let Ok(prefix) = std::env::var("LLVM_SYS_181_PREFIX") {
             v.push(LinkerKind::Unix(
-                std::path::PathBuf::from(prefix).join("bin").join("clang.exe"),
+                std::path::PathBuf::from(prefix)
+                    .join("bin")
+                    .join("clang.exe"),
             ));
         }
         v
     }
     #[cfg(not(windows))]
     {
-        vec![LinkerKind::Unix("cc".into()), LinkerKind::Unix("clang".into())]
+        vec![
+            LinkerKind::Unix("cc".into()),
+            LinkerKind::Unix("clang".into()),
+        ]
     }
 }
 
@@ -235,7 +253,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     fn emit_allocas<'src>(&mut self, stmts: &[Stmt<'src>]) -> Result<(), String> {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, name_span, init, .. } => {
+                Stmt::Let {
+                    name,
+                    name_span,
+                    init,
+                    ..
+                } => {
                     let ty = self
                         .types
                         .type_of(init.span())
@@ -253,8 +276,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     self.emit_allocas_in_expr(target)?;
                     self.emit_allocas_in_expr(value)?;
                 }
-                Stmt::Return { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
-                Stmt::Break { value: Some(expr), .. } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Return {
+                    value: Some(expr), ..
+                } => self.emit_allocas_in_expr(expr)?,
+                Stmt::Break {
+                    value: Some(expr), ..
+                } => self.emit_allocas_in_expr(expr)?,
                 Stmt::Const { init, .. } => self.emit_allocas_in_expr(init)?,
                 _ => {}
             }
@@ -308,7 +335,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::If { condition, then_block, else_branch, .. } => {
+            Expr::If {
+                condition,
+                then_block,
+                else_branch,
+                ..
+            } => {
                 self.emit_allocas_in_expr(condition)?;
                 self.emit_allocas(&then_block.stmts)?;
                 if let Some(tail) = &then_block.tail {
@@ -319,7 +351,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::While { condition, body, .. } => {
+            Expr::While {
+                condition, body, ..
+            } => {
                 self.emit_allocas_in_expr(condition)?;
                 self.emit_allocas(&body.stmts)?;
                 if let Some(tail) = &body.tail {
@@ -337,7 +371,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             Expr::Match { subject, arms, .. } => {
                 self.emit_allocas_in_expr(subject)?;
                 for arm in arms {
-                    if let Some(g) = &arm.guard { self.emit_allocas_in_expr(g)?; }
+                    if let Some(g) = &arm.guard {
+                        self.emit_allocas_in_expr(g)?;
+                    }
                     self.emit_allocas_in_expr(&arm.body)?;
                 }
             }
@@ -414,9 +450,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             Expr::Field { object, field, .. } => {
                 let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
                 let struct_name = self.struct_name_of(object.span())?;
-                let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
-                    format!("ICE: struct `{struct_name}` not in struct_types")
-                })?;
+                let struct_ty = *self
+                    .struct_types
+                    .get(struct_name)
+                    .ok_or_else(|| format!("ICE: struct `{struct_name}` not in struct_types"))?;
                 let idx = self
                     .types
                     .struct_field_index(struct_name, field)
@@ -438,8 +475,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
                 }
                 let ty = val.get_type();
-                let ptr = self.builder.build_alloca(ty, "spill").map_err(|e| e.to_string())?;
-                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                let ptr = self
+                    .builder
+                    .build_alloca(ty, "spill")
+                    .map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(ptr, val)
+                    .map_err(|e| e.to_string())?;
                 Ok(ptr)
             }
         }
@@ -474,11 +516,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             // Mirrors Stmt::Let: fast-path StructLit directly into dest, then lower-once
             // for everything else and match on the (value, type) pair.
             match init_expr.value.as_ref() {
-                Expr::StructLit { name: sname, fields: inner_fields, .. } => {
+                Expr::StructLit {
+                    name: sname,
+                    fields: inner_fields,
+                    ..
+                } => {
                     // Nested struct literal: write directly into the GEP slot — no temp alloca.
-                    let inner_ty = *self.struct_types.get(*sname).ok_or_else(|| {
-                        format!("ICE: struct `{sname}` not in struct_types")
-                    })?;
+                    let inner_ty = *self
+                        .struct_types
+                        .get(*sname)
+                        .ok_or_else(|| format!("ICE: struct `{sname}` not in struct_types"))?;
                     self.lower_struct_lit_into(gep, inner_ty, sname, inner_fields, env, loop_ctx)?;
                 }
                 _ => {
@@ -495,10 +542,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                                 .builder
                                 .build_load(inner_ty, src_ptr, "field_struct")
                                 .map_err(|e| e.to_string())?;
-                            self.builder.build_store(gep, struct_val).map_err(|e| e.to_string())?;
+                            self.builder
+                                .build_store(gep, struct_val)
+                                .map_err(|e| e.to_string())?;
                         }
                         (other_val, _) => {
-                            self.builder.build_store(gep, other_val).map_err(|e| e.to_string())?;
+                            self.builder
+                                .build_store(gep, other_val)
+                                .map_err(|e| e.to_string())?;
                         }
                     }
                 }
@@ -540,7 +591,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<(), String> {
         match stmt {
-            Stmt::Let { name, name_span, init, .. } => {
+            Stmt::Let {
+                name,
+                name_span,
+                init,
+                ..
+            } => {
                 // Retrieve the pre-hoisted alloca for this specific binding (keyed by its
                 // declaration span, so shadowed bindings each get their own slot).
                 // Update env[name] so subsequent Expr::Ident reads find this alloca.
@@ -557,7 +613,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = if let Some(&p) = self.alloca_slots.get(name_span) {
                     p
                 } else {
-                    self.builder.build_alloca(llvm_ty, name).map_err(|e| e.to_string())?
+                    self.builder
+                        .build_alloca(llvm_ty, name)
+                        .map_err(|e| e.to_string())?
                 };
                 // Evaluate the init expression BEFORE updating env[name]. A self-referencing
                 // shadow (`let x = x + 1`) must resolve `x` to the OLD binding, not the new
@@ -565,7 +623,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 // Struct literals are lowered field-by-field directly into the destination
                 // alloca; other expressions are lowered to a value and stored normally.
                 match init.as_ref() {
-                    Expr::StructLit { name: sname, fields, .. } => {
+                    Expr::StructLit {
+                        name: sname,
+                        fields,
+                        ..
+                    } => {
                         let struct_ty = llvm_ty.into_struct_type();
                         self.lower_struct_lit_into(ptr, struct_ty, sname, fields, env, loop_ctx)?;
                     }
@@ -601,82 +663,86 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 env.insert(*name, (ptr, llvm_ty));
             }
 
-            Stmt::Assign { target, op, value, .. } => {
-                match target.as_ref() {
-                    Expr::Ident(name, _) => {
-                        let &(ptr, llvm_ty) = env
-                            .get(*name)
-                            .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
-                        let rhs = self.lower_expr(value, env, loop_ctx)?;
-                        let new_val = match op {
-                            None => rhs,
-                            Some(binop) => {
-                                let assign_ty =
-                                    self.types.type_of(target.span()).ok_or_else(|| {
-                                        format!("missing type for assignment target `{name}`")
-                                    })?;
-                                let current = self
-                                    .builder
-                                    .build_load(llvm_ty, ptr, "load")
-                                    .map_err(|e| e.to_string())?;
-                                self.lower_binary(*binop, current, rhs, assign_ty)?
-                            }
-                        };
-                        self.builder.build_store(ptr, new_val).map_err(|e| e.to_string())?;
-                    }
-                    Expr::Field { object, field, .. } => {
-                        let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
-                        let struct_name = self.struct_name_of(object.span())?;
-                        let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
-                            format!("ICE: struct `{struct_name}` not in struct_types")
-                        })?;
-                        let idx = self
-                            .types
-                            .struct_field_index(struct_name, field)
-                            .ok_or_else(|| {
-                                format!(
-                                    "ICE: field `{field}` not found in struct `{struct_name}`"
-                                )
-                            })? as u32;
-                        let gep = self
-                            .builder
-                            .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
-                            .map_err(|e| e.to_string())?;
-                        let rhs = self.lower_expr(value, env, loop_ctx)?;
-                        let new_val = match op {
-                            None => rhs,
-                            Some(binop) => {
-                                let field_ty = self.llvm_ty(
+            Stmt::Assign {
+                target, op, value, ..
+            } => match target.as_ref() {
+                Expr::Ident(name, _) => {
+                    let &(ptr, llvm_ty) = env
+                        .get(*name)
+                        .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
+                    let rhs = self.lower_expr(value, env, loop_ctx)?;
+                    let new_val = match op {
+                        None => rhs,
+                        Some(binop) => {
+                            let assign_ty = self.types.type_of(target.span()).ok_or_else(|| {
+                                format!("missing type for assignment target `{name}`")
+                            })?;
+                            let current = self
+                                .builder
+                                .build_load(llvm_ty, ptr, "load")
+                                .map_err(|e| e.to_string())?;
+                            self.lower_binary(*binop, current, rhs, assign_ty)?
+                        }
+                    };
+                    self.builder
+                        .build_store(ptr, new_val)
+                        .map_err(|e| e.to_string())?;
+                }
+                Expr::Field { object, field, .. } => {
+                    let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
+                    let struct_name = self.struct_name_of(object.span())?;
+                    let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
+                        format!("ICE: struct `{struct_name}` not in struct_types")
+                    })?;
+                    let idx = self
+                        .types
+                        .struct_field_index(struct_name, field)
+                        .ok_or_else(|| {
+                            format!("ICE: field `{field}` not found in struct `{struct_name}`")
+                        })? as u32;
+                    let gep = self
+                        .builder
+                        .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
+                        .map_err(|e| e.to_string())?;
+                    let rhs = self.lower_expr(value, env, loop_ctx)?;
+                    let new_val = match op {
+                        None => rhs,
+                        Some(binop) => {
+                            let field_ty = self.llvm_ty(
                                     self.types.struct_field_type(struct_name, field).ok_or_else(
                                         || {
                                             format!("ICE: field `{field}` type not found in struct `{struct_name}`")
                                         },
                                     )?,
                                 )?;
-                                let current = self
-                                    .builder
-                                    .build_load(field_ty, gep, "field_cur")
-                                    .map_err(|e| e.to_string())?;
-                                let assign_ty = self
-                                    .types
-                                    .type_of(target.span())
-                                    .ok_or_else(|| "missing type for field assign target".to_string())?;
-                                self.lower_binary(*binop, current, rhs, assign_ty)?
-                            }
-                        };
-                        self.builder.build_store(gep, new_val).map_err(|e| e.to_string())?;
-                    }
-                    _ => {
-                        return Err(
-                            "assignment to non-identifier/field targets not yet supported".to_string(),
-                        )
-                    }
+                            let current = self
+                                .builder
+                                .build_load(field_ty, gep, "field_cur")
+                                .map_err(|e| e.to_string())?;
+                            let assign_ty = self.types.type_of(target.span()).ok_or_else(|| {
+                                "missing type for field assign target".to_string()
+                            })?;
+                            self.lower_binary(*binop, current, rhs, assign_ty)?
+                        }
+                    };
+                    self.builder
+                        .build_store(gep, new_val)
+                        .map_err(|e| e.to_string())?;
                 }
-            }
+                _ => {
+                    return Err(
+                        "assignment to non-identifier/field targets not yet supported".to_string(),
+                    )
+                }
+            },
 
-            Stmt::Return { value: Some(expr), .. } => {
+            Stmt::Return {
+                value: Some(expr), ..
+            } => {
                 let val = self.lower_expr(expr, env, loop_ctx)?;
-                self.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_return(Some(&val))
+                    .map_err(|e| e.to_string())?;
             }
             Stmt::Return { value: None, .. } => {
                 self.builder.build_return(None).map_err(|e| e.to_string())?;
@@ -743,15 +809,21 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let enum_ty = *self.enum_types.get(enum_name)
+        let enum_ty = *self
+            .enum_types
+            .get(enum_name)
             .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_types"))?;
         let tag = self.get_variant_tag(enum_name, variant_name)?;
 
-        let ptr = self.builder.build_alloca(enum_ty, "enum_tmp")
+        let ptr = self
+            .builder
+            .build_alloca(enum_ty, "enum_tmp")
             .map_err(|e| e.to_string())?;
 
         // Write tag at GEP [0, 0].
-        let tag_ptr = self.builder.build_struct_gep(enum_ty, ptr, 0, "tag_ptr")
+        let tag_ptr = self
+            .builder
+            .build_struct_gep(enum_ty, ptr, 0, "tag_ptr")
             .map_err(|e| e.to_string())?;
         self.builder
             .build_store(tag_ptr, self.ctx.i32_type().const_int(tag as u64, false))
@@ -759,26 +831,31 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
         // Write payload fields at GEP [0, 1] (the [N x i64] area).
         if !payload_exprs.is_empty() {
-            let payload_ty = *self.variant_payload_types
+            let payload_ty = *self
+                .variant_payload_types
                 .get(enum_name)
                 .and_then(|m| m.get(variant_name))
                 .ok_or_else(|| {
                     format!("ICE: payload for `{enum_name}::{variant_name}` not found")
                 })?;
-            let payload_area = self.builder
+            let payload_area = self
+                .builder
                 .build_struct_gep(enum_ty, ptr, 1, "payload_area")
                 .map_err(|e| e.to_string())?;
             for (i, field_expr) in payload_exprs.iter().enumerate() {
                 let field_val = self.lower_expr(field_expr, env, loop_ctx)?;
-                let field_ptr = self.builder
+                let field_ptr = self
+                    .builder
                     .build_struct_gep(payload_ty, payload_area, i as u32, "payload_field")
                     .map_err(|e| e.to_string())?;
-                self.builder.build_store(field_ptr, field_val)
+                self.builder
+                    .build_store(field_ptr, field_val)
                     .map_err(|e| e.to_string())?;
             }
         }
 
-        self.builder.build_load(enum_ty, ptr, "enum_val")
+        self.builder
+            .build_load(enum_ty, ptr, "enum_val")
             .map_err(|e| e.to_string())
     }
 
@@ -792,10 +869,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let subject_ty = self
-            .types
-            .type_of(subject.span())
-            .ok_or_else(|| format!("ICE: match subject has no type at byte {}", subject.span().start))?;
+        let subject_ty = self.types.type_of(subject.span()).ok_or_else(|| {
+            format!(
+                "ICE: match subject has no type at byte {}",
+                subject.span().start
+            )
+        })?;
         match subject_ty {
             Ty::Named(ename) if self.enum_types.contains_key(ename.as_str()) => {
                 self.lower_enum_match(ename, span, subject, arms, env, loop_ctx)
@@ -813,38 +892,52 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let enum_ty = *self.enum_types.get(enum_name)
+        let enum_ty = *self
+            .enum_types
+            .get(enum_name)
             .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_types"))?;
-        let enum_info = self.types.enum_defs().get(enum_name)
+        let enum_info = self
+            .types
+            .enum_defs()
+            .get(enum_name)
             .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?;
 
         // ── Subject pointer ───────────────────────────────────────────────────
         // For a variable subject, use its alloca directly to avoid a copy.
         // For any expression (including bare unit variant construction), lower and spill.
-        let subject_ptr: PointerValue<'ctx> =
-            if let Expr::Ident(name, _) = subject {
-                if let Some(&(ptr, _)) = env.get(*name) {
-                    ptr
-                } else {
-                    let val = self.lower_expr(subject, env, loop_ctx)?;
-                    let ptr = self.builder.build_alloca(enum_ty, "match_subj")
-                        .map_err(|e| e.to_string())?;
-                    self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
-                    ptr
-                }
+        let subject_ptr: PointerValue<'ctx> = if let Expr::Ident(name, _) = subject {
+            if let Some(&(ptr, _)) = env.get(*name) {
+                ptr
             } else {
                 let val = self.lower_expr(subject, env, loop_ctx)?;
-                let ptr = self.builder.build_alloca(enum_ty, "match_subj")
+                let ptr = self
+                    .builder
+                    .build_alloca(enum_ty, "match_subj")
                     .map_err(|e| e.to_string())?;
-                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(ptr, val)
+                    .map_err(|e| e.to_string())?;
                 ptr
-            };
+            }
+        } else {
+            let val = self.lower_expr(subject, env, loop_ctx)?;
+            let ptr = self
+                .builder
+                .build_alloca(enum_ty, "match_subj")
+                .map_err(|e| e.to_string())?;
+            self.builder
+                .build_store(ptr, val)
+                .map_err(|e| e.to_string())?;
+            ptr
+        };
 
         // ── Load tag ──────────────────────────────────────────────────────────
-        let tag_gep = self.builder
+        let tag_gep = self
+            .builder
             .build_struct_gep(enum_ty, subject_ptr, 0, "tag_ptr")
             .map_err(|e| e.to_string())?;
-        let tag_val = self.builder
+        let tag_val = self
+            .builder
             .build_load(self.ctx.i32_type(), tag_gep, "tag")
             .map_err(|e| e.to_string())?
             .into_int_value();
@@ -916,7 +1009,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     for p in pats {
                         match p {
                             Pattern::Name(vname, _)
-                                if enum_info.variants.get(*vname).map(|v| v.is_empty()).unwrap_or(false) =>
+                                if enum_info
+                                    .variants
+                                    .get(*vname)
+                                    .map(|v| v.is_empty())
+                                    .unwrap_or(false) =>
                             {
                                 tags.push(lookup_tag(vname)?);
                             }
@@ -940,7 +1037,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         let or_arm_bbs: Vec<(usize, Vec<u32>, BasicBlock<'ctx>)> = or_arms
             .iter()
             .map(|(arm_idx, tags)| {
-                (*arm_idx, tags.clone(), self.ctx.append_basic_block(self.fn_val, "or_arm"))
+                (
+                    *arm_idx,
+                    tags.clone(),
+                    self.ctx.append_basic_block(self.fn_val, "or_arm"),
+                )
             })
             .collect();
         let tag_entry_bbs: HashMap<u32, BasicBlock<'ctx>> = tag_arms
@@ -971,7 +1072,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             let body_val = self.lower_expr(&arm.body, env, loop_ctx)?;
             let exit_bb = self.builder.get_insert_block().unwrap();
             if exit_bb.get_terminator().is_none() {
-                self.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| e.to_string())?;
             }
             if result_ty.is_some() {
                 arm_exits.push((body_val, exit_bb));
@@ -981,7 +1084,8 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         // ── Tag-grouped arms (chained, possibly guarded) ──────────────────────
         for (tag, arm_indices) in &tag_arms {
             let variant_name = &enum_info.variant_order[*tag as usize];
-            let payload_ty = self.variant_payload_types
+            let payload_ty = self
+                .variant_payload_types
                 .get(enum_name)
                 .and_then(|m| m.get(variant_name.as_str()))
                 .copied();
@@ -1002,14 +1106,19 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             for (i, &arm_idx) in arm_indices.iter().enumerate() {
                 let arm = &arms[arm_idx];
                 let is_last = i == n_group - 1;
-                let guard_fail_bb = if is_last { default_bb } else { arm_entry_bbs[i + 1] };
+                let guard_fail_bb = if is_last {
+                    default_bb
+                } else {
+                    arm_entry_bbs[i + 1]
+                };
 
                 // Arm entry: bind payload then branch (with optional guard).
                 self.builder.position_at_end(arm_entry_bbs[i]);
                 let mut arm_env = env.clone();
                 if let Pattern::Constructor { sub_patterns, .. } = &arm.pattern {
                     if let Some(pt) = payload_ty {
-                        let payload_area = self.builder
+                        let payload_area = self
+                            .builder
                             .build_struct_gep(enum_ty, subject_ptr, 1, "payload_area")
                             .map_err(|e| e.to_string())?;
                         let payload_fields = &enum_info.variants[variant_name.as_str()];
@@ -1017,16 +1126,20 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             match sub_pat {
                                 Pattern::Name(bname, _) => {
                                     let field_ty = self.llvm_ty(&payload_fields[j])?;
-                                    let fptr = self.builder
+                                    let fptr = self
+                                        .builder
                                         .build_struct_gep(pt, payload_area, j as u32, "pf_ptr")
                                         .map_err(|e| e.to_string())?;
-                                    let fval = self.builder
+                                    let fval = self
+                                        .builder
                                         .build_load(field_ty, fptr, bname)
                                         .map_err(|e| e.to_string())?;
-                                    let falloca = self.builder
+                                    let falloca = self
+                                        .builder
                                         .build_alloca(field_ty, bname)
                                         .map_err(|e| e.to_string())?;
-                                    self.builder.build_store(falloca, fval)
+                                    self.builder
+                                        .build_store(falloca, fval)
                                         .map_err(|e| e.to_string())?;
                                     arm_env.insert(bname, (falloca, field_ty));
                                 }
@@ -1044,7 +1157,8 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
                 }
                 if let Some(guard_expr) = &arm.guard {
-                    let gval = self.lower_expr(guard_expr, &arm_env, loop_ctx)?
+                    let gval = self
+                        .lower_expr(guard_expr, &arm_env, loop_ctx)?
                         .into_int_value();
                     self.builder
                         .build_conditional_branch(gval, body_bbs[i], guard_fail_bb)
@@ -1075,13 +1189,17 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         if let Some(arm) = default_arm_opt {
             let mut def_env = env.clone();
             if let Pattern::Name(bname, _) = &arm.pattern {
-                let val = self.builder
+                let val = self
+                    .builder
                     .build_load(enum_ty, subject_ptr, "enum_val")
                     .map_err(|e| e.to_string())?;
-                let falloca = self.builder
+                let falloca = self
+                    .builder
                     .build_alloca(enum_ty, bname)
                     .map_err(|e| e.to_string())?;
-                self.builder.build_store(falloca, val).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(falloca, val)
+                    .map_err(|e| e.to_string())?;
                 def_env.insert(bname, (falloca, enum_ty.into()));
             }
             let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
@@ -1095,7 +1213,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 arm_exits.push((body_val, exit_bb));
             }
         } else {
-            self.builder.build_unreachable().map_err(|e| e.to_string())?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| e.to_string())?;
         }
 
         // ── Phi in merge ──────────────────────────────────────────────────────
@@ -1103,7 +1223,8 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         match result_ty {
             None => Ok(unit_value(self.ctx)),
             Some(llvm_ty) => {
-                let phi = self.builder
+                let phi = self
+                    .builder
                     .build_phi(llvm_ty, "match_result")
                     .map_err(|e| e.to_string())?;
                 for (val, bb) in &arm_exits {
@@ -1193,13 +1314,18 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         if let Some(arm) = default_arm_opt {
             let mut def_env = env.clone();
             if let Pattern::Name(bname, _) = &arm.pattern {
-                let bty = self.types.type_of(subject.span())
+                let bty = self
+                    .types
+                    .type_of(subject.span())
                     .ok_or_else(|| "ICE: no type for match subject".to_string())?;
                 let bllvm_ty = self.llvm_ty(bty)?;
-                let ptr = self.builder
+                let ptr = self
+                    .builder
                     .build_alloca(bllvm_ty, bname)
                     .map_err(|e| e.to_string())?;
-                self.builder.build_store(ptr, subject_val).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(ptr, subject_val)
+                    .map_err(|e| e.to_string())?;
                 def_env.insert(bname, (ptr, bllvm_ty));
             }
             let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
@@ -1213,14 +1339,17 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 arm_exits.push((body_val, exit_bb));
             }
         } else {
-            self.builder.build_unreachable().map_err(|e| e.to_string())?;
+            self.builder
+                .build_unreachable()
+                .map_err(|e| e.to_string())?;
         }
 
         self.builder.position_at_end(merge_bb);
         match result_ty {
             None => Ok(unit_value(self.ctx)),
             Some(llvm_ty) => {
-                let phi = self.builder
+                let phi = self
+                    .builder
                     .build_phi(llvm_ty, "switch_result")
                     .map_err(|e| e.to_string())?;
                 for (val, bb) in &arm_exits {
@@ -1258,9 +1387,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         }
                         Ok(self.ctx.i32_type().const_int(*n as u64, true).into())
                     }
-                    (Literal::Float(f), Ty::F64) => {
-                        Ok(self.ctx.f64_type().const_float(*f).into())
-                    }
+                    (Literal::Float(f), Ty::F64) => Ok(self.ctx.f64_type().const_float(*f).into()),
                     (Literal::Bool(b), Ty::Bool) => {
                         Ok(self.ctx.bool_type().const_int(*b as u64, false).into())
                     }
@@ -1286,7 +1413,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .map_err(|e| e.to_string())
             }
 
-            Expr::Binary { op, left, right, .. } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 let lv = self.lower_expr(left, env, loop_ctx)?;
                 let rv = self.lower_expr(right, env, loop_ctx)?;
                 let operand_ty = self
@@ -1296,14 +1425,20 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 self.lower_binary(*op, lv, rv, operand_ty)
             }
 
-            Expr::Unary { op, expr: inner, .. } => {
+            Expr::Unary {
+                op, expr: inner, ..
+            } => {
                 // Fold Neg(Literal::Integer(2147483648)) → i32::MIN constant directly.
                 // The typechecker blesses this via the infer_unary INT_MIN special case,
                 // but the literal lowering guard rejects 2147483648 > i32::MAX. Bypass it.
                 if matches!(op, UnaryOp::Neg) {
                     if let Expr::Literal(Literal::Integer(n), _) = inner.as_ref() {
                         if *n == (i32::MAX as i64) + 1 {
-                            return Ok(self.ctx.i32_type().const_int(i32::MIN as u64, false).into());
+                            return Ok(self
+                                .ctx
+                                .i32_type()
+                                .const_int(i32::MIN as u64, false)
+                                .into());
                         }
                     }
                 }
@@ -1332,10 +1467,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::If { condition, then_block, else_branch, span } => {
-                let cond_val = self
-                    .lower_expr(condition, env, loop_ctx)?
-                    .into_int_value();
+            Expr::If {
+                condition,
+                then_block,
+                else_branch,
+                span,
+            } => {
+                let cond_val = self.lower_expr(condition, env, loop_ctx)?.into_int_value();
 
                 let if_ty = self.types.type_of(*span);
                 let is_unit = matches!(if_ty, None | Some(Ty::Unit));
@@ -1352,8 +1490,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     // then branch
                     self.builder.position_at_end(then_bb);
                     let mut then_env = env.clone();
-                    let then_tail =
-                        self.lower_block(then_block, &mut then_env, loop_ctx)?;
+                    let then_tail = self.lower_block(then_block, &mut then_env, loop_ctx)?;
                     let then_exit_bb = self.builder.get_insert_block().unwrap();
                     let then_flows = then_exit_bb.get_terminator().is_none();
                     if then_flows {
@@ -1425,7 +1562,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
             }
 
-            Expr::While { condition, body, .. } => {
+            Expr::While {
+                condition, body, ..
+            } => {
                 let header_bb = self.ctx.append_basic_block(self.fn_val, "while.cond");
                 let body_bb = self.ctx.append_basic_block(self.fn_val, "while.body");
                 let exit_bb = self.ctx.append_basic_block(self.fn_val, "while.exit");
@@ -1435,15 +1574,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .map_err(|e| e.to_string())?;
 
                 self.builder.position_at_end(header_bb);
-                let cond_val = self
-                    .lower_expr(condition, env, loop_ctx)?
-                    .into_int_value();
+                let cond_val = self.lower_expr(condition, env, loop_ctx)?.into_int_value();
                 self.builder
                     .build_conditional_branch(cond_val, body_bb, exit_bb)
                     .map_err(|e| e.to_string())?;
 
                 self.builder.position_at_end(body_bb);
-                let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: header_bb };
+                let inner_lctx = LoopCtx {
+                    break_bb: exit_bb,
+                    continue_bb: header_bb,
+                };
                 let mut body_env = env.clone();
                 self.lower_block(body, &mut body_env, Some(&inner_lctx))?;
                 if self
@@ -1470,7 +1610,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .map_err(|e| e.to_string())?;
                 self.builder.position_at_end(loop_bb);
 
-                let inner_lctx = LoopCtx { break_bb: exit_bb, continue_bb: loop_bb };
+                let inner_lctx = LoopCtx {
+                    break_bb: exit_bb,
+                    continue_bb: loop_bb,
+                };
                 let mut body_env = env.clone();
                 self.lower_block(body, &mut body_env, Some(&inner_lctx))?;
                 if self
@@ -1505,9 +1648,8 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             if self.enum_types.contains_key(ename.as_str())
                                 && self.types.variant_to_enum().contains_key(*vname)
                             {
-                                return self.lower_enum_construction(
-                                    ename, vname, args, env, loop_ctx,
-                                );
+                                return self
+                                    .lower_enum_construction(ename, vname, args, env, loop_ctx);
                             }
                         }
                     }
@@ -1530,13 +1672,17 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .build_call(callee_fn, &arg_vals, "call")
                     .map_err(|e| e.to_string())?;
                 // Void calls return unit_value; value-returning calls return the result.
-                Ok(call_site.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
+                Ok(call_site
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap_or_else(|| unit_value(self.ctx)))
             }
 
             Expr::StructLit { name, fields, .. } => {
-                let struct_ty = *self.struct_types.get(*name).ok_or_else(|| {
-                    format!("ICE: unknown struct `{name}` in lower_expr")
-                })?;
+                let struct_ty = *self
+                    .struct_types
+                    .get(*name)
+                    .ok_or_else(|| format!("ICE: unknown struct `{name}` in lower_expr"))?;
                 let ptr = self
                     .builder
                     .build_alloca(struct_ty, "struct_tmp")
@@ -1553,7 +1699,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         if let Some(Ty::Named(ename)) = self.types.type_of(object.span()) {
                             if self.enum_types.contains_key(ename.as_str()) {
                                 return self.lower_enum_construction(
-                                    ename, field, &[], env, loop_ctx,
+                                    ename,
+                                    field,
+                                    &[],
+                                    env,
+                                    loop_ctx,
                                 );
                             }
                         }
@@ -1561,9 +1711,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
                 let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
                 let struct_name = self.struct_name_of(object.span())?;
-                let struct_ty = *self.struct_types.get(struct_name).ok_or_else(|| {
-                    format!("ICE: struct `{struct_name}` not in struct_types")
-                })?;
+                let struct_ty = *self
+                    .struct_types
+                    .get(struct_name)
+                    .ok_or_else(|| format!("ICE: struct `{struct_name}` not in struct_types"))?;
                 let idx = self
                     .types
                     .struct_field_index(struct_name, field)
@@ -1574,9 +1725,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     self.types
                         .struct_field_type(struct_name, field)
                         .ok_or_else(|| {
-                            format!(
-                                "ICE: field `{field}` type not found in struct `{struct_name}`"
-                            )
+                            format!("ICE: field `{field}` type not found in struct `{struct_name}`")
                         })?,
                 )?;
                 let gep = self
@@ -1588,27 +1737,29 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .map_err(|e| e.to_string())
             }
 
-            Expr::MethodCall { object, method, args, .. } => {
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 // Qualified tuple variant construction (§20): `Shape.Circle(3.14)`.
                 // Typechecker skips infer_expr(object) for this form, so object.span()
                 // has no type recorded — check enum_types by name directly.
                 if let Expr::Ident(type_name, _) = object.as_ref() {
-                    if !env.contains_key(*type_name)
-                        && self.enum_types.contains_key(*type_name)
-                    {
-                        return self.lower_enum_construction(
-                            type_name, method, args, env, loop_ctx,
-                        );
+                    if !env.contains_key(*type_name) && self.enum_types.contains_key(*type_name) {
+                        return self
+                            .lower_enum_construction(type_name, method, args, env, loop_ctx);
                     }
                 }
                 let struct_name = self.struct_name_of(object.span())?;
                 let mangled = format!("{struct_name}_{method}");
-                let callee = self.module.get_function(&mangled).ok_or_else(|| {
-                    format!("ICE: method `{mangled}` not declared in module")
-                })?;
+                let callee = self
+                    .module
+                    .get_function(&mangled)
+                    .ok_or_else(|| format!("ICE: method `{mangled}` not declared in module"))?;
                 let self_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
-                let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> =
-                    vec![self_ptr.into()];
+                let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> = vec![self_ptr.into()];
                 for a in args {
                     call_args.push(self.lower_expr(a, env, loop_ctx)?.into());
                 }
@@ -1616,12 +1767,17 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     .builder
                     .build_call(callee, &call_args, "method_call")
                     .map_err(|e| e.to_string())?;
-                Ok(call.try_as_basic_value().basic().unwrap_or_else(|| unit_value(self.ctx)))
+                Ok(call
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap_or_else(|| unit_value(self.ctx)))
             }
 
-            Expr::Match { subject, arms, span } => {
-                self.lower_match(subject, arms, *span, env, loop_ctx)
-            }
+            Expr::Match {
+                subject,
+                arms,
+                span,
+            } => self.lower_match(subject, arms, *span, env, loop_ctx),
 
             _ => Err(format!(
                 "expression not supported in this PR (at byte {}): \
@@ -1824,8 +1980,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(abort_bb);
-        self.builder.build_call(abort_fn, &[], "").map_err(|e| e.to_string())?;
-        self.builder.build_unreachable().map_err(|e| e.to_string())?;
+        self.builder
+            .build_call(abort_fn, &[], "")
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(ok_bb);
         if is_rem {
@@ -1848,10 +2008,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             return f;
         }
         let ty = self.ctx.void_type().fn_type(&[], false);
-        let f = self.module.add_function("abort", ty, Some(Linkage::External));
+        let f = self
+            .module
+            .add_function("abort", ty, Some(Linkage::External));
         // Mark noreturn so LLVM knows code after the call is unreachable (not UB-shaped).
-        let noreturn =
-            self.ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
+        let noreturn = self
+            .ctx
+            .create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
         f.add_attribute(AttributeLoc::Function, noreturn);
         f
     }
@@ -1908,7 +2071,8 @@ fn lower_to_module<'ctx>(
     }
 
     // Pass 0d: create and populate variant payload structs (one per non-unit variant).
-    let mut variant_payload_types: HashMap<String, HashMap<String, StructType<'ctx>>> = HashMap::new();
+    let mut variant_payload_types: HashMap<String, HashMap<String, StructType<'ctx>>> =
+        HashMap::new();
     for (enum_name, enum_info) in types.enum_defs() {
         for variant_name in &enum_info.variant_order {
             let payload = &enum_info.variants[variant_name];
@@ -1978,11 +2142,28 @@ fn lower_to_module<'ctx>(
     for item in &ast.items {
         match item {
             Item::Function(func) => {
-                lower_function(func, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
+                lower_function(
+                    func,
+                    types,
+                    ctx,
+                    &module,
+                    &struct_types,
+                    &enum_types,
+                    &variant_payload_types,
+                )?;
             }
             Item::Impl(block) => {
                 for method in &block.methods {
-                    lower_method(block.type_name, method, types, ctx, &module, &struct_types, &enum_types, &variant_payload_types)?;
+                    lower_method(
+                        block.type_name,
+                        method,
+                        types,
+                        ctx,
+                        &module,
+                        &struct_types,
+                        &enum_types,
+                        &variant_payload_types,
+                    )?;
                 }
             }
             Item::Struct(_) | Item::Enum(_) => {}
@@ -2033,11 +2214,17 @@ fn declare_method_sig<'ctx>(
     let mut param_types: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
     if has_self {
         if !struct_types.contains_key(type_name) {
-            return Err(format!("ICE: struct `{type_name}` not found for method declaration"));
+            return Err(format!(
+                "ICE: struct `{type_name}` not found for method declaration"
+            ));
         }
         param_types.push(ctx.ptr_type(AddressSpace::default()).into());
     }
-    let explicit_params = if has_self { &method.params[1..] } else { &method.params[..] };
+    let explicit_params = if has_self {
+        &method.params[1..]
+    } else {
+        &method.params[..]
+    };
     for p in explicit_params {
         param_types.push(basic_type_from_ast(&p.ty, ctx, struct_types).map(Into::into)?);
     }
@@ -2071,7 +2258,14 @@ fn lower_function<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
+        builder,
+        ctx,
+        module,
+        types,
+        fn_val,
+        struct_types,
+        enum_types,
+        variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -2095,7 +2289,10 @@ fn lower_function<'ctx, 'b, 'src>(
         let param_val = fn_val
             .get_nth_param(i as u32)
             .ok_or_else(|| format!("ICE: missing param {i} for `{}`", func.name))?;
-        lower.builder.build_store(ptr, param_val).map_err(|e| e.to_string())?;
+        lower
+            .builder
+            .build_store(ptr, param_val)
+            .map_err(|e| e.to_string())?;
         env.insert(name, (ptr, llvm_ty));
     }
 
@@ -2120,12 +2317,18 @@ fn lower_function<'ctx, 'b, 'src>(
         .is_none()
     {
         if func.return_ty.is_none() {
-            lower.builder.build_return(None).map_err(|e| e.to_string())?;
+            lower
+                .builder
+                .build_return(None)
+                .map_err(|e| e.to_string())?;
         } else {
             match &func.body.tail {
                 Some(tail) => {
                     let val = lower.lower_expr(tail, &env, None)?;
-                    lower.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
+                    lower
+                        .builder
+                        .build_return(Some(&val))
+                        .map_err(|e| e.to_string())?;
                 }
                 None => {
                     return Err(format!(
@@ -2164,7 +2367,14 @@ fn lower_method<'ctx, 'b, 'src>(
     builder.position_at_end(entry);
 
     let mut lower = FnLower {
-        builder, ctx, module, types, fn_val, struct_types, enum_types, variant_payload_types,
+        builder,
+        ctx,
+        module,
+        types,
+        fn_val,
+        struct_types,
+        enum_types,
+        variant_payload_types,
         alloca_slots: HashMap::new(),
     };
     let mut env: CodegenEnv<'ctx, 'src> = HashMap::new();
@@ -2196,7 +2406,11 @@ fn lower_method<'ctx, 'b, 'src>(
         llvm_param_idx = 1;
     }
 
-    let explicit_params = if has_self { &method.params[1..] } else { &method.params[..] };
+    let explicit_params = if has_self {
+        &method.params[1..]
+    } else {
+        &method.params[..]
+    };
     let mut param_alloca_entries: Vec<(&'src str, PointerValue<'ctx>, BasicTypeEnum<'ctx>)> =
         Vec::new();
     for param in explicit_params {
@@ -2214,7 +2428,10 @@ fn lower_method<'ctx, 'b, 'src>(
         let param_val = fn_val
             .get_nth_param(llvm_param_idx)
             .ok_or_else(|| format!("ICE: missing param {llvm_param_idx} for `{mangled}`"))?;
-        lower.builder.build_store(ptr, param_val).map_err(|e| e.to_string())?;
+        lower
+            .builder
+            .build_store(ptr, param_val)
+            .map_err(|e| e.to_string())?;
         env.insert(name, (ptr, llvm_ty));
         llvm_param_idx += 1;
     }
@@ -2240,12 +2457,18 @@ fn lower_method<'ctx, 'b, 'src>(
         .is_none()
     {
         if method.return_ty.is_none() {
-            lower.builder.build_return(None).map_err(|e| e.to_string())?;
+            lower
+                .builder
+                .build_return(None)
+                .map_err(|e| e.to_string())?;
         } else {
             match &method.body.tail {
                 Some(tail) => {
                     let val = lower.lower_expr(tail, &env, None)?;
-                    lower.builder.build_return(Some(&val)).map_err(|e| e.to_string())?;
+                    lower
+                        .builder
+                        .build_return(Some(&val))
+                        .map_err(|e| e.to_string())?;
                 }
                 None => {
                     return Err(format!(
@@ -2427,7 +2650,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 10, "expected if(1<2) {{10}} else {{20}} == 10, got {result}");
+        assert_eq!(
+            result, 10,
+            "expected if(1<2) {{10}} else {{20}} == 10, got {result}"
+        );
     }
 
     /// T8 — while loop + assignment: countdown from 3 reaches 0 (JIT).
@@ -2452,7 +2678,8 @@ mod tests {
     #[test]
     fn test_loop_break_jit() {
         let ctx = Context::create();
-        let src = "fn loop_break() -> i32 { let mut x = 0; loop { x = x + 1; if x == 5 { break; } } x }";
+        let src =
+            "fn loop_break() -> i32 { let mut x = 0; loop { x = x + 1; if x == 5 { break; } } x }";
         let module = compile_to_module(&ctx, src);
         let engine = module
             .create_jit_execution_engine(OptimizationLevel::None)
@@ -2493,7 +2720,10 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
         assert_eq!(result, 3, "expected p.x == 3, got {result}");
     }
@@ -2510,9 +2740,15 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
-        assert_eq!(result, 3, "expected p.x == 3 (declaration order), got {result}");
+        assert_eq!(
+            result, 3,
+            "expected p.x == 3 (declaration order), got {result}"
+        );
     }
 
     /// T14 — method dispatch: `Counter_inc` mutates the caller's struct via self pointer (JIT).
@@ -2529,9 +2765,15 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
-        assert_eq!(result, 1, "expected c.value == 1 after c.inc(), got {result}");
+        assert_eq!(
+            result, 1,
+            "expected c.value == 1 after c.inc(), got {result}"
+        );
     }
 
     /// T15 — same-name methods on two types: `Point_sum` and `Vec2_sum` must not collide (JIT).
@@ -2553,10 +2795,16 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
         // Point: 3+4=7, Vec2: 3*4=12, total=19
-        assert_eq!(result, 19, "expected Point.sum()+Vec2.sum() == 19, got {result}");
+        assert_eq!(
+            result, 19,
+            "expected Point.sum()+Vec2.sum() == 19, got {result}"
+        );
     }
 
     /// T16 — struct literal as direct method receiver (no intermediate `let`): JIT.
@@ -2572,7 +2820,10 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
         assert_eq!(result, 3, "expected Point{{1,2}}.sum() == 3, got {result}");
     }
@@ -2589,7 +2840,10 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
         assert_eq!(result, 42, "expected p.get_x() == 42, got {result}");
     }
@@ -2633,9 +2887,15 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
-        assert_eq!(result, 7, "expected block-wrapped struct let p.x == 7, got {result}");
+        assert_eq!(
+            result, 7,
+            "expected block-wrapped struct let p.x == 7, got {result}"
+        );
     }
 
     /// T19 — block-wrapped struct lit as field access receiver: tail-position transparency.
@@ -2650,9 +2910,15 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
-        assert_eq!(result, 7, "expected {{ Point {{x=7,y=9}} }}.x == 7, got {result}");
+        assert_eq!(
+            result, 7,
+            "expected {{ Point {{x=7,y=9}} }}.x == 7, got {result}"
+        );
     }
 
     /// T20 — block-wrapped struct lit as method receiver: tail-position transparency.
@@ -2669,9 +2935,15 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
-        assert_eq!(result, 16, "expected {{ Point{{7,9}} }}.sum() == 16, got {result}");
+        assert_eq!(
+            result, 16,
+            "expected {{ Point{{7,9}} }}.sum() == 16, got {result}"
+        );
     }
 
     /// T21 — if/else producing a struct value, stored in let binding.
@@ -2690,7 +2962,10 @@ mod tests {
             .create_jit_execution_engine(OptimizationLevel::None)
             .expect("JIT engine creation failed");
         let result: i32 = unsafe {
-            engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call()
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
         };
         assert_eq!(result, 7, "expected if/else struct p.x == 7, got {result}");
     }
@@ -2716,7 +2991,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 17, "expected e.position.x + e.position.y + e.id == 17, got {result}");
+        assert_eq!(
+            result, 17,
+            "expected e.position.x + e.position.y + e.id == 17, got {result}"
+        );
     }
 
     /// T23 — struct-as-field: Entity declared before Point (reverse order).
@@ -2740,7 +3018,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 17, "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}");
+        assert_eq!(
+            result, 17,
+            "expected reverse-order e.position.x + e.position.y + e.id == 17, got {result}"
+        );
     }
 
     /// T27 — i32::MIN literal: `-2147483648` must compile and return i32::MIN end-to-end.
@@ -2759,7 +3040,11 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, i32::MIN, "expected i32::MIN (-2147483648), got {result}");
+        assert_eq!(
+            result,
+            i32::MIN,
+            "expected i32::MIN (-2147483648), got {result}"
+        );
     }
 
     /// T24 — nested-block shadow must not corrupt the outer binding.
@@ -2778,7 +3063,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 1, "outer x should remain 1 after inner block shadows it, got {result}");
+        assert_eq!(
+            result, 1,
+            "outer x should remain 1 after inner block shadows it, got {result}"
+        );
     }
 
     /// T25 — same-block shadow: the second binding overwrites the name.
@@ -2816,7 +3104,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 1, "y should hold x's value before the shadow (1), got {result}");
+        assert_eq!(
+            result, 1,
+            "y should hold x's value before the shadow (1), got {result}"
+        );
     }
 
     /// T28 — Expr::Block as a Binary operand inside a while loop body.
@@ -2888,7 +3179,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 12, "x=1, y=11 (inner x used old x=1), x+y=12, got {result}");
+        assert_eq!(
+            result, 12,
+            "x=1, y=11 (inner x used old x=1), x+y=12, got {result}"
+        );
     }
 
     /// T31 — chained shadow self-references.
@@ -2931,7 +3225,10 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 1, "flag>3 is true (old flag=5), branch should return 1, got {result}");
+        assert_eq!(
+            result, 1,
+            "flag>3 is true (old flag=5), branch should return 1, got {result}"
+        );
     }
 
     // ── Enum codegen JIT tests ────────────────────────────────────────────────
@@ -2951,9 +3248,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 1);
     }
 
@@ -2972,9 +3275,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 1);
     }
 
@@ -2999,9 +3308,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 60); // 10 + 20 + 30
     }
 
@@ -3020,9 +3335,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 99);
     }
 
@@ -3041,9 +3362,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 7);
     }
 
@@ -3068,9 +3395,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 0); // 1 + 0 + (-1)
     }
 
@@ -3091,9 +3424,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 2); // 0 + 0 + 1 + 1
     }
 
@@ -3109,9 +3448,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 15);
     }
 
@@ -3127,9 +3472,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 1);
     }
 
@@ -3150,9 +3501,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 100);
     }
 
@@ -3171,9 +3528,15 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-        let result: i32 =
-            unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("f").unwrap().call() };
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
         assert_eq!(result, 42);
     }
 }
