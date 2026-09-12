@@ -4019,7 +4019,9 @@ mod tests {
             }
         ";
         let module = compile_to_module(&ctx, src);
-        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
         let result: i32 = unsafe {
             engine
                 .get_function::<unsafe extern "C" fn() -> i32>("f")
