@@ -58,9 +58,6 @@
   T_en_cg_14 added for depth-2 coverage.
 
 **What's next:**
-- Update `docs/SYNTAX_SPEC.md` §21 — replace "not yet implemented" notice
-  with accurate post-implementation status (arity-1 done, arity ≥2 conservative, Option C deferred).
-  `docs:` commit directly to main.
 - Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
 - `For` loop codegen (currently deferred)
 - Manual: pin repos on org profile (web UI)

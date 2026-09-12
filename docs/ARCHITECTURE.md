@@ -234,10 +234,13 @@ Placeholder variants already exist in `TypeError` and `Ty` for API stability.
 
 ## Codegen  (`src/codegen/`)
 
-**Current status:** slice 1 + slice 2 complete. `src/codegen/mod.rs` feature-gates
+**Current status:** slices 1–3 complete. `src/codegen/mod.rs` feature-gates
 `pub mod llvm`; `src/codegen/llvm.rs` contains the full lowering pipeline.
 Slice 1 covers primitives, arithmetic, free function calls, if/while/loop, let/return.
 Slice 2 adds struct instantiation, field read/write, and method dispatch.
+Slice 3 adds enum tagged-union layout, enum construction, match lowering with nested
+sub-patterns at arbitrary depth (arity-1 precise exhaustiveness; arity-≥2 conservative
+soundness boundary — see §21 of SYNTAX_SPEC.md).
 
 **Backend:** LLVM via inkwell (decided 2026-06-24; rationale in `PROGRESS.md` —
 multi-platform reach without per-arch codegen; Cranelift evaluated and rejected).
@@ -552,16 +555,16 @@ When assessing future candidates, ask: "can I name the subsystem as a domain con
 
 See `docs/SYNTAX_SPEC.md` §24 for the canonical deferred list. Short summary:
 
-- Enum declarations — `Item::Enum` AST node and parser not yet implemented (`Token::Enum` lexed; full AST + parser + typechecker needed)
-- `match` / `for` typechecking — AST + parser complete; typechecking deferred (produces `Ty::Error`)
+- `match` arm typechecking — codegen complete (slice 3); typechecker still defers match arm types (produces `Ty::Error`), meaning match expressions are not type-propagated through the inference result
+- `for` / `for-in` — AST + parser complete; typechecking and codegen deferred
 - Traits / trait bounds
 - Modules / namespaces (`mod`, `use`)
 - Generic instantiation (phase 2 typechecker)
 - Lifetime annotations (opt-in escape hatch per pillar 2)
 - Standard library / prelude (`Option<T>`, `Checked<T, E>` constructors)
 - C interop (explicit `extern` blocks — call-into-C only; decided in `PHILOSOPHY.md`)
-- `for` / `for-in`, `match`, cast (`as`), `?` operator (parser complete; typechecker deferred)
-- Codegen: slice 3+ (generics, enums, traits, closures, C interop ABI)
+- `for` / `for-in`, cast (`as`), `?` operator (parser complete; typechecker and codegen deferred)
+- Codegen: slice 4+ (generics, traits, closures, C interop ABI)
 
 ---
 
