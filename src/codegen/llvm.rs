@@ -72,7 +72,7 @@ fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), CodegenError> {
             RelocMode::Default,
             CodeModel::Default,
         )
-        .ok_or_else(|| "failed to create target machine".to_string())?;
+        .ok_or_else(|| CodegenError::Llvm("failed to create target machine".to_string()))?;
 
     let obj = out.with_extension("o");
     tm.write_to_file(module, FileType::Object, &obj)
@@ -700,7 +700,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 Expr::Ident(name, _) => {
                     let &(ptr, llvm_ty) = env
                         .get(*name)
-                        .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
+                        .ok_or_else(|| CodegenError::Ice(format!("variable `{name}` not in env (assignment) — typechecker invariant violated")))?;
                     let rhs = self.lower_expr(value, env, loop_ctx)?;
                     let new_val = match op {
                         None => rhs,
@@ -1453,7 +1453,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
                 let &(ptr, llvm_ty) = env
                     .get(*name)
-                    .ok_or_else(|| CodegenError::Ice(format!("ICE: variable `{name}` not in env — typechecker should have rejected undefined references")))?;
+                    .ok_or_else(|| CodegenError::Ice(format!("variable `{name}` not in env — typechecker should have rejected undefined references")))?;
                 self.builder
                     .build_load(llvm_ty, ptr, name)
                     .map_err(|e| CodegenError::Llvm(e.to_string()))
@@ -1709,7 +1709,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     });
                 };
                 let callee_fn = self.module.get_function(name).ok_or_else(|| {
-                    CodegenError::Ice(format!("ICE: function `{name}` not found in LLVM module — typechecker should have caught undefined calls"))
+                    CodegenError::Ice(format!("function `{name}` not found in LLVM module — typechecker should have caught undefined calls"))
                 })?;
                 let arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = args
                     .iter()
