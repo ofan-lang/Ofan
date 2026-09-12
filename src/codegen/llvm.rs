@@ -23,6 +23,8 @@ use crate::ast::{
 use crate::lexer::token::Span;
 use crate::typechecker::{InferResult, Ty};
 
+use super::CodegenError;
+
 /// LLVM compilation context for one compiler invocation.
 pub struct LlvmContext {
     inner: Context,
@@ -35,10 +37,8 @@ impl LlvmContext {
         }
     }
 
-    // TODO: promote errors to a typed CodegenError enum (PR 33+).
-
     /// Lower `ast` to a native binary at `out`.
-    pub fn emit(&self, ast: &Ast<'_>, types: &InferResult, out: &Path) -> Result<(), String> {
+    pub fn emit(&self, ast: &Ast<'_>, types: &InferResult, out: &Path) -> Result<(), CodegenError> {
         let module = lower_to_module(&self.inner, ast, types)?;
         emit_module(&module, out)
     }
@@ -50,23 +50,19 @@ impl Default for LlvmContext {
     }
 }
 
-// ─── Module emission ──────────────────────────────────────────────────────────
+// â"€â"€â"€ Module emission â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), String> {
+fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), CodegenError> {
     // Validate entry function before emitting object code. lower_to_module is also used
     // by JIT tests (which have no entry function), so the check lives here, in the
     // AOT-only path.
     if module.get_function(super::ENTRY_FN).is_none() {
-        return Err(format!(
-            "no `fn {}` found; Ofan programs must define an entry function named `{}`",
-            super::ENTRY_FN,
-            super::ENTRY_FN,
-        ));
+        return Err(CodegenError::EntryFnMissing);
     }
     Target::initialize_x86(&InitializationConfig::default()); // x86-only for now; extend when multi-target lands
 
     let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    let target = Target::from_triple(&triple).map_err(|e| CodegenError::Llvm(e.to_string()))?;
     let tm = target
         .create_target_machine(
             &triple,
@@ -76,11 +72,11 @@ fn emit_module(module: &Module<'_>, out: &Path) -> Result<(), String> {
             RelocMode::Default,
             CodeModel::Default,
         )
-        .ok_or_else(|| "failed to create target machine".to_string())?;
+        .ok_or_else(|| CodegenError::Llvm("failed to create target machine".to_string()))?;
 
     let obj = out.with_extension("o");
     tm.write_to_file(module, FileType::Object, &obj)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
     link_object(&obj, out)?;
     if let Err(e) = std::fs::remove_file(&obj) {
@@ -100,7 +96,7 @@ enum LinkerKind {
     Unix(std::path::PathBuf),
 }
 
-fn link_object(obj: &Path, out: &Path) -> Result<(), String> {
+fn link_object(obj: &Path, out: &Path) -> Result<(), CodegenError> {
     let mut last_error: Option<String> = None;
     for candidate in linker_candidates() {
         match candidate {
@@ -146,7 +142,7 @@ fn link_object(obj: &Path, out: &Path) -> Result<(), String> {
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| {
+    Err(CodegenError::Llvm(last_error.unwrap_or_else(|| {
         #[cfg(windows)]
         {
             "no system linker found; install Visual Studio Build Tools with the \
@@ -158,7 +154,7 @@ fn link_object(obj: &Path, out: &Path) -> Result<(), String> {
         {
             "no system linker found; install cc or clang and ensure it is in PATH".to_string()
         }
-    }))
+    })))
 }
 
 fn linker_candidates() -> Vec<LinkerKind> {
@@ -186,11 +182,11 @@ fn linker_candidates() -> Vec<LinkerKind> {
     }
 }
 
-// ─── AST → LLVM IR lowering ───────────────────────────────────────────────────
+// â"€â"€â"€ AST â†’ LLVM IR lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// Maps variable name → (alloca pointer, LLVM pointee type).
+/// Maps variable name â†’ (alloca pointer, LLVM pointee type).
 /// Storing the type avoids re-querying InferResult on every load and makes
-/// compound assignment (+=, -=, …) straightforward.
+/// compound assignment (+=, -=, â€¦) straightforward.
 type CodegenEnv<'ctx, 'src> = HashMap<&'src str, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>;
 
 /// Loop exit/continue targets threaded through lower_stmt / lower_expr.
@@ -231,7 +227,7 @@ struct FnLower<'ctx, 'b> {
     struct_types: &'b HashMap<String, StructType<'ctx>>,
     /// LLVM tagged-union types keyed by enum name — `{ i32, [N x i8] }`. Built in Pass 0c/0e.
     enum_types: &'b HashMap<String, StructType<'ctx>>,
-    /// LLVM payload struct types keyed by `enum_name → variant_name`. Built in Pass 0d.
+    /// LLVM payload struct types keyed by `enum_name â†’ variant_name`. Built in Pass 0d.
     variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
     /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
     /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
@@ -239,7 +235,7 @@ struct FnLower<'ctx, 'b> {
 }
 
 impl<'ctx, 'b> FnLower<'ctx, 'b> {
-    // ── Alloca hoisting ───────────────────────────────────────────────────────
+    // â"€â"€ Alloca hoisting â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Pre-scan `stmts` for `let` bindings and emit their allocas at the CURRENT
     /// builder position into `self.alloca_slots`.  Callers must ensure this is the
@@ -250,7 +246,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     /// bindings — whether in the same block or a nested block — each have a
     /// distinct slot.  `lower_stmt` updates `env[name]` incrementally, ensuring
     /// `Expr::Ident` reads always resolve to the most-recently-processed binding.
-    fn emit_allocas<'src>(&mut self, stmts: &[Stmt<'src>]) -> Result<(), String> {
+    fn emit_allocas<'src>(&mut self, stmts: &[Stmt<'src>]) -> Result<(), CodegenError> {
         for stmt in stmts {
             match stmt {
                 Stmt::Let {
@@ -267,7 +263,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     let ptr = self
                         .builder
                         .build_alloca(llvm_ty, name)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     self.alloca_slots.insert(*name_span, ptr);
                     self.emit_allocas_in_expr(init)?;
                 }
@@ -292,7 +288,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     /// Recurse into every expression position that can contain a nested `let` binding,
     /// hoisting allocas to the function entry block so they are mem2reg-eligible and
     /// never execute more than once regardless of control flow.
-    fn emit_allocas_in_expr<'src>(&mut self, expr: &Expr<'src>) -> Result<(), String> {
+    fn emit_allocas_in_expr<'src>(&mut self, expr: &Expr<'src>) -> Result<(), CodegenError> {
         match expr {
             // Leaf nodes — no sub-expressions to traverse.
             Expr::Literal(..) | Expr::Ident(..) => {}
@@ -384,10 +380,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         Ok(())
     }
 
-    // ── Type helpers ──────────────────────────────────────────────────────────
+    // â"€â"€ Type helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Resolve `ty` to an LLVM `BasicTypeEnum`, including named struct types.
-    fn llvm_ty(&self, ty: &Ty) -> Result<BasicTypeEnum<'ctx>, String> {
+    fn llvm_ty(&self, ty: &Ty) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         resolve_ty(ty, self.ctx, self.struct_types)
     }
 
@@ -396,38 +392,38 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     /// Handles both bare `Named` (value-position struct) and `Ref { inner: Named }`
     /// (reference-receiver — the typechecker wraps non-consuming method receivers in Ref).
     /// Both map to the same LLVM `%StructType*` pointer.
-    fn struct_name_of(&self, span: crate::lexer::token::Span) -> Result<&str, String> {
+    fn struct_name_of(&self, span: crate::lexer::token::Span) -> Result<&str, CodegenError> {
         match self.types.type_of(span) {
             Some(Ty::Named(n)) => Ok(n.as_str()),
             Some(Ty::Ref { inner, .. }) => match inner.as_ref() {
                 Ty::Named(n) => Ok(n.as_str()),
-                other => Err(format!(
-                    "ICE: Ref inner type is not Named at byte {}: {other:?}",
+                other => Err(CodegenError::Ice(format!(
+                    "Ref inner type is not Named at byte {}: {other:?}",
                     span.start
-                )),
+                ))),
             },
-            other => Err(format!(
-                "ICE: expected Named or Ref<Named> type at byte {}, got {:?}",
+            other => Err(CodegenError::Ice(format!(
+                "expected Named or Ref<Named> type at byte {}, got {:?}",
                 span.start, other
-            )),
+            ))),
         }
     }
 
-    // ── Pointer-producing receiver helpers ────────────────────────────────────
+    // â"€â"€ Pointer-producing receiver helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Lower `expr` to a pointer suitable for use as a method self-receiver or
     /// field-assignment target.
     ///
-    /// - `Expr::Ident` → the pre-allocated variable alloca (already a pointer).
-    /// - `Expr::StructLit` → fresh alloca filled by `lower_struct_lit_into`, pointer returned.
-    /// - `Expr::Field` → GEP into the parent struct without a load (field pointer).
-    /// - Anything else → lower to value, spill to a fresh alloca, return that pointer.
+    /// - `Expr::Ident` â†’ the pre-allocated variable alloca (already a pointer).
+    /// - `Expr::StructLit` â†’ fresh alloca filled by `lower_struct_lit_into`, pointer returned.
+    /// - `Expr::Field` â†’ GEP into the parent struct without a load (field pointer).
+    /// - Anything else â†’ lower to value, spill to a fresh alloca, return that pointer.
     fn lower_as_ptr<'src>(
         &self,
         expr: &Expr<'src>,
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<PointerValue<'ctx>, String> {
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
         match expr {
             Expr::Ident(name, _) => {
                 let &(ptr, _) = env
@@ -443,7 +439,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = self
                     .builder
                     .build_alloca(struct_ty, "recv_tmp")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.lower_struct_lit_into(ptr, struct_ty, name, fields, env, loop_ctx)?;
                 Ok(ptr)
             }
@@ -462,7 +458,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     })? as u32;
                 self.builder
                     .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))
             }
             other => {
                 let val = self.lower_expr(other, env, loop_ctx)?;
@@ -478,10 +474,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = self
                     .builder
                     .build_alloca(ty, "spill")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_store(ptr, val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 Ok(ptr)
             }
         }
@@ -499,7 +495,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         fields: &[StructFieldInit<'src>],
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CodegenError> {
         let field_names = self
             .types
             .struct_field_names(type_name)
@@ -512,7 +508,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             let gep = self
                 .builder
                 .build_struct_gep(struct_ty, dest, i as u32, "field_init")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             // Mirrors Stmt::Let: fast-path StructLit directly into dest, then lower-once
             // for everything else and match on the (value, type) pair.
             match init_expr.value.as_ref() {
@@ -541,15 +537,15 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             let struct_val = self
                                 .builder
                                 .build_load(inner_ty, src_ptr, "field_struct")
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             self.builder
                                 .build_store(gep, struct_val)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                         }
                         (other_val, _) => {
                             self.builder
                                 .build_store(gep, other_val)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                         }
                     }
                 }
@@ -558,7 +554,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         Ok(())
     }
 
-    // ── Block / statement lowering ────────────────────────────────────────────
+    // â"€â"€ Block / statement lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Lower a braced block. Returns the tail expression value (if any); does NOT emit `ret`.
     fn lower_block<'src>(
@@ -566,7 +562,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         block: &Block<'src>,
         env: &mut CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         for stmt in &block.stmts {
             self.lower_stmt(stmt, env, loop_ctx)?;
             if self
@@ -594,7 +590,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         &self,
         val: BasicValueEnum<'ctx>,
         expr_span: crate::lexer::token::Span,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         if let BasicValueEnum::PointerValue(ptr) = val {
             // A PointerValue at a return site must come from a struct-typed expression
             // (StructLit, Block/If wrapper). A missing type-map entry here is a compiler
@@ -612,7 +608,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .builder
                         .build_load(struct_ty, ptr, "ret_struct")
                         .map(|v| v.as_basic_value_enum())
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| CodegenError::Llvm(e.to_string()));
                 }
             }
         }
@@ -624,7 +620,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         stmt: &Stmt<'src>,
         env: &mut CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CodegenError> {
         match stmt {
             Stmt::Let {
                 name,
@@ -650,7 +646,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 } else {
                     self.builder
                         .build_alloca(llvm_ty, name)
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                 };
                 // Evaluate the init expression BEFORE updating env[name]. A self-referencing
                 // shadow (`let x = x + 1`) must resolve `x` to the OLD binding, not the new
@@ -681,15 +677,15 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                                 let struct_val = self
                                     .builder
                                     .build_load(struct_ty, src_ptr, "struct_tmp")
-                                    .map_err(|e| e.to_string())?;
+                                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                 self.builder
                                     .build_store(ptr, struct_val)
-                                    .map_err(|e| e.to_string())?;
+                                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             }
                             (other_val, _) => {
                                 self.builder
                                     .build_store(ptr, other_val)
-                                    .map_err(|e| e.to_string())?;
+                                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             }
                         }
                     }
@@ -704,7 +700,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 Expr::Ident(name, _) => {
                     let &(ptr, llvm_ty) = env
                         .get(*name)
-                        .ok_or_else(|| format!("undefined variable in assignment: `{name}`"))?;
+                        .ok_or_else(|| CodegenError::Ice(format!("variable `{name}` not in env (assignment) — typechecker invariant violated")))?;
                     let rhs = self.lower_expr(value, env, loop_ctx)?;
                     let new_val = match op {
                         None => rhs,
@@ -715,13 +711,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             let current = self
                                 .builder
                                 .build_load(llvm_ty, ptr, "load")
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             self.lower_binary(*binop, current, rhs, assign_ty)?
                         }
                     };
                     self.builder
                         .build_store(ptr, new_val)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 Expr::Field { object, field, .. } => {
                     let obj_ptr = self.lower_as_ptr(object, env, loop_ctx)?;
@@ -738,7 +734,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     let gep = self
                         .builder
                         .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     let rhs = self.lower_expr(value, env, loop_ctx)?;
                     let new_val = match op {
                         None => rhs,
@@ -753,7 +749,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             let current = self
                                 .builder
                                 .build_load(field_ty, gep, "field_cur")
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             let assign_ty = self.types.type_of(target.span()).ok_or_else(|| {
                                 "missing type for field assign target".to_string()
                             })?;
@@ -762,12 +758,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     };
                     self.builder
                         .build_store(gep, new_val)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 _ => {
-                    return Err(
-                        "assignment to non-identifier/field targets not yet supported".to_string(),
-                    )
+                    return Err(CodegenError::NotYetLowered {
+                        feature: "assignment to non-identifier/field targets",
+                        byte: target.span().start,
+                    })
                 }
             },
 
@@ -778,17 +775,22 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let val = self.materialize_return_val(val, expr.span())?;
                 self.builder
                     .build_return(Some(&val))
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             Stmt::Return { value: None, .. } => {
-                self.builder.build_return(None).map_err(|e| e.to_string())?;
+                self.builder
+                    .build_return(None)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
 
-            Stmt::Break { value: Some(_), .. } => {
-                return Err(
-                    "break with value not supported in PR 32 — assign to a variable before breaking"
-                        .to_string(),
-                );
+            Stmt::Break {
+                value: Some(_),
+                span,
+            } => {
+                return Err(CodegenError::NotYetLowered {
+                    feature: "break with value",
+                    byte: span.start,
+                });
             }
             Stmt::Break { value: None, .. } => {
                 let lctx = loop_ctx.ok_or_else(|| {
@@ -796,7 +798,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 })?;
                 self.builder
                     .build_unconditional_branch(lctx.break_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             Stmt::Continue { .. } => {
                 let lctx = loop_ctx.ok_or_else(|| {
@@ -804,7 +806,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 })?;
                 self.builder
                     .build_unconditional_branch(lctx.continue_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
 
             Stmt::Expr { expr, .. } => {
@@ -812,28 +814,29 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
 
             other => {
-                return Err(format!(
-                    "statement not supported in PR 32 (at byte {}): \
-                     `const` and other forms land in a later PR",
-                    stmt_span_start(other)
-                ));
+                return Err(CodegenError::NotYetLowered {
+                    feature: "const and other statement forms",
+                    byte: stmt_span_start(other),
+                });
             }
         }
         Ok(())
     }
 
-    // ── Enum helpers ──────────────────────────────────────────────────────────
+    // â"€â"€ Enum helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-    fn get_variant_tag(&self, enum_name: &str, variant_name: &str) -> Result<u32, String> {
+    fn get_variant_tag(&self, enum_name: &str, variant_name: &str) -> Result<u32, CodegenError> {
         self.types
             .enum_defs()
             .get(enum_name)
-            .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?
+            .ok_or_else(|| CodegenError::Ice(format!("enum `{enum_name}` not in enum_defs")))?
             .variant_order
             .iter()
             .position(|n| n == variant_name)
             .map(|i| i as u32)
-            .ok_or_else(|| format!("ICE: variant `{variant_name}` not in `{enum_name}`"))
+            .ok_or_else(|| {
+                CodegenError::Ice(format!("variant `{variant_name}` not in `{enum_name}`"))
+            })
     }
 
     /// Lower an enum construction: allocate, write tag + payload, return loaded aggregate.
@@ -844,7 +847,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         payload_exprs: &[Expr<'src>],
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let enum_ty = *self
             .enum_types
             .get(enum_name)
@@ -854,16 +857,16 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         let ptr = self
             .builder
             .build_alloca(enum_ty, "enum_tmp")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         // Write tag at GEP [0, 0].
         let tag_ptr = self
             .builder
             .build_struct_gep(enum_ty, ptr, 0, "tag_ptr")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         self.builder
             .build_store(tag_ptr, self.ctx.i32_type().const_int(tag as u64, false))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         // Write payload fields at GEP [0, 1] (the [N x i64] area).
         if !payload_exprs.is_empty() {
@@ -877,25 +880,25 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             let payload_area = self
                 .builder
                 .build_struct_gep(enum_ty, ptr, 1, "payload_area")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             for (i, field_expr) in payload_exprs.iter().enumerate() {
                 let field_val = self.lower_expr(field_expr, env, loop_ctx)?;
                 let field_ptr = self
                     .builder
                     .build_struct_gep(payload_ty, payload_area, i as u32, "payload_field")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_store(field_ptr, field_val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
         }
 
         self.builder
             .build_load(enum_ty, ptr, "enum_val")
-            .map_err(|e| e.to_string())
+            .map_err(|e| CodegenError::Llvm(e.to_string()))
     }
 
-    // ── Match lowering ────────────────────────────────────────────────────────
+    // â"€â"€ Match lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     fn lower_match<'src>(
         &self,
@@ -904,7 +907,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         span: Span,
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let subject_ty = self.types.type_of(subject.span()).ok_or_else(|| {
             format!(
                 "ICE: match subject has no type at byte {}",
@@ -927,7 +930,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         arms: &[MatchArm<'src>],
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let enum_ty = *self
             .enum_types
             .get(enum_name)
@@ -938,7 +941,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             .get(enum_name)
             .ok_or_else(|| format!("ICE: enum `{enum_name}` not in enum_defs"))?;
 
-        // ── Subject pointer ───────────────────────────────────────────────────
+        // â"€â"€ Subject pointer â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         // For a variable subject, use its alloca directly to avoid a copy.
         // For any expression (including bare unit variant construction), lower and spill.
         let subject_ptr: PointerValue<'ctx> = if let Expr::Ident(name, _) = subject {
@@ -949,10 +952,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = self
                     .builder
                     .build_alloca(enum_ty, "match_subj")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_store(ptr, val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 ptr
             }
         } else {
@@ -960,25 +963,25 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             let ptr = self
                 .builder
                 .build_alloca(enum_ty, "match_subj")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             self.builder
                 .build_store(ptr, val)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             ptr
         };
 
-        // ── Load tag ──────────────────────────────────────────────────────────
+        // â"€â"€ Load tag â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         let tag_gep = self
             .builder
             .build_struct_gep(enum_ty, subject_ptr, 0, "tag_ptr")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         let tag_val = self
             .builder
             .build_load(self.ctx.i32_type(), tag_gep, "tag")
-            .map_err(|e| e.to_string())?
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
             .into_int_value();
 
-        // ── Merge block + result type ──────────────────────────────────────────
+        // â"€â"€ Merge block + result type â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         let merge_bb = self.ctx.append_basic_block(self.fn_val, "match_merge");
         let result_ty: Option<BasicTypeEnum<'ctx>> = {
             let ty = self.types.type_of(match_span).unwrap_or(&Ty::Unit);
@@ -989,25 +992,25 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
         };
 
-        // ── Default block ─────────────────────────────────────────────────────
+        // â"€â"€ Default block â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         let default_bb = self.ctx.append_basic_block(self.fn_val, "match_default");
         let mut default_arm_opt: Option<&MatchArm<'src>> = None;
 
-        // ── Classify arms ─────────────────────────────────────────────────────
+        // â"€â"€ Classify arms â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         // tag_arms: ordered (tag, arm_indices) pairs (Vec for determinism).
-        // tag_arm_pos: tag → index into tag_arms.
+        // tag_arm_pos: tag â†’ index into tag_arms.
         let mut tag_arms: Vec<(u32, Vec<usize>)> = Vec::new();
         let mut tag_arm_pos: HashMap<u32, usize> = HashMap::new();
         // or_arms: (arm_idx, tags) for Or-patterns of unit variants.
         let mut or_arms: Vec<(usize, Vec<u32>)> = Vec::new();
 
-        let lookup_tag = |name: &str| -> Result<u32, String> {
+        let lookup_tag = |name: &str| -> Result<u32, CodegenError> {
             enum_info
                 .variant_order
                 .iter()
                 .position(|n| n == name)
                 .map(|i| i as u32)
-                .ok_or_else(|| format!("ICE: variant `{name}` not in `{enum_name}`"))
+                .ok_or_else(|| CodegenError::Ice(format!("variant `{name}` not in `{enum_name}`")))
         };
 
         for (arm_idx, arm) in arms.iter().enumerate() {
@@ -1040,7 +1043,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         }
                     }
                 }
-                Pattern::Or(pats, _) => {
+                Pattern::Or(pats, or_span) => {
                     let mut tags = Vec::new();
                     for p in pats {
                         match p {
@@ -1054,21 +1057,25 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                                 tags.push(lookup_tag(vname)?);
                             }
                             _ => {
-                                return Err(
-                                    "complex Or-patterns not yet supported in codegen".to_string()
-                                );
+                                return Err(CodegenError::NotYetLowered {
+                                    feature: "complex Or-patterns",
+                                    byte: or_span.start,
+                                });
                             }
                         }
                     }
                     or_arms.push((arm_idx, tags));
                 }
-                Pattern::Literal(_, _) => {
-                    return Err("literal patterns inside enum match not supported".to_string());
+                Pattern::Literal(_, lit_span) => {
+                    return Err(CodegenError::NotYetLowered {
+                        feature: "literal patterns inside enum match",
+                        byte: lit_span.start,
+                    });
                 }
             }
         }
 
-        // ── Create per-tag entry blocks ───────────────────────────────────────
+        // â"€â"€ Create per-tag entry blocks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         // Create or-arm body blocks first so we can collect all switch cases.
         let or_arm_bbs: Vec<(usize, Vec<u32>, BasicBlock<'ctx>)> = or_arms
             .iter()
@@ -1097,11 +1104,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         }
         self.builder
             .build_switch(tag_val, default_bb, &switch_cases)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         let mut arm_exits: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
 
-        // ── Or-pattern arms ───────────────────────────────────────────────────
+        // â"€â"€ Or-pattern arms â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         for (arm_idx, _, body_bb) in &or_arm_bbs {
             let arm = &arms[*arm_idx];
             self.builder.position_at_end(*body_bb);
@@ -1110,14 +1117,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             if exit_bb.get_terminator().is_none() {
                 self.builder
                     .build_unconditional_branch(merge_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             if result_ty.is_some() {
                 arm_exits.push((body_val, exit_bb));
             }
         }
 
-        // ── Tag-grouped arms (chained, possibly guarded) ──────────────────────
+        // â"€â"€ Tag-grouped arms (chained, possibly guarded) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         for (tag, arm_indices) in &tag_arms {
             let variant_name = &enum_info.variant_order[*tag as usize];
             let payload_ty = self
@@ -1156,7 +1163,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         let payload_area = self
                             .builder
                             .build_struct_gep(enum_ty, subject_ptr, 1, "payload_area")
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                         let payload_fields = &enum_info.variants[variant_name.as_str()];
                         for (j, sub_pat) in sub_patterns.iter().enumerate() {
                             match sub_pat {
@@ -1165,28 +1172,26 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                                     let fptr = self
                                         .builder
                                         .build_struct_gep(pt, payload_area, j as u32, "pf_ptr")
-                                        .map_err(|e| e.to_string())?;
+                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                     let fval = self
                                         .builder
                                         .build_load(field_ty, fptr, bname)
-                                        .map_err(|e| e.to_string())?;
+                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                     let falloca = self
                                         .builder
                                         .build_alloca(field_ty, bname)
-                                        .map_err(|e| e.to_string())?;
+                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                     self.builder
                                         .build_store(falloca, fval)
-                                        .map_err(|e| e.to_string())?;
+                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                     arm_env.insert(bname, (falloca, field_ty));
                                 }
                                 Pattern::Wildcard(_) => { /* no binding */ }
                                 _ => {
-                                    return Err(
-                                        "nested sub-patterns (literals, constructors, or-patterns) \
-                                         not yet supported in codegen — use a guard instead \
-                                         (e.g. `Some(x) if x == 0`)"
-                                            .to_string(),
-                                    );
+                                    return Err(CodegenError::NotYetLowered {
+                                        feature: "nested sub-patterns in constructor match arms",
+                                        byte: sub_pat.span().start,
+                                    });
                                 }
                             }
                         }
@@ -1198,11 +1203,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .into_int_value();
                     self.builder
                         .build_conditional_branch(gval, body_bbs[i], guard_fail_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 } else {
                     self.builder
                         .build_unconditional_branch(body_bbs[i])
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
 
                 // Arm body.
@@ -1212,7 +1217,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 if exit_bb.get_terminator().is_none() {
                     self.builder
                         .build_unconditional_branch(merge_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 if result_ty.is_some() {
                     arm_exits.push((body_val, exit_bb));
@@ -1220,7 +1225,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             }
         }
 
-        // ── Default block ─────────────────────────────────────────────────────
+        // â"€â"€ Default block â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         self.builder.position_at_end(default_bb);
         if let Some(arm) = default_arm_opt {
             let mut def_env = env.clone();
@@ -1228,14 +1233,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let val = self
                     .builder
                     .build_load(enum_ty, subject_ptr, "enum_val")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 let falloca = self
                     .builder
                     .build_alloca(enum_ty, bname)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_store(falloca, val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 def_env.insert(bname, (falloca, enum_ty.into()));
             }
             let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
@@ -1243,7 +1248,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             if exit_bb.get_terminator().is_none() {
                 self.builder
                     .build_unconditional_branch(merge_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             if result_ty.is_some() {
                 arm_exits.push((body_val, exit_bb));
@@ -1251,10 +1256,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         } else {
             self.builder
                 .build_unreachable()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         }
 
-        // ── Phi in merge ──────────────────────────────────────────────────────
+        // â"€â"€ Phi in merge â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         self.builder.position_at_end(merge_bb);
         match result_ty {
             None => Ok(unit_value(self.ctx)),
@@ -1262,7 +1267,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let phi = self
                     .builder
                     .build_phi(llvm_ty, "match_result")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 for (val, bb) in &arm_exits {
                     phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
                 }
@@ -1278,7 +1283,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         match_span: Span,
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let subject_val = self.lower_expr(subject, env, loop_ctx)?;
         let int_val = subject_val.into_int_value();
 
@@ -1319,7 +1324,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     ));
                 }
                 other => {
-                    return Err(format!("pattern {other:?} not supported in scalar match"));
+                    return Err(CodegenError::NotYetLowered {
+                        feature: "non-literal/wildcard pattern in scalar match",
+                        byte: other.span().start,
+                    });
                 }
             }
         }
@@ -1328,7 +1336,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             case_blocks.iter().map(|(k, bb, _)| (*k, *bb)).collect();
         self.builder
             .build_switch(int_val, default_bb, &switch_cases)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         let mut arm_exits: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
 
@@ -1339,7 +1347,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             if exit_bb.get_terminator().is_none() {
                 self.builder
                     .build_unconditional_branch(merge_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             if result_ty.is_some() {
                 arm_exits.push((body_val, exit_bb));
@@ -1358,10 +1366,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = self
                     .builder
                     .build_alloca(bllvm_ty, bname)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_store(ptr, subject_val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 def_env.insert(bname, (ptr, bllvm_ty));
             }
             let body_val = self.lower_expr(&arm.body, &def_env, loop_ctx)?;
@@ -1369,7 +1377,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             if exit_bb.get_terminator().is_none() {
                 self.builder
                     .build_unconditional_branch(merge_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
             }
             if result_ty.is_some() {
                 arm_exits.push((body_val, exit_bb));
@@ -1377,7 +1385,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         } else {
             self.builder
                 .build_unreachable()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         }
 
         self.builder.position_at_end(merge_bb);
@@ -1387,7 +1395,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let phi = self
                     .builder
                     .build_phi(llvm_ty, "switch_result")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 for (val, bb) in &arm_exits {
                     phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
                 }
@@ -1396,14 +1404,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         }
     }
 
-    // ── Expression lowering ───────────────────────────────────────────────────
+    // â"€â"€ Expression lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     fn lower_expr<'src>(
         &self,
         expr: &Expr<'src>,
         env: &CodegenEnv<'ctx, 'src>,
         loop_ctx: Option<&LoopCtx<'ctx>>,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         match expr {
             Expr::Literal(lit, span) => {
                 let ty = self
@@ -1413,13 +1421,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 match (lit, ty) {
                     (Literal::Integer(n), Ty::I32) => {
                         if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                            return Err(format!(
+                            return Err(CodegenError::Ice(format!(
                                 "integer literal {n} out of range for i32 at byte {}: \
                                  valid range {}..={} — annotate the wider type when it lands",
                                 span.start,
                                 i32::MIN,
                                 i32::MAX
-                            ));
+                            )));
                         }
                         Ok(self.ctx.i32_type().const_int(*n as u64, true).into())
                     }
@@ -1427,7 +1435,9 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     (Literal::Bool(b), Ty::Bool) => {
                         Ok(self.ctx.bool_type().const_int(*b as u64, false).into())
                     }
-                    (lit, ty) => Err(format!("unsupported literal/type: {lit:?} : {ty}")),
+                    (lit, ty) => Err(CodegenError::Ice(format!(
+                        "unsupported literal/type: {lit:?} : {ty}"
+                    ))),
                 }
             }
 
@@ -1443,10 +1453,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 }
                 let &(ptr, llvm_ty) = env
                     .get(*name)
-                    .ok_or_else(|| format!("undefined variable in codegen: `{name}`"))?;
+                    .ok_or_else(|| CodegenError::Ice(format!("variable `{name}` not in env — typechecker should have rejected undefined references")))?;
                 self.builder
                     .build_load(llvm_ty, ptr, name)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))
             }
 
             Expr::Binary {
@@ -1464,7 +1474,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             Expr::Unary {
                 op, expr: inner, ..
             } => {
-                // Fold Neg(Literal::Integer(2147483648)) → i32::MIN constant directly.
+                // Fold Neg(Literal::Integer(2147483648)) â†’ i32::MIN constant directly.
                 // The typechecker blesses this via the infer_unary INT_MIN special case,
                 // but the literal lowering guard rejects 2147483648 > i32::MAX. Bypass it.
                 if matches!(op, UnaryOp::Neg) {
@@ -1487,19 +1497,21 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     (UnaryOp::Neg, Ty::I32) => self
                         .builder
                         .build_int_neg(val.into_int_value(), "neg")
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))
                         .map(Into::into),
                     (UnaryOp::Neg, Ty::F64) => self
                         .builder
                         .build_float_neg(val.into_float_value(), "fneg")
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))
                         .map(Into::into),
                     (UnaryOp::Not, Ty::Bool) => self
                         .builder
                         .build_not(val.into_int_value(), "not")
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))
                         .map(Into::into),
-                    (op, ty) => Err(format!("unsupported unary op: {op:?} on {ty}")),
+                    (op, ty) => Err(CodegenError::Ice(format!(
+                        "unsupported unary op: {op:?} on {ty}"
+                    ))),
                 }
             }
 
@@ -1521,7 +1533,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     let else_bb = self.ctx.append_basic_block(self.fn_val, "if.else");
                     self.builder
                         .build_conditional_branch(cond_val, then_bb, else_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
                     // then branch
                     self.builder.position_at_end(then_bb);
@@ -1532,7 +1544,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     if then_flows {
                         self.builder
                             .build_unconditional_branch(merge_bb)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     }
 
                     // else branch
@@ -1544,12 +1556,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     if else_flows {
                         self.builder
                             .build_unconditional_branch(merge_bb)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     }
 
                     self.builder.position_at_end(merge_bb);
 
-                    // Unit if or both arms terminate early → no phi needed.
+                    // Unit if or both arms terminate early â†’ no phi needed.
                     if is_unit || (!then_flows && !else_flows) {
                         return Ok(unit_value(self.ctx));
                     }
@@ -1566,7 +1578,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     let phi = self
                         .builder
                         .build_phi(llvm_ty, "if.val")
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     if then_flows {
                         let tv = then_tail.unwrap_or_else(|| unit_value(self.ctx));
                         phi.add_incoming(&[(&tv as &dyn BasicValue<'ctx>, then_exit_bb)]);
@@ -1576,10 +1588,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
                     Ok(phi.as_basic_value())
                 } else {
-                    // No else branch → always Unit.
+                    // No else branch â†’ always Unit.
                     self.builder
                         .build_conditional_branch(cond_val, then_bb, merge_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     self.builder.position_at_end(then_bb);
                     let mut then_env = env.clone();
                     self.lower_block(then_block, &mut then_env, loop_ctx)?;
@@ -1591,7 +1603,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     {
                         self.builder
                             .build_unconditional_branch(merge_bb)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     }
                     self.builder.position_at_end(merge_bb);
                     Ok(unit_value(self.ctx))
@@ -1607,13 +1619,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
                 self.builder
                     .build_unconditional_branch(header_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
                 self.builder.position_at_end(header_bb);
                 let cond_val = self.lower_expr(condition, env, loop_ctx)?.into_int_value();
                 self.builder
                     .build_conditional_branch(cond_val, body_bb, exit_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
                 self.builder.position_at_end(body_bb);
                 let inner_lctx = LoopCtx {
@@ -1630,7 +1642,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 {
                     self.builder
                         .build_unconditional_branch(header_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
 
                 self.builder.position_at_end(exit_bb);
@@ -1643,7 +1655,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
                 self.builder
                     .build_unconditional_branch(loop_bb)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder.position_at_end(loop_bb);
 
                 let inner_lctx = LoopCtx {
@@ -1660,7 +1672,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 {
                     self.builder
                         .build_unconditional_branch(loop_bb)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
 
                 self.builder.position_at_end(exit_bb);
@@ -1691,13 +1703,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
                 }
                 let Expr::Ident(name, _) = callee.as_ref() else {
-                    return Err(
-                        "only direct function calls supported in PR 32 (no closures or fn pointers)"
-                            .to_string(),
-                    );
+                    return Err(CodegenError::NotYetLowered {
+                        feature: "closures and function pointers",
+                        byte: callee.span().start,
+                    });
                 };
                 let callee_fn = self.module.get_function(name).ok_or_else(|| {
-                    format!("undefined function `{name}` — declare it before calling")
+                    CodegenError::Ice(format!("function `{name}` not found in LLVM module — typechecker should have caught undefined calls"))
                 })?;
                 let arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = args
                     .iter()
@@ -1706,7 +1718,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let call_site = self
                     .builder
                     .build_call(callee_fn, &arg_vals, "call")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 // Void calls return unit_value; value-returning calls return the result.
                 Ok(call_site
                     .try_as_basic_value()
@@ -1722,7 +1734,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let ptr = self
                     .builder
                     .build_alloca(struct_ty, "struct_tmp")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.lower_struct_lit_into(ptr, struct_ty, name, fields, env, loop_ctx)?;
                 Ok(ptr.into())
             }
@@ -1767,10 +1779,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let gep = self
                     .builder
                     .build_struct_gep(struct_ty, obj_ptr, idx, "field_ptr")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.builder
                     .build_load(field_ty, gep, "field")
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))
             }
 
             Expr::MethodCall {
@@ -1802,7 +1814,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 let call = self
                     .builder
                     .build_call(callee, &call_args, "method_call")
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 Ok(call
                     .try_as_basic_value()
                     .basic()
@@ -1815,15 +1827,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 span,
             } => self.lower_match(subject, arms, *span, env, loop_ctx),
 
-            _ => Err(format!(
-                "expression not supported in this PR (at byte {}): \
-                 for, cast, borrow, and closures land in later PRs",
-                expr.span().start
-            )),
+            _ => Err(CodegenError::NotYetLowered {
+                feature: "for/cast/borrow/closures",
+                byte: expr.span().start,
+            }),
         }
     }
 
-    // ── Binary op lowering ────────────────────────────────────────────────────
+    // â"€â"€ Binary op lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     fn lower_binary(
         &self,
@@ -1831,7 +1842,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         lv: BasicValueEnum<'ctx>,
         rv: BasicValueEnum<'ctx>,
         operand_ty: &Ty,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         match operand_ty {
             Ty::I32 => {
                 let l = lv.into_int_value();
@@ -1840,52 +1851,56 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     BinOp::Add => self
                         .builder
                         .build_int_add(l, r, "add")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Sub => self
                         .builder
                         .build_int_sub(l, r, "sub")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Mul => self
                         .builder
                         .build_int_mul(l, r, "mul")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
-                    // Div/Mod: runtime zero-divisor check → calls libc abort() (pillar 1).
+                    // Div/Mod: runtime zero-divisor check â†’ calls libc abort() (pillar 1).
                     BinOp::Div => self.emit_int_div_or_rem(l, r, false)?,
                     BinOp::Mod => self.emit_int_div_or_rem(l, r, true)?,
                     BinOp::Eq => self
                         .builder
                         .build_int_compare(IntPredicate::EQ, l, r, "eq")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Ne => self
                         .builder
                         .build_int_compare(IntPredicate::NE, l, r, "ne")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Lt => self
                         .builder
                         .build_int_compare(IntPredicate::SLT, l, r, "lt")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Gt => self
                         .builder
                         .build_int_compare(IntPredicate::SGT, l, r, "gt")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Le => self
                         .builder
                         .build_int_compare(IntPredicate::SLE, l, r, "le")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Ge => self
                         .builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
-                    _ => return Err(format!("operator {op:?} not supported for i32")),
+                    _ => {
+                        return Err(CodegenError::Ice(format!(
+                            "operator {op:?} not supported for i32"
+                        )))
+                    }
                 })
             }
             Ty::F64 => {
@@ -1896,59 +1911,63 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     BinOp::Add => self
                         .builder
                         .build_float_add(l, r, "fadd")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Sub => self
                         .builder
                         .build_float_sub(l, r, "fsub")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Mul => self
                         .builder
                         .build_float_mul(l, r, "fmul")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Div => self
                         .builder
                         .build_float_div(l, r, "fdiv")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Mod => self
                         .builder
                         .build_float_rem(l, r, "frem")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Eq => self
                         .builder
                         .build_float_compare(FloatPredicate::OEQ, l, r, "feq")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Ne => self
                         .builder
                         .build_float_compare(FloatPredicate::ONE, l, r, "fne")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Lt => self
                         .builder
                         .build_float_compare(FloatPredicate::OLT, l, r, "flt")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Gt => self
                         .builder
                         .build_float_compare(FloatPredicate::OGT, l, r, "fgt")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Le => self
                         .builder
                         .build_float_compare(FloatPredicate::OLE, l, r, "fle")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Ge => self
                         .builder
                         .build_float_compare(FloatPredicate::OGE, l, r, "fge")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
-                    _ => return Err(format!("operator {op:?} not supported for f64")),
+                    _ => {
+                        return Err(CodegenError::Ice(format!(
+                            "operator {op:?} not supported for f64"
+                        )))
+                    }
                 })
             }
             Ty::Bool => {
@@ -1958,83 +1977,89 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     BinOp::And => self
                         .builder
                         .build_and(l, r, "and")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
                     BinOp::Or => self
                         .builder
                         .build_or(l, r, "or")
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
-                    _ => return Err(format!("operator {op:?} not supported for bool")),
+                    _ => {
+                        return Err(CodegenError::Ice(format!(
+                            "operator {op:?} not supported for bool"
+                        )))
+                    }
                 })
             }
-            ty => Err(format!("binary op on unsupported type: {ty}")),
+            ty => Err(CodegenError::Ice(format!(
+                "binary op on unsupported type: {ty}"
+            ))),
         }
     }
 
     /// Emit an i32 div or rem with a runtime zero-divisor check.
-    /// Zero divisor → calls libc `abort()` and marks the block unreachable.
+    /// Zero divisor â†’ calls libc `abort()` and marks the block unreachable.
     /// Pillar 1: explicit runtime panic, never silent UB.
     fn emit_int_div_or_rem(
         &self,
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
         is_rem: bool,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let abort_fn = self.get_or_declare_abort();
         // Guard 1: divide by zero.
         let zero = self.ctx.i32_type().const_zero();
         let is_zero = self
             .builder
             .build_int_compare(IntPredicate::EQ, r, zero, "divz")
-            .map_err(|e| e.to_string())?;
-        // Guard 2: INT_MIN / -1 is signed overflow → LLVM poison.
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        // Guard 2: INT_MIN / -1 is signed overflow â†’ LLVM poison.
         // -1 as u64 gives the correct bit pattern for const_int on an i32 type.
         let neg_one = self.ctx.i32_type().const_int(u64::MAX, false);
         let int_min = self.ctx.i32_type().const_int(i32::MIN as u64, false);
         let r_is_neg_one = self
             .builder
             .build_int_compare(IntPredicate::EQ, r, neg_one, "neg1")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         let l_is_int_min = self
             .builder
             .build_int_compare(IntPredicate::EQ, l, int_min, "minval")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         let is_overflow = self
             .builder
             .build_and(r_is_neg_one, l_is_int_min, "overflow")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         let is_bad = self
             .builder
             .build_or(is_zero, is_overflow, "divbad")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         let abort_bb = self.ctx.append_basic_block(self.fn_val, "div.abort");
         let ok_bb = self.ctx.append_basic_block(self.fn_val, "div.ok");
         self.builder
             .build_conditional_branch(is_bad, abort_bb, ok_bb)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         self.builder.position_at_end(abort_bb);
         self.builder
             .build_call(abort_fn, &[], "")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         self.builder
             .build_unreachable()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         self.builder.position_at_end(ok_bb);
         if is_rem {
             Ok(self
                 .builder
                 .build_int_signed_rem(l, r, "rem")
-                .map_err(|e| e.to_string())?
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
                 .into())
         } else {
             Ok(self
                 .builder
                 .build_int_signed_div(l, r, "div")
-                .map_err(|e| e.to_string())?
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
                 .into())
         }
     }
@@ -2056,13 +2081,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 }
 
-// ─── Module-level orchestration ───────────────────────────────────────────────
+// â"€â"€â"€ Module-level orchestration â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 fn lower_to_module<'ctx>(
     ctx: &'ctx Context,
     ast: &Ast<'_>,
     types: &InferResult,
-) -> Result<Module<'ctx>, String> {
+) -> Result<Module<'ctx>, CodegenError> {
     let module = ctx.create_module(super::ENTRY_FN);
 
     // Pass 0: register LLVM named struct types.
@@ -2130,7 +2155,7 @@ fn lower_to_module<'ctx>(
     }
 
     // Pass 0e: compute N and set each enum's top-level body to `{ i32, [N x i8] }`.
-    // N = max ABI store size across all variant payloads (0 for unit-only enums → tag only).
+    // N = max ABI store size across all variant payloads (0 for unit-only enums â†’ tag only).
     let target_data = host_target_data()?;
     for (enum_name, enum_info) in types.enum_defs() {
         let variant_map = variant_payload_types.get(enum_name.as_str());
@@ -2142,7 +2167,7 @@ fn lower_to_module<'ctx>(
             .max()
             .unwrap_or(0);
         // Round up to i64 units so the payload area is 8-byte aligned on x86-64.
-        // All basic types (i32, f64, bool, ptr) need ≤ 8-byte alignment, so
+        // All basic types (i32, f64, bool, ptr) need â‰¤ 8-byte alignment, so
         // { i32, [N x i64] } ensures payload fields are always correctly aligned.
         let n_i64 = max_bytes.div_ceil(8);
         let body: Vec<BasicTypeEnum<'ctx>> = if n_i64 == 0 {
@@ -2215,7 +2240,7 @@ fn declare_function_sig<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     struct_types: &HashMap<String, StructType<'ctx>>,
-) -> Result<(), String> {
+) -> Result<(), CodegenError> {
     let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = func
         .params
         .iter()
@@ -2240,7 +2265,7 @@ fn declare_method_sig<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     struct_types: &HashMap<String, StructType<'ctx>>,
-) -> Result<(), String> {
+) -> Result<(), CodegenError> {
     let mangled = format!("{type_name}_{}", method.name);
     let has_self = method
         .params
@@ -2250,9 +2275,9 @@ fn declare_method_sig<'ctx>(
     let mut param_types: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
     if has_self {
         if !struct_types.contains_key(type_name) {
-            return Err(format!(
-                "ICE: struct `{type_name}` not found for method declaration"
-            ));
+            return Err(CodegenError::Ice(format!(
+                "struct `{type_name}` not found for method declaration"
+            )));
         }
         param_types.push(ctx.ptr_type(AddressSpace::default()).into());
     }
@@ -2283,7 +2308,7 @@ fn lower_function<'ctx, 'b, 'src>(
     struct_types: &'b HashMap<String, StructType<'ctx>>,
     enum_types: &'b HashMap<String, StructType<'ctx>>,
     variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
-) -> Result<(), String> {
+) -> Result<(), CodegenError> {
     // Retrieve the pre-declared LLVM function from pass 1.
     let fn_val = module
         .get_function(func.name)
@@ -2315,7 +2340,7 @@ fn lower_function<'ctx, 'b, 'src>(
         let ptr = lower
             .builder
             .build_alloca(llvm_ty, param.name)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
     lower.emit_allocas(&func.body.stmts)?;
@@ -2328,7 +2353,7 @@ fn lower_function<'ctx, 'b, 'src>(
         lower
             .builder
             .build_store(ptr, param_val)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         env.insert(name, (ptr, llvm_ty));
     }
 
@@ -2345,7 +2370,7 @@ fn lower_function<'ctx, 'b, 'src>(
         }
     }
 
-    // Phase 4: tail expression → return instruction (only when no explicit terminator).
+    // Phase 4: tail expression â†’ return instruction (only when no explicit terminator).
     if lower
         .builder
         .get_insert_block()
@@ -2356,7 +2381,7 @@ fn lower_function<'ctx, 'b, 'src>(
             lower
                 .builder
                 .build_return(None)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         } else {
             match &func.body.tail {
                 Some(tail) => {
@@ -2365,13 +2390,13 @@ fn lower_function<'ctx, 'b, 'src>(
                     lower
                         .builder
                         .build_return(Some(&val))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 None => {
-                    return Err(format!(
+                    return Err(CodegenError::Ice(format!(
                         "function `{}`: body has no terminator and no tail expression",
                         func.name
-                    ));
+                    )));
                 }
             }
         }
@@ -2393,7 +2418,7 @@ fn lower_method<'ctx, 'b, 'src>(
     struct_types: &'b HashMap<String, StructType<'ctx>>,
     enum_types: &'b HashMap<String, StructType<'ctx>>,
     variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
-) -> Result<(), String> {
+) -> Result<(), CodegenError> {
     let mangled = format!("{type_name}_{}", method.name);
     let fn_val = module
         .get_function(&mangled)
@@ -2455,7 +2480,7 @@ fn lower_method<'ctx, 'b, 'src>(
         let ptr = lower
             .builder
             .build_alloca(llvm_ty, param.name)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         param_alloca_entries.push((param.name, ptr, llvm_ty));
     }
     lower.emit_allocas(&method.body.stmts)?;
@@ -2468,7 +2493,7 @@ fn lower_method<'ctx, 'b, 'src>(
         lower
             .builder
             .build_store(ptr, param_val)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         env.insert(name, (ptr, llvm_ty));
         llvm_param_idx += 1;
     }
@@ -2486,7 +2511,7 @@ fn lower_method<'ctx, 'b, 'src>(
         }
     }
 
-    // Phase 4: tail expression → return.
+    // Phase 4: tail expression â†’ return.
     if lower
         .builder
         .get_insert_block()
@@ -2497,7 +2522,7 @@ fn lower_method<'ctx, 'b, 'src>(
             lower
                 .builder
                 .build_return(None)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         } else {
             match &method.body.tail {
                 Some(tail) => {
@@ -2506,12 +2531,12 @@ fn lower_method<'ctx, 'b, 'src>(
                     lower
                         .builder
                         .build_return(Some(&val))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 None => {
-                    return Err(format!(
+                    return Err(CodegenError::Ice(format!(
                         "method `{mangled}`: body has no terminator and no tail expression"
-                    ));
+                    )));
                 }
             }
         }
@@ -2532,7 +2557,7 @@ fn stmt_span_start(stmt: &Stmt<'_>) -> usize {
     }
 }
 
-// ─── Type helpers ─────────────────────────────────────────────────────────────
+// â"€â"€â"€ Type helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Resolve a typechecker `Ty` to an LLVM `BasicTypeEnum`.
 ///
@@ -2542,25 +2567,25 @@ fn resolve_ty<'ctx>(
     ty: &Ty,
     ctx: &'ctx Context,
     struct_types: &HashMap<String, StructType<'ctx>>,
-) -> Result<BasicTypeEnum<'ctx>, String> {
+) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     match ty {
         Ty::Named(name) => struct_types
             .get(name.as_str())
             .map(|st| BasicTypeEnum::StructType(*st))
-            .ok_or_else(|| format!("ICE: unknown struct type `{name}` in codegen")),
+            .ok_or_else(|| CodegenError::Ice(format!("unknown struct type `{name}` in codegen"))),
         other => basic_type(other, ctx),
     }
 }
 
-fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, String> {
+fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     match ty {
         Ty::I32 => Ok(ctx.i32_type().into()),
         Ty::F64 => Ok(ctx.f64_type().into()),
         Ty::Bool => Ok(ctx.bool_type().into()),
-        other => Err(format!(
-            "type `{other}` is not yet lowerable; only i32, f64, bool, and struct types are \
-             supported — consider filing a feature request or using a supported type"
-        )),
+        other => Err(CodegenError::Ice(format!(
+            "type `{other}` is not yet lowerable to a basic LLVM type; \
+             only i32, f64, bool, and struct types are supported"
+        ))),
     }
 }
 
@@ -2568,7 +2593,7 @@ fn basic_type_from_ast<'ctx>(
     ty: &Type<'_>,
     ctx: &'ctx Context,
     struct_types: &HashMap<String, StructType<'ctx>>,
-) -> Result<BasicTypeEnum<'ctx>, String> {
+) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     match ty {
         Type::Named { name: "i32", .. } => Ok(ctx.i32_type().into()),
         Type::Named { name: "f64", .. } => Ok(ctx.f64_type().into()),
@@ -2576,18 +2601,20 @@ fn basic_type_from_ast<'ctx>(
         Type::Named { name, .. } => struct_types
             .get(*name)
             .map(|st| BasicTypeEnum::StructType(*st))
-            .ok_or_else(|| format!("unknown type `{name}` in codegen")),
+            .ok_or_else(|| CodegenError::Ice(format!("unknown type `{name}` in codegen"))),
         // SelfTy is only valid as a receiver, never as a value-type param in declare
-        other => Err(format!("type not supported in codegen: {other:?}")),
+        other => Err(CodegenError::Ice(format!(
+            "type not supported in codegen: {other:?}"
+        ))),
     }
 }
 
 /// Create a TargetData for the host machine using the same x86 init pattern as
 /// `emit_module`. Used in Pass 0e to compute ABI-aware payload sizes for enum layout.
-fn host_target_data() -> Result<TargetData, String> {
+fn host_target_data() -> Result<TargetData, CodegenError> {
     Target::initialize_x86(&InitializationConfig::default());
     let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    let target = Target::from_triple(&triple).map_err(|e| CodegenError::Llvm(e.to_string()))?;
     target
         .create_target_machine(
             &triple,
@@ -2597,11 +2624,13 @@ fn host_target_data() -> Result<TargetData, String> {
             RelocMode::Default,
             CodeModel::Default,
         )
-        .ok_or_else(|| "failed to create target machine for TargetData".to_string())
+        .ok_or_else(|| {
+            CodegenError::Ice("failed to create target machine for TargetData".to_string())
+        })
         .map(|tm| tm.get_target_data())
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â"€â"€â"€ Tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 #[cfg(test)]
 mod tests {
@@ -2744,7 +2773,7 @@ mod tests {
         );
     }
 
-    // ── Struct / method tests ─────────────────────────────────────────────────
+    // â"€â"€ Struct / method tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// T12 — struct instantiation + field read: `Point { x=3, y=4 }.x == 3` (JIT).
     /// Fields are stored in declaration order; literal order is independent.
@@ -2846,7 +2875,7 @@ mod tests {
     }
 
     /// T16 — struct literal as direct method receiver (no intermediate `let`): JIT.
-    /// Exercises the `lower_as_ptr(StructLit)` → fresh alloca → self pointer path.
+    /// Exercises the `lower_as_ptr(StructLit)` â†’ fresh alloca â†’ self pointer path.
     #[test]
     fn test_struct_lit_direct_method_receiver_jit() {
         let ctx = Context::create();
@@ -3197,7 +3226,7 @@ mod tests {
     }
 
     /// T30 — nested-block shadow self-reference + outer binding preserved.
-    /// `let x=1; let y={ let x=x+10; x }; x+y` → x=1, y=11, result=12.
+    /// `let x=1; let y={ let x=x+10; x }; x+y` â†’ x=1, y=11, result=12.
     /// Covers nested-block + self-reference together; verifies outer x not corrupted.
     #[test]
     fn test_nested_block_shadow_self_reference_jit() {
@@ -3224,7 +3253,7 @@ mod tests {
     }
 
     /// T31 — chained shadow self-references.
-    /// `let x=1; let x=x+1; let x=x+1; x` → each shadow reads the previous, result=3.
+    /// `let x=1; let x=x+1; let x=x+1; x` â†’ each shadow reads the previous, result=3.
     #[test]
     fn test_chained_shadow_self_reference_jit() {
         let ctx = Context::create();
@@ -3239,11 +3268,14 @@ mod tests {
                 .expect("function not found in JIT module")
                 .call()
         };
-        assert_eq!(result, 3, "each shadow reads previous: 1→2→3, got {result}");
+        assert_eq!(
+            result, 3,
+            "each shadow reads previous: 1â†’2â†’3, got {result}"
+        );
     }
 
-    /// T32 — different-type shadow self-reference (i32 → bool).
-    /// `let flag=5; let flag=flag>3; if flag {1} else {0}` → 1.
+    /// T32 — different-type shadow self-reference (i32 â†’ bool).
+    /// `let flag=5; let flag=flag>3; if flag {1} else {0}` â†’ 1.
     /// Confirms "different-type self-reference is unrepresentable" claim is FALSE.
     #[test]
     fn test_shadow_self_reference_type_change_jit() {
@@ -3269,7 +3301,7 @@ mod tests {
         );
     }
 
-    // ── Enum codegen JIT tests ────────────────────────────────────────────────
+    // â"€â"€ Enum codegen JIT tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// T_en_cg_01: unit variant construction + match, returns 1 for matched arm.
     #[test]
@@ -3674,7 +3706,7 @@ mod tests {
     }
 
     /// T_sc_04: struct-returning fn whose body tail is an if/else expression.
-    /// `if cond { Point{…} } else { Point{…} }` — the If phi produces a PointerValue;
+    /// `if cond { Point{â€¦} } else { Point{â€¦} }` — the If phi produces a PointerValue;
     /// materialize_return_val must load via span-type lookup.
     #[test]
     fn test_fn_returns_if_else_struct_jit() {

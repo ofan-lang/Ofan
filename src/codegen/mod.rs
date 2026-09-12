@@ -9,4 +9,10 @@
 pub(crate) const ENTRY_FN: &str = "main";
 
 #[cfg(feature = "codegen")]
+pub mod error;
+
+#[cfg(feature = "codegen")]
+pub use error::CodegenError;
+
+#[cfg(feature = "codegen")]
 pub mod llvm;
