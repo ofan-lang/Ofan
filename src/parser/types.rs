@@ -42,11 +42,13 @@ impl<'src> Parser<'src> {
     /// Used by `try_parse_region_tag` so the "what starts a type" knowledge is not
     /// duplicated between the heuristic and `parse_type`'s own match.
     ///
-    /// Note: `Token::SelfKw` (lowercase `self`) is excluded — it is never valid in
-    /// type position (§18). `Self` (capital) lexes as `Token::Ident("Self")` and is
-    /// covered by the `Ident` arm below.
+    /// Note: `Token::SelfKw` (lowercase `self`) IS included even though it is never
+    /// valid in type position (§18). Including it lets `try_parse_region_tag` consume
+    /// the region tag first (`r1`), after which `parse_type` fires its targeted
+    /// "use `Self`" error at the right token instead of misparking `r1` as the type.
+    /// `Self` (capital) lexes as `Token::Ident("Self")` and is covered by `Ident`.
     fn is_type_start_token(tok: &Token<'_>) -> bool {
-        matches!(tok, Token::Ident(_) | Token::Amp)
+        matches!(tok, Token::Ident(_) | Token::Amp | Token::SelfKw)
     }
 
     /// Try to consume a region tag (`&r1 str`, `&static str`).
@@ -212,6 +214,24 @@ mod tests {
     #[test]
     fn parse_type_self_kw_in_type_position_is_error() {
         let err = parse_type("self").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Self"),
+            "error must mention `Self` (capital): {msg}"
+        );
+        assert!(
+            msg.contains("receiver"),
+            "error must explain `self` is a receiver, not a type: {msg}"
+        );
+        assert!(msg.contains("§18"), "error must cite §18: {msg}");
+    }
+
+    /// Regression: before the fix, `try_parse_region_tag` did not recognise `SelfKw`
+    /// as a type-start token, so `r1` was misparked as the inner type name and `self`
+    /// produced a confusing downstream error instead of the targeted "use `Self`" message.
+    #[test]
+    fn parse_type_region_self_kw_gives_targeted_error() {
+        let err = parse_type("&r1 self").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Self"),
