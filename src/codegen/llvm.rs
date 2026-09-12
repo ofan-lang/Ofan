@@ -922,6 +922,184 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         }
     }
 
+    /// Lower sub-patterns inside a constructor match arm.
+    ///
+    /// For each sub-pattern at index `j`, extracts the payload field at that index from
+    /// `payload_area` (a pointer to the variant's payload union) and:
+    /// - `Name`: loads, allocates, stores, and binds in `arm_env`.
+    /// - `Wildcard`: skips.
+    /// - `Constructor { inner_name, inner_subs }`: loads the inner tag, conditionally branches
+    ///   to `fail_bb` if the tag doesn't match, then recurses into the inner payload.
+    /// - `Literal`: loads, compares, branches to `fail_bb` on mismatch.
+    ///
+    /// On mismatch, branches to `fail_bb` (the next arm entry or the default block).
+    /// On success, leaves the builder positioned at the continuation block.
+    #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
+    fn lower_sub_patterns<'src>(
+        &self,
+        sub_patterns: &[Pattern<'src>],
+        payload_fields: &[Ty],
+        pt: StructType<'ctx>,
+        payload_area: PointerValue<'ctx>,
+        fail_bb: BasicBlock<'ctx>,
+        arm_env: &mut CodegenEnv<'ctx, 'src>,
+        loop_ctx: Option<&LoopCtx<'ctx>>,
+    ) -> Result<(), CodegenError> {
+        for (j, sub_pat) in sub_patterns.iter().enumerate() {
+            let fptr = self
+                .builder
+                .build_struct_gep(pt, payload_area, j as u32, "sp_ptr")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            match sub_pat {
+                Pattern::Name(bname, _) => {
+                    let field_ty = self.llvm_ty(&payload_fields[j])?;
+                    let fval = self
+                        .builder
+                        .build_load(field_ty, fptr, bname)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let falloca = self
+                        .builder
+                        .build_alloca(field_ty, bname)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder
+                        .build_store(falloca, fval)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    arm_env.insert(bname, (falloca, field_ty));
+                }
+
+                Pattern::Wildcard(_) => {}
+
+                Pattern::Constructor {
+                    name: inner_name,
+                    sub_patterns: inner_subs,
+                    ..
+                } => {
+                    let inner_enum_name = match &payload_fields[j] {
+                        Ty::Named(n) => n.as_str(),
+                        _ => {
+                            return Err(CodegenError::Ice(format!(
+                                "nested constructor pattern on non-enum payload field {j}"
+                            )))
+                        }
+                    };
+                    let inner_enum_ty = *self.enum_types.get(inner_enum_name).ok_or_else(|| {
+                        CodegenError::Ice(format!(
+                            "inner enum `{inner_enum_name}` not in enum_types"
+                        ))
+                    })?;
+                    let inner_tag_gep = self
+                        .builder
+                        .build_struct_gep(inner_enum_ty, fptr, 0, "inner_tag_ptr")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let inner_tag = self
+                        .builder
+                        .build_load(self.ctx.i32_type(), inner_tag_gep, "inner_tag")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .into_int_value();
+                    let expected_tag = self.get_variant_tag(inner_enum_name, inner_name)?;
+                    let expected_tag_val =
+                        self.ctx.i32_type().const_int(expected_tag as u64, false);
+                    let cmp = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            inner_tag,
+                            expected_tag_val,
+                            "inner_tag_eq",
+                        )
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let match_bb = self.ctx.append_basic_block(self.fn_val, "inner_match");
+                    self.builder
+                        .build_conditional_branch(cmp, match_bb, fail_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.position_at_end(match_bb);
+
+                    let inner_enum_info =
+                        self.types.enum_defs().get(inner_enum_name).ok_or_else(|| {
+                            CodegenError::Ice(format!(
+                                "inner enum `{inner_enum_name}` not in enum_defs"
+                            ))
+                        })?;
+                    let inner_payload_fields = &inner_enum_info.variants[*inner_name];
+
+                    if !inner_subs.is_empty() {
+                        let inner_pt = self
+                            .variant_payload_types
+                            .get(inner_enum_name)
+                            .and_then(|m| m.get(*inner_name))
+                            .copied()
+                            .ok_or_else(|| {
+                                CodegenError::Ice(format!(
+                                    "no payload type for `{inner_enum_name}::{inner_name}`"
+                                ))
+                            })?;
+                        let inner_payload_area = self
+                            .builder
+                            .build_struct_gep(inner_enum_ty, fptr, 1, "inner_payload")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        self.lower_sub_patterns(
+                            inner_subs,
+                            inner_payload_fields,
+                            inner_pt,
+                            inner_payload_area,
+                            fail_bb,
+                            arm_env,
+                            loop_ctx,
+                        )?;
+                    }
+                }
+
+                Pattern::Literal(lit, lit_span) => {
+                    let field_ty = self.llvm_ty(&payload_fields[j])?;
+                    let fval = self
+                        .builder
+                        .build_load(field_ty, fptr, "lit_field")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let cmp = match lit {
+                        Literal::Integer(n) => self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                fval.into_int_value(),
+                                self.ctx.i32_type().const_int(*n as u64, true),
+                                "lit_eq",
+                            )
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?,
+                        Literal::Bool(b) => self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                fval.into_int_value(),
+                                self.ctx.bool_type().const_int(*b as u64, false),
+                                "lit_eq",
+                            )
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?,
+                        _ => {
+                            return Err(CodegenError::NotYetLowered {
+                                feature: "float/string literal sub-patterns in constructor arms",
+                                byte: lit_span.start,
+                            });
+                        }
+                    };
+                    let cont_bb = self.ctx.append_basic_block(self.fn_val, "lit_cont");
+                    self.builder
+                        .build_conditional_branch(cmp, cont_bb, fail_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.position_at_end(cont_bb);
+                }
+
+                other => {
+                    return Err(CodegenError::NotYetLowered {
+                        feature: "or-patterns inside constructor sub-patterns",
+                        byte: other.span().start,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn lower_enum_match<'src>(
         &self,
         enum_name: &str,
@@ -1165,36 +1343,15 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                             .build_struct_gep(enum_ty, subject_ptr, 1, "payload_area")
                             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                         let payload_fields = &enum_info.variants[variant_name.as_str()];
-                        for (j, sub_pat) in sub_patterns.iter().enumerate() {
-                            match sub_pat {
-                                Pattern::Name(bname, _) => {
-                                    let field_ty = self.llvm_ty(&payload_fields[j])?;
-                                    let fptr = self
-                                        .builder
-                                        .build_struct_gep(pt, payload_area, j as u32, "pf_ptr")
-                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                                    let fval = self
-                                        .builder
-                                        .build_load(field_ty, fptr, bname)
-                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                                    let falloca = self
-                                        .builder
-                                        .build_alloca(field_ty, bname)
-                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                                    self.builder
-                                        .build_store(falloca, fval)
-                                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                                    arm_env.insert(bname, (falloca, field_ty));
-                                }
-                                Pattern::Wildcard(_) => { /* no binding */ }
-                                _ => {
-                                    return Err(CodegenError::NotYetLowered {
-                                        feature: "nested sub-patterns in constructor match arms",
-                                        byte: sub_pat.span().start,
-                                    });
-                                }
-                            }
-                        }
+                        self.lower_sub_patterns(
+                            sub_patterns,
+                            payload_fields,
+                            pt,
+                            payload_area,
+                            guard_fail_bb,
+                            &mut arm_env,
+                            loop_ctx,
+                        )?;
                     }
                 }
                 if let Some(guard_expr) = &arm.guard {
@@ -2154,11 +2311,61 @@ fn lower_to_module<'ctx>(
         }
     }
 
-    // Pass 0e: compute N and set each enum's top-level body to `{ i32, [N x i8] }`.
-    // N = max ABI store size across all variant payloads (0 for unit-only enums â†’ tag only).
+    // Pass 0e: compute N and set each enum's top-level body to `{ i32, [N x i64] }`.
+    // N = max ABI store size across all variant payloads (0 for unit-only enums -> tag only).
+    //
+    // Processed in topological order (dependencies first): if enum A's payload contains enum B,
+    // B must have its body set before A so get_store_size on A's payload struct sees the correct
+    // size. HashMap iteration order is non-deterministic, causing silent wrong-size bodies when
+    // an outer enum is processed before its inner enum payload type.
+    let enum_topo_order: Vec<&str> = {
+        let all_enum_names: std::collections::HashSet<&str> =
+            types.enum_defs().keys().map(String::as_str).collect();
+        let mut ordered: Vec<&str> = Vec::with_capacity(all_enum_names.len());
+        let mut visited: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(all_enum_names.len());
+        fn topo_visit<'a>(
+            name: &'a str,
+            enum_defs: &'a std::collections::HashMap<String, crate::typechecker::env::EnumInfo>,
+            all_enum_names: &std::collections::HashSet<&'a str>,
+            visited: &mut std::collections::HashSet<&'a str>,
+            ordered: &mut Vec<&'a str>,
+        ) {
+            // visited.insert runs before recursing, so cycles terminate here rather than
+            // looping. Recursive enums (enum List { Cons(List), Nil }) are rejected upstream
+            // by the InfiniteSizeEnumVariant cycle check, so this guard handles
+            // diamond-shaped dependency graphs, not true recursive types.
+            if !visited.insert(name) {
+                return;
+            }
+            if let Some(info) = enum_defs.get(name) {
+                for fields in info.variants.values() {
+                    for ty in fields {
+                        if let crate::typechecker::ty::Ty::Named(dep) = ty {
+                            if all_enum_names.contains(dep.as_str()) {
+                                topo_visit(dep, enum_defs, all_enum_names, visited, ordered);
+                            }
+                        }
+                    }
+                }
+            }
+            ordered.push(name);
+        }
+        for &name in &all_enum_names {
+            topo_visit(
+                name,
+                types.enum_defs(),
+                &all_enum_names,
+                &mut visited,
+                &mut ordered,
+            );
+        }
+        ordered
+    };
     let target_data = host_target_data()?;
-    for (enum_name, enum_info) in types.enum_defs() {
-        let variant_map = variant_payload_types.get(enum_name.as_str());
+    for enum_name in &enum_topo_order {
+        let enum_info = &types.enum_defs()[*enum_name];
+        let variant_map = variant_payload_types.get(*enum_name);
         let max_bytes: u64 = enum_info
             .variant_order
             .iter()
@@ -2167,7 +2374,7 @@ fn lower_to_module<'ctx>(
             .max()
             .unwrap_or(0);
         // Round up to i64 units so the payload area is 8-byte aligned on x86-64.
-        // All basic types (i32, f64, bool, ptr) need â‰¤ 8-byte alignment, so
+        // All basic types (i32, f64, bool, ptr) need <= 8-byte alignment, so
         // { i32, [N x i64] } ensures payload fields are always correctly aligned.
         let n_i64 = max_bytes.div_ceil(8);
         let body: Vec<BasicTypeEnum<'ctx>> = if n_i64 == 0 {
@@ -2179,7 +2386,7 @@ fn lower_to_module<'ctx>(
             ]
         };
         enum_types
-            .get(enum_name.as_str())
+            .get(*enum_name)
             .expect("ICE: enum type not in map after Pass 0c")
             .set_body(&body, false);
     }
@@ -3733,5 +3940,92 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 5, "expected a.x(1) + b.y(4) == 5, got {result}");
+    }
+
+    /// T_en_cg_12: nested sub-pattern — inner Wrap(x) arm matches inner payload value.
+    /// Uses unique enum/variant names per test to avoid LLVM JIT global type-name collisions.
+    #[test]
+    fn test_nested_sub_pattern_some_some_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Leaf12 { Wrap(i32), Empty }
+            enum Tree12 { Node(Leaf12), Nil }
+            fn f() -> i32 {
+                match Tree12.Node(Leaf12.Wrap(42)) {
+                    Node(Wrap(x)) => x,
+                    Node(Empty)   => 0,
+                    Nil           => 0,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 42);
+    }
+
+    /// T_en_cg_13: nested sub-pattern — outer Node matches, inner Empty routes to second arm.
+    /// Uses unique enum/variant names per test to avoid LLVM JIT global type-name collisions.
+    #[test]
+    fn test_nested_sub_pattern_outer_mismatch_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Leaf13 { Wrap(i32), Empty }
+            enum Tree13 { Node(Leaf13), Nil }
+            fn f() -> i32 {
+                match Tree13.Node(Leaf13.Empty) {
+                    Node(Wrap(x)) => x,
+                    Node(Empty)   => 99,
+                    Nil           => 0,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 99);
+    }
+
+    /// T_en_cg_14: depth-2 nested sub-pattern — exercises the recursive GEP-into-payload
+    /// path in lower_sub_patterns at two levels of constructor nesting.
+    #[test]
+    fn test_nested_sub_pattern_depth2_jit() {
+        let ctx = Context::create();
+        let src = "
+            enum Inner14  { Val(i32), Empty }
+            enum Middle14 { Wrap(Inner14), Nil }
+            enum Outer14  { Box(Middle14), None }
+            fn f() -> i32 {
+                match Outer14.Box(Middle14.Wrap(Inner14.Val(7))) {
+                    Box(Wrap(Val(x))) => x,
+                    Box(Wrap(Empty))  => 1,
+                    Box(Nil)          => 2,
+                    None              => 3,
+                }
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 7);
     }
 }

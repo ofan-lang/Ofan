@@ -3,7 +3,7 @@ use crate::lexer::token::Span;
 use crate::typechecker::env::{Env, InferCtx};
 use crate::typechecker::error::TypeError;
 use crate::typechecker::ty::{Region, Ty};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // ─── Expression inference ─────────────────────────────────────────────────────
 
@@ -823,6 +823,32 @@ fn infer_struct_lit(
 
 // ─── Match expression inference ───────────────────────────────────────────────
 
+/// Coverage state for one type position (top-level match subject or inner payload slot).
+///
+/// # Arity-1 variants — full recursive precision
+/// For variants with exactly 1 payload slot (`Option<T>`, etc.), slot coverage is tracked
+/// recursively. `Some(None)` + `Some(Some(x))` together correctly exhaust `Option<Option<T>>`.
+///
+/// # Arity ≥2 variants — conservative approximation (soundness boundary, not imprecision)
+/// Per-slot independent OR-merge is UNSOUND for 2+ payload slots — it would silently accept
+/// non-exhaustive matches. Example: `Both(Some(x), _)` + `Both(_, Some(y))` make each slot
+/// appear exhausted independently, but `Both(None, None)` is unhandled. This is the same
+/// class of silent-miss bug PR #46 rejected loudly.
+///
+/// Arity ≥2 variants are only counted as covered when ALL sub-patterns in an arm are
+/// wildcards/bindings (unconditional coverage). Some genuinely-exhaustive multi-slot nested
+/// matches will be conservatively rejected — matching pillar 1's "reject rather than silently
+/// miscompile" precedent. Option C (usefulness algorithm) resolves this completely; deferred.
+#[derive(Default)]
+struct PosCoverage {
+    has_catchall: bool,
+    /// variant name → one PosCoverage per payload slot (arity-1 only; empty vec = unit variant
+    /// or arity-≥2 all-wildcard arm)
+    variants: HashMap<String, Vec<PosCoverage>>,
+    true_covered: bool,
+    false_covered: bool,
+}
+
 fn infer_match(
     subject: &Expr<'_>,
     arms: &[MatchArm<'_>],
@@ -837,9 +863,7 @@ fn infer_match(
     let mut catchall_span: Option<Span> = None;
 
     // Coverage tracking for exhaustiveness.
-    let mut covered: HashSet<String> = HashSet::new();
-    let mut true_covered = false;
-    let mut false_covered = false;
+    let mut cov = PosCoverage::default();
 
     for arm in arms {
         // Unreachable arm detection — flag but keep inferring for error recovery.
@@ -853,18 +877,12 @@ fn infer_match(
         env.push_scope();
 
         // Guarded arms do NOT count toward exhaustiveness coverage. Route their pattern
-        // into a temporary set so real coverage is only updated by unguarded arms.
+        // into a temporary PosCoverage so real coverage is only updated by unguarded arms.
         let is_guarded = arm.guard.is_some();
-        let mut temp_covered = HashSet::new();
-        let mut temp_tc = false;
-        let mut temp_fc = false;
-        let (cov, tc, fc) = if is_guarded {
-            (&mut temp_covered, &mut temp_tc, &mut temp_fc)
-        } else {
-            (&mut covered, &mut true_covered, &mut false_covered)
-        };
+        let mut temp_cov = PosCoverage::default();
+        let arm_cov = if is_guarded { &mut temp_cov } else { &mut cov };
 
-        let mut arm_is_catchall = check_pattern(&arm.pattern, &subject_ty, ctx, env, cov, tc, fc);
+        let mut arm_is_catchall = check_pattern(&arm.pattern, &subject_ty, ctx, env, arm_cov);
 
         // Guard: must produce bool; a guarded arm never counts as a catch-all.
         if let Some(guard) = &arm.guard {
@@ -904,33 +922,26 @@ fn infer_match(
         }
     }
 
-    exhaustiveness_check(
-        &subject_ty,
-        span,
-        catchall_span.is_some(),
-        &covered,
-        true_covered,
-        false_covered,
-        ctx,
-    );
+    exhaustiveness_check(&subject_ty, span, &cov, ctx);
 
     first_arm_ty.unwrap_or(Ty::Error)
 }
 
 /// Check a pattern against the expected subject type. Introduces bindings into `env`
-/// for the current arm scope. Returns `true` if the pattern is an unconditional catch-all
-/// (wildcard `_` or a bare binding name) — used by exhaustiveness tracking.
+/// for the current arm scope. Updates `cov` with coverage information for exhaustiveness.
+/// Returns `true` if the pattern is an unconditional catch-all (wildcard or bare binding).
 fn check_pattern(
     pattern: &Pattern<'_>,
     subject_ty: &Ty,
     ctx: &mut InferCtx,
     env: &mut Env,
-    covered: &mut HashSet<String>,
-    true_covered: &mut bool,
-    false_covered: &mut bool,
+    cov: &mut PosCoverage,
 ) -> bool {
     match pattern {
-        Pattern::Wildcard(_) => true,
+        Pattern::Wildcard(_) => {
+            cov.has_catchall = true;
+            true
+        }
 
         Pattern::Name(name, _name_span) => {
             match subject_ty {
@@ -940,7 +951,7 @@ fn check_pattern(
                     match variant_payload {
                         Some(true) => {
                             // Unit variant pattern — covers this variant.
-                            covered.insert((*name).to_string());
+                            cov.variants.entry((*name).to_string()).or_default();
                             false
                         }
                         Some(false) => {
@@ -952,12 +963,13 @@ fn check_pattern(
                                 variant_name: (*name).to_string(),
                                 span: pattern.span(),
                             });
-                            covered.insert((*name).to_string());
+                            cov.variants.entry((*name).to_string()).or_default();
                             false
                         }
                         None => {
                             // Not a known variant of this enum → binding that catches everything.
                             env.define(name, subject_ty.clone());
+                            cov.has_catchall = true;
                             true
                         }
                     }
@@ -965,6 +977,7 @@ fn check_pattern(
                 _ => {
                     // Non-enum subject → always a binding catch-all.
                     env.define(name, subject_ty.clone());
+                    cov.has_catchall = true;
                     true
                 }
             }
@@ -1011,19 +1024,46 @@ fn check_pattern(
                             });
                         }
                         Some((false, _)) => {
-                            // Clone payload types now that we know counts match.
                             let payload_tys =
                                 ctx.enum_defs[enum_name.as_str()].variants[*name].clone();
-                            for (sub, payload_ty) in sub_patterns.iter().zip(payload_tys.iter()) {
-                                // Sub-patterns are not enum-level variants; ignore their coverage.
-                                let mut _sc = HashSet::new();
-                                let mut _st = false;
-                                let mut _sf = false;
+                            let n_slots = payload_tys.len();
+
+                            if n_slots == 1 {
+                                // Arity-1: recursive per-slot coverage — full precision.
+                                // Guard against a pre-existing empty vec: a bare tuple-variant
+                                // arm (TupleVariantMissingPatternPayload path) inserts the
+                                // entry as `[]`. or_default() would return that empty vec and
+                                // slots[0] would panic during error recovery.
+                                let slots = cov.variants.entry((*name).to_string()).or_default();
+                                if slots.is_empty() {
+                                    slots.push(PosCoverage::default());
+                                }
                                 check_pattern(
-                                    sub, payload_ty, ctx, env, &mut _sc, &mut _st, &mut _sf,
+                                    &sub_patterns[0],
+                                    &payload_tys[0],
+                                    ctx,
+                                    env,
+                                    &mut slots[0],
                                 );
+                            } else {
+                                // Arity ≥2: soundness boundary — only mark variant covered if
+                                // ALL sub-patterns are wildcards/bindings. See PosCoverage doc.
+                                //
+                                // Explicit loop (not .map().all()) — check_pattern has side
+                                // effects (type-checking, env bindings) that must run for every
+                                // slot even when an earlier slot returns non-catchall.
+                                let mut all_catchall = true;
+                                for (sub, payload_ty) in sub_patterns.iter().zip(payload_tys.iter())
+                                {
+                                    let mut _tmp = PosCoverage::default();
+                                    let is_catchall =
+                                        check_pattern(sub, payload_ty, ctx, env, &mut _tmp);
+                                    all_catchall &= is_catchall;
+                                }
+                                if all_catchall {
+                                    cov.variants.entry((*name).to_string()).or_default();
+                                }
                             }
-                            covered.insert((*name).to_string());
                         }
                     }
                 }
@@ -1053,9 +1093,9 @@ fn check_pattern(
             // Track bool literal coverage for exhaustiveness.
             if let Literal::Bool(b) = lit {
                 if *b {
-                    *true_covered = true;
+                    cov.true_covered = true;
                 } else {
-                    *false_covered = true;
+                    cov.false_covered = true;
                 }
             }
             false // literal pattern is never a catch-all
@@ -1064,15 +1104,7 @@ fn check_pattern(
         Pattern::Or(pats, _span) => {
             let mut any_catchall = false;
             for p in pats {
-                if check_pattern(
-                    p,
-                    subject_ty,
-                    ctx,
-                    env,
-                    covered,
-                    true_covered,
-                    false_covered,
-                ) {
+                if check_pattern(p, subject_ty, ctx, env, cov) {
                     any_catchall = true;
                 }
             }
@@ -1081,55 +1113,131 @@ fn check_pattern(
     }
 }
 
-fn exhaustiveness_check(
-    subject_ty: &Ty,
-    match_span: Span,
-    has_catchall: bool,
-    covered: &HashSet<String>,
-    true_covered: bool,
-    false_covered: bool,
-    ctx: &mut InferCtx,
-) {
-    if has_catchall {
+fn exhaustiveness_check(subject_ty: &Ty, match_span: Span, cov: &PosCoverage, ctx: &mut InferCtx) {
+    if cov.has_catchall {
         return;
     }
-    match subject_ty {
+    let mut missing = Vec::new();
+    let mut multi_slot_missing = Vec::new();
+    collect_missing(
+        cov,
+        subject_ty,
+        &[],
+        ctx,
+        &mut missing,
+        &mut multi_slot_missing,
+    );
+    if !missing.is_empty() {
+        if !multi_slot_missing.is_empty() {
+            ctx.error(TypeError::NonExhaustiveMatchMultiSlot {
+                missing,
+                span: match_span,
+            });
+        } else {
+            ctx.error(TypeError::NonExhaustiveMatch {
+                missing,
+                span: match_span,
+            });
+        }
+    }
+}
+
+/// Collect missing pattern paths for exhaustiveness reporting.
+///
+/// `path` accumulates outer variant names from the match root to the current position.
+/// Missing patterns are formatted as `"Some(None)"`, `"Some(Some(_))"`, etc.
+/// `multi_slot_missing` receives a copy of each missing item that belongs to an arity-≥2
+/// variant — used to pick the specialized suggestion in `NonExhaustiveMatchMultiSlot`.
+fn collect_missing(
+    cov: &PosCoverage,
+    ty: &Ty,
+    path: &[String],
+    ctx: &InferCtx,
+    out: &mut Vec<String>,
+    multi_slot_missing: &mut Vec<String>,
+) {
+    if cov.has_catchall {
+        return;
+    }
+    match ty {
         Ty::Named(enum_name) if ctx.enum_defs.contains_key(enum_name.as_str()) => {
-            let missing: Vec<String> = ctx.enum_defs[enum_name.as_str()]
-                .variant_order
-                .iter()
-                .filter(|v| !covered.contains(v.as_str()))
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                ctx.error(TypeError::NonExhaustiveMatch {
-                    missing,
-                    span: match_span,
-                });
+            let info = &ctx.enum_defs[enum_name.as_str()];
+            for variant_name in &info.variant_order {
+                let declared_arity = info.variants[variant_name.as_str()].len();
+                match cov.variants.get(variant_name.as_str()) {
+                    None => {
+                        // Absent variant: format with wildcard placeholders for payload slots
+                        // so "Some" (arity-1) → "Some(_)" and "Both" (arity-2) → "Both(_, _)".
+                        let leaf = format_absent_variant(variant_name, declared_arity);
+                        let s = format_missing_path(path, &leaf);
+                        out.push(s.clone());
+                        if declared_arity >= 2 {
+                            multi_slot_missing.push(s);
+                        }
+                    }
+                    Some(slots) if slots.is_empty() => {
+                        // Unit variant or arity-≥2 all-wildcard arm — fully covered.
+                    }
+                    Some(slots) if slots.len() == 1 => {
+                        // Arity-1: recurse into slot coverage.
+                        let payload_ty = &info.variants[variant_name.as_str()][0];
+                        let mut inner_path = path.to_vec();
+                        inner_path.push(variant_name.clone());
+                        collect_missing(
+                            &slots[0],
+                            payload_ty,
+                            &inner_path,
+                            ctx,
+                            out,
+                            multi_slot_missing,
+                        );
+                    }
+                    Some(_) => {
+                        // Unexpected: slots.len() ≥ 2 stored means the arity-≥2 all-catchall
+                        // path ran — treat as covered.
+                    }
+                }
             }
         }
         Ty::Bool => {
-            let mut missing = Vec::new();
-            if !true_covered {
-                missing.push("true".to_string());
+            if !cov.true_covered {
+                out.push(format_missing_path(path, "true"));
             }
-            if !false_covered {
-                missing.push("false".to_string());
-            }
-            if !missing.is_empty() {
-                ctx.error(TypeError::NonExhaustiveMatch {
-                    missing,
-                    span: match_span,
-                });
+            if !cov.false_covered {
+                out.push(format_missing_path(path, "false"));
             }
         }
         Ty::Error => {}
         _ => {
             // Open type (i32, f64, Str, Char, etc.) — cannot enumerate; wildcard required.
-            ctx.error(TypeError::NonExhaustiveMatch {
-                missing: vec!["_".to_string()],
-                span: match_span,
-            });
+            out.push(format_missing_path(path, "_"));
         }
+    }
+}
+
+/// Format a missing-pattern path as a human-readable string.
+///
+/// `outer_segments` = variant names from the match root to (but not including) the leaf.
+/// `leaf` = the missing item at the innermost position (already formatted, may include wildcards).
+///
+/// Examples: `([], "None")` → `"None"`;
+///           `(["Some"], "None")` → `"Some(None)"`;
+///           `(["Some"], "Some(_)")` → `"Some(Some(_))"`.
+fn format_missing_path(outer_segments: &[String], leaf: &str) -> String {
+    let mut result = leaf.to_string();
+    for seg in outer_segments.iter().rev() {
+        result = format!("{}({})", seg, result);
+    }
+    result
+}
+
+/// Format an absent variant with wildcard placeholders for its payload slots.
+/// Unit variant (arity 0): `"None"`. Arity-1: `"Some(_)"`. Arity-2: `"Both(_, _)"`.
+fn format_absent_variant(name: &str, arity: usize) -> String {
+    if arity == 0 {
+        name.to_string()
+    } else {
+        let wilds: Vec<&str> = (0..arity).map(|_| "_").collect();
+        format!("{}({})", name, wilds.join(", "))
     }
 }
