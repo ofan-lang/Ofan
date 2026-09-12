@@ -584,6 +584,31 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         }
     }
 
+    /// Resolve a value for use as a function/method return.
+    ///
+    /// `lower_expr` for struct-typed expressions (StructLit, Block/If wrappers) returns a
+    /// `PointerValue` (the struct's alloca). `build_return` requires the actual struct value,
+    /// not a pointer to it. This helper loads the struct value when needed so every return
+    /// site is correct without duplicating the pattern.
+    fn materialize_return_val(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        expr_span: crate::lexer::token::Span,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let BasicValueEnum::PointerValue(ptr) = val {
+            if let Some(Ty::Named(sname)) = self.types.type_of(expr_span) {
+                if let Some(&struct_ty) = self.struct_types.get(sname.as_str()) {
+                    return self
+                        .builder
+                        .build_load(struct_ty, ptr, "ret_struct")
+                        .map(|v| v.as_basic_value_enum())
+                        .map_err(|e| e.to_string());
+                }
+            }
+        }
+        Ok(val)
+    }
+
     fn lower_stmt<'src>(
         &self,
         stmt: &Stmt<'src>,
@@ -740,6 +765,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                 value: Some(expr), ..
             } => {
                 let val = self.lower_expr(expr, env, loop_ctx)?;
+                let val = self.materialize_return_val(val, expr.span())?;
                 self.builder
                     .build_return(Some(&val))
                     .map_err(|e| e.to_string())?;
@@ -2325,6 +2351,7 @@ fn lower_function<'ctx, 'b, 'src>(
             match &func.body.tail {
                 Some(tail) => {
                     let val = lower.lower_expr(tail, &env, None)?;
+                    let val = lower.materialize_return_val(val, tail.span())?;
                     lower
                         .builder
                         .build_return(Some(&val))
@@ -2465,6 +2492,7 @@ fn lower_method<'ctx, 'b, 'src>(
             match &method.body.tail {
                 Some(tail) => {
                     let val = lower.lower_expr(tail, &env, None)?;
+                    let val = lower.materialize_return_val(val, tail.span())?;
                     lower
                         .builder
                         .build_return(Some(&val))
@@ -3538,5 +3566,65 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 42);
+    }
+
+    /// T_sc_01: method returning struct value used in expression position.
+    /// `p.translate(5).x` — the method returns `Point { x = self.x + dx, y = self.y }`.
+    /// Exercises the tail-return + Stmt::Let spill path for struct-returning methods.
+    #[test]
+    fn test_method_returns_struct_let_field_jit() {
+        let ctx = Context::create();
+        let src = "
+            struct Point { x: i32, y: i32 }
+            impl Point {
+                fn translate(self, dx: i32) -> Point {
+                    Point { x = self.x + dx, y = self.y }
+                }
+            }
+            fn f() -> i32 {
+                let p = Point { x = 0, y = 0 };
+                let q = p.translate(5);
+                q.x
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 5, "expected q.x == 5 (translate by 5), got {result}");
+    }
+
+    /// T_sc_02: free function returning struct value, result used in expression position.
+    /// Exercises the tail-return spill path for struct-returning free functions.
+    #[test]
+    fn test_free_fn_returns_struct_let_field_jit() {
+        let ctx = Context::create();
+        let src = "
+            struct Point { x: i32, y: i32 }
+            fn make_point(a: i32, b: i32) -> Point {
+                Point { x = a, y = b }
+            }
+            fn f() -> i32 {
+                let p = make_point(3, 7);
+                p.x + p.y
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 10, "expected p.x + p.y == 10, got {result}");
     }
 }
