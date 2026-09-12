@@ -3,6 +3,90 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-09-12 — CodegenError typed enum (PR #52, open)
+
+**Branch:** `refactor/codegen-error-enum` (PR #52, open — CI pending)
+
+**What was done:**
+
+Replaced all `Result<_, String>` returns in `src/codegen/llvm.rs` with a
+typed `CodegenError` enum (4 variants: `Llvm`, `NotYetLowered`, `Ice`, `EntryFnMissing`).
+
+### `src/codegen/error.rs` (new)
+
+- `CodegenError` enum derived via `thiserror`
+- `Llvm(String)` — inkwell/LLVM builder errors
+- `NotYetLowered { feature: &'static str, byte: usize }` — planned constructs;
+  carries source byte offset and points to `docs/PROGRESS.md`
+- `Ice(String)` — typechecker invariant violations (always compiler bugs)
+- `EntryFnMissing` — user forgot `fn main`; cites §6 of SYNTAX_SPEC.md
+- `impl From<String> for CodegenError` retained for the ~35 `ok_or_else(|| "ICE: ...")`
+  sites; all are genuinely ICE-classified (TODO: remove once each is explicit)
+
+### `src/codegen/mod.rs`
+- `pub mod error; pub use error::CodegenError;`
+
+### `src/codegen/llvm.rs`
+- 29 function signatures: `Result<_, String>` → `Result<_, CodegenError>`
+- 122 `.map_err(|e| e.to_string())` → `.map_err(|e| CodegenError::Llvm(e.to_string()))`
+- All remaining `Err(format!(...))` / `Err("...".to_string())` sites converted to
+  explicit variants
+- Fixed 5 mojibake comment lines (double-encoded UTF-8: §, ÷, ±, ∈, em-dash)
+
+**Decisions:**
+- `EntryFnMissing` cites §6 (function declarations) not §3 (statement termination)
+- `CodegenError::Llvm` not `Ice` for target machine creation failures
+- Removed "ICE:" string prefix from explicit `Ice(...)` sites — the variant Display
+  already adds "internal compiler error:" framing
+- `pub enum CodegenError` (not `pub(crate)`) because `emit()` is a `pub` fn
+
+**Agent reviews (both addressed before merge):**
+- pillars-reviewer: §3→§6 fix; `undefined variable`/`undefined function` sites
+  now use explicit `Ice` not `From<String>`
+- rust-idiom-reviewer: target machine error → `Llvm`; redundant "ICE:" prefix removed;
+  dual public path (`error::CodegenError` + `CodegenError`) accepted per `TypeError` precedent
+
+**Remaining debt (not blocking this PR):**
+- ~35 `ok_or_else(|| "ICE: ...".to_string())?` sites still use `From<String>→Ice`;
+  all carry "ICE:" prefix in the string and are genuinely ICEs. Removing the `From<String>`
+  blanket impl and converting each site explicitly is a follow-up PR.
+
+**What's next:**
+- Merge PR #52 when CI green
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- Nested sub-pattern support in match lowering
+- `For` loop codegen (currently deferred)
+- Manual: pin repos on org profile (web UI)
+
+---
+
+## Last session: 2026-09-09 — parser fix (#47) + struct return fix (#48) (PR #51, merged)
+
+**Branch:** `fix/issues-47-48` → merged to `main` at `9d91281`
+
+**What was done:**
+
+### Issue #47 — parser: `&region self` targeted error (fix/issues-47-48)
+- `src/parser/types.rs` — `is_type_start_token` now includes `Token::SelfKw`.
+  Before: `try_parse_region_tag` consumed `r1` as the type name, leaving `self` to
+  produce a confusing downstream error. After: `r1` is recognized as a region tag,
+  and `parse_type` fires its targeted "use `Self` (capital)" message at the right token.
+- Regression test: `parse_type_region_self_kw_gives_targeted_error`
+
+### Issue #48 — codegen: struct return miscompile
+- `src/codegen/llvm.rs` — added `materialize_return_val` helper on `FnLower`.
+  Methods/fns returning struct-typed expressions produced a `PointerValue` (alloca ptr)
+  rather than the struct value itself. The helper detects ptr-to-struct returns and
+  loads through before `build_return`. Called at `Stmt::Return`, fn Phase 4, method Phase 4.
+- Reviewer findings addressed: ok_or_else ICE guard for missing type map;
+  T_sc_03 (block-wrapped struct return) and T_sc_04 (if/else-wrapped struct return) added.
+
+**CI fixes:** `cargo fmt` applied to long `assert_eq!` lines.
+
+**Agent reviews:** pillars-reviewer + rust-idiom-reviewer passed (2 items addressed before merge).
+
+---
+
 ## Last session: 2026-09-09 — Windows linker support (PR #50, merged)
 
 **Branch:** `fix/windows-linker` → merged to `main` at `7bd5abd`
