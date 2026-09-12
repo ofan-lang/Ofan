@@ -596,7 +596,17 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         expr_span: crate::lexer::token::Span,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if let BasicValueEnum::PointerValue(ptr) = val {
-            if let Some(Ty::Named(sname)) = self.types.type_of(expr_span) {
+            // A PointerValue at a return site must come from a struct-typed expression
+            // (StructLit, Block/If wrapper). A missing type-map entry here is a compiler
+            // bug — the typechecker must record a type for every return expression.
+            let ty = self.types.type_of(expr_span).ok_or_else(|| {
+                format!(
+                    "ICE: no type recorded for return expression at byte {} — \
+                     a PointerValue was produced but the typechecker span map has no entry",
+                    expr_span.start
+                )
+            })?;
+            if let Ty::Named(sname) = ty {
                 if let Some(&struct_ty) = self.struct_types.get(sname.as_str()) {
                     return self
                         .builder
@@ -3626,5 +3636,64 @@ mod tests {
                 .call()
         };
         assert_eq!(result, 10, "expected p.x + p.y == 10, got {result}");
+    }
+
+    /// T_sc_03: struct-returning fn whose body tail is block-wrapped.
+    /// `{ Point { x = a, y = b } }` — the Block wrapper produces a PointerValue;
+    /// materialize_return_val must load via span-type lookup, not syntactic shape.
+    #[test]
+    fn test_fn_returns_block_wrapped_struct_jit() {
+        let ctx = Context::create();
+        let src = "
+            struct Point { x: i32, y: i32 }
+            fn make_point(a: i32, b: i32) -> Point {
+                { Point { x = a, y = b } }
+            }
+            fn f() -> i32 {
+                let p = make_point(4, 6);
+                p.x + p.y
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 10, "expected p.x + p.y == 10 (block-wrapped tail), got {result}");
+    }
+
+    /// T_sc_04: struct-returning fn whose body tail is an if/else expression.
+    /// `if cond { Point{…} } else { Point{…} }` — the If phi produces a PointerValue;
+    /// materialize_return_val must load via span-type lookup.
+    #[test]
+    fn test_fn_returns_if_else_struct_jit() {
+        let ctx = Context::create();
+        let src = "
+            struct Point { x: i32, y: i32 }
+            fn pick(flag: bool) -> Point {
+                if flag { Point { x = 1, y = 2 } } else { Point { x = 3, y = 4 } }
+            }
+            fn f() -> i32 {
+                let a = pick(true);
+                let b = pick(false);
+                a.x + b.y
+            }
+        ";
+        let module = compile_to_module(&ctx, src);
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let result: i32 = unsafe {
+            engine
+                .get_function::<unsafe extern "C" fn() -> i32>("f")
+                .unwrap()
+                .call()
+        };
+        assert_eq!(result, 5, "expected a.x(1) + b.y(4) == 5, got {result}");
     }
 }
