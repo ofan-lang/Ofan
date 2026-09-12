@@ -314,6 +314,15 @@ pub enum TypeError {
         span.start, missing.join(", "))]
     NonExhaustiveMatch { missing: Vec<String>, span: Span },
 
+    /// Variant in `missing` has ≥2 payload fields — per-slot independent coverage is unsound,
+    /// so the compiler conservatively rejects this match unless a wildcard arm covers the variant.
+    #[error("match at byte {} is not exhaustive — missing: {}\n\
+        suggestion: the missing variant(s) have multiple payload fields and need explicit \
+        wildcard coverage — add a catch-all arm (e.g. `{} => ...`) to cover the remaining \
+        cases, or restructure the match so one arm fully wildcards each missing variant",
+        span.start, missing.join(", "), missing[0])]
+    NonExhaustiveMatchMultiSlot { missing: Vec<String>, span: Span },
+
     /// Two match arm bodies produce different types — all arms must agree on a single type.
     #[error("match arm at byte {} has type {found_ty:?}, but earlier arms have type {first_ty:?}\n\
         suggestion: ensure all match arms produce the same type",

@@ -37,7 +37,7 @@
 | [18](#18-method-receiver--self-and-self) | Method receiver — `self` and `Self` | Decided |
 | [19](#19-option-and-checked-types-and-variant-names) | `Option` and `Checked` — types and variant names | Decided |
 | [20](#20-enum-declaration-syntax) | Enum declaration syntax | Decided |
-| [21](#21-match--pattern-matching) | Match / pattern matching | Decided |
+| [21](#21-match--pattern-matching) | Match / pattern matching | Decided (core) — nested sub-patterns not yet implemented, see body |
 | [22](#22-impl-block-syntax) | `impl` block syntax | Decided |
 | [23](#23-struct-field-access) | Struct field access | Decided |
 | [24](#24-not-yet-decided--deferred) | Not yet decided — deferred | — |
@@ -1414,15 +1414,32 @@ as a variant name. Binds the matched value to that name in the arm body scope.
 of the match subject's enum type. Matching is exhaustiveness-tracked.
 
 *Tuple variant* — variant name followed by `(` comma-separated sub-patterns `)`.
-Sub-patterns are themselves full patterns; nesting (`Some(Some(x))`) works without
-depth limit.
+Sub-patterns are grammatically full patterns at the parser and typechecker layers.
+Codegen does not yet lower nested sub-patterns — any sub-pattern other than a
+bare binding or wildcard (nested constructors like `Some(Some(x))`, literal
+sub-patterns like `Some(0)`, or or-patterns like `Some(A | B)`) currently produces
+a `NotYetLowered` error at compile time (not a silent miscompile — see PR #46).
+Exhaustiveness checking also does not track inner-pattern coverage: nested
+variant coverage is discarded after recursive typechecking, so once codegen support
+lands, exhaustiveness must be extended in the same change — implementing codegen
+alone without this would make `match opt_opt { Some(None) => .., None => .. }`
+incorrectly pass exhaustiveness while `Some(Some(_))` remains uncovered. Track
+progress in `docs/PROGRESS.md`; do not treat nested sub-patterns as usable until
+both are resolved.
 
 ```ofn
-match opt_pair {
-    Some(Some(x)) => x,
-    Some(None)    => default(),
-    None          => fallback(),
+// Currently valid (bare binding sub-pattern only):
+match opt_val {
+    Some(x) => x,
+    None    => fallback(),
 }
+
+// Not yet supported (nested constructor sub-pattern) — NotYetLowered at codegen:
+// match opt_pair {
+//     Some(Some(x)) => x,
+//     Some(None)    => default(),
+//     None          => fallback(),
+// }
 ```
 
 **Binding vs. variant disambiguation — type-resolved (consequence of §2):**

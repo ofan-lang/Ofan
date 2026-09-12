@@ -3,6 +3,71 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-09-12 — nested sub-pattern codegen + exhaustiveness (PR #53, open)
+
+**Branch:** `feat/nested-sub-patterns` (PR #53, open)
+
+**What was done:**
+
+### Typechecker — `src/typechecker/infer/expr.rs`, `src/typechecker/error.rs`
+
+- Added `PosCoverage` struct for recursive per-slot coverage tracking. Replaces the flat
+  `covered: HashSet<String>` / `true_covered` / `false_covered` triple.
+- Arity-1 variants get full per-slot precision: `Some(None)` + `Some(Some(x))` + `None`
+  correctly exhausts `Option<Option<T>>`.
+- Arity ≥2 variants: conservative soundness boundary — only counted as covered when all
+  sub-patterns are wildcards/bindings (avoids the per-slot OR-merge that would silently
+  accept `Both(Some(x),_) + Both(_,Some(y))` while leaving `Both(None,None)` uncovered).
+- Added `NonExhaustiveMatchMultiSlot` error variant with pillar-5-compliant suggestion.
+- `exhaustiveness_check` emits it when missing variants have arity ≥2 payloads.
+- Tests T_m_10–T_m_27: exhaustive/non-exhaustive cases at depth 1/2/3 and soundness boundary.
+
+### ICE fix — bare tuple-variant arm before nested constructor arm
+
+- `TupleVariantMissingPatternPayload` path inserted empty `Vec<PosCoverage>` for a bare
+  use of a tuple variant. Subsequent arity-1 path saw the existing entry (with `or_default`)
+  and panicked on `slots[0]` of an empty vec.
+- Fix: `or_default()` + `if slots.is_empty() { slots.push(default) }`.
+- Regression test: T_m_27.
+
+### Error message fix — `NonExhaustiveMatchMultiSlot` suggestion
+
+- Was emitting `Both(_, _)(_, _) => ...` (double-applied wildcards, because `missing[0]`
+  already includes `(_, _)` from `format_absent_variant`).
+- Rewrote to use `missing[0]` directly without appending `(_, _)`.
+
+### Codegen — `src/codegen/llvm.rs`
+
+- Added `lower_sub_patterns` recursive method: handles Constructor, Name, Wildcard, Literal
+  sub-patterns at arbitrary nesting depth via GEP into enum payload union.
+- Fixed pass 0e non-determinism: topological sort of enum definitions before body-size
+  computation. HashMap iteration order caused wrong-sized LLVM struct bodies when an outer
+  enum was processed before its payload enum (root cause of intermittent GEP-out-of-range).
+- Tests T_en_cg_12 (inner arm), T_en_cg_13 (inner mismatch), T_en_cg_14 (depth-2 recursive
+  GEP path): all JIT-executed, 343/343 passing, 10 consecutive runs clean.
+
+**Decisions:**
+- Option B (recursive per-slot) chosen over Option C (usefulness algorithm) — correct for
+  arity-1, conservative-but-sound for arity ≥2. Option C deferred.
+- Topological sort is DFS with `visited.insert` before recursing — cycle-safe; recursive
+  enums are rejected upstream by `InfiniteSizeEnumVariant`.
+
+**Agent reviews (both addressed before commit):**
+- pillars-reviewer: Violation 1 (ICE in slots[0]); Violation 2 (malformed suggestion).
+- rust-idiom-reviewer: unused `Clone` derive removed; topo sort cycle comment added;
+  T_en_cg_14 added for depth-2 coverage.
+
+**What's next:**
+- Merge PR #53 when CI green
+- After merge: update `docs/SYNTAX_SPEC.md` §21 — replace "not yet implemented" notice
+  with accurate post-implementation status (arity-1 done, arity ≥2 conservative, Option C deferred).
+  `docs:` commit directly to main.
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- `For` loop codegen (currently deferred)
+- Manual: pin repos on org profile (web UI)
+
+---
+
 ## Last session: 2026-09-12 — CodegenError typed enum (PR #52, open)
 
 **Branch:** `refactor/codegen-error-enum` (PR #52, open — CI pending)

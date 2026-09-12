@@ -1877,8 +1877,9 @@ mod tests {
                    }";
         let errs = infer_program_errors(src);
         // Some is covered only by a guarded arm, so it's missing from unguarded coverage.
+        // Tuple variants are now reported with wildcard placeholders: "Some(_)".
         assert!(errs.iter().any(|e| matches!(e,
-            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Some".to_string())
+            TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Some(_)".to_string())
         )));
     }
 
@@ -2062,6 +2063,110 @@ mod tests {
         assert!(!errs.iter().any(|e| matches!(e,
             TypeError::NonExhaustiveMatch { missing, .. } if missing.contains(&"Circle".to_string())
         )));
+    }
+
+    // ── Nested sub-pattern tests (T_m_21 – T_m_26) ───────────────────────────
+
+    // T_m_21: Some(Some(x)) + Some(None) + None → exhaustive; x bound as i32.
+    #[test]
+    fn ok_nested_sub_pattern_fully_exhaustive() {
+        let src = "enum Inner { Some(i32), None }
+                   enum Outer { Some(Inner), None }
+                   fn f(o: Outer) -> i32 {
+                       match o { Some(Some(x)) => x, Some(None) => 0, None => 0, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_22: Some(Some(x)) + None only → missing Some(None).
+    #[test]
+    fn error_nested_sub_pattern_missing_some_none() {
+        let src = "enum Inner { Some(i32), None }
+                   enum Outer { Some(Inner), None }
+                   fn f(o: Outer) -> i32 {
+                       match o { Some(Some(x)) => x, None => 0, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. }
+            if missing.iter().any(|s| s == "Some(None)")
+        )));
+    }
+
+    // T_m_23: Some(None) + None only → missing Some(Some(_)).
+    #[test]
+    fn error_nested_sub_pattern_missing_some_some() {
+        let src = "enum Inner { Some(i32), None }
+                   enum Outer { Some(Inner), None }
+                   fn f(o: Outer) -> i32 {
+                       match o { Some(None) => 0, None => 0, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| matches!(e,
+            TypeError::NonExhaustiveMatch { missing, .. }
+            if missing.iter().any(|s| s == "Some(Some(_))")
+        )));
+    }
+
+    // T_m_24: Some(None) + Some(Some(x)) + None in different order → exhaustive.
+    #[test]
+    fn ok_nested_sub_pattern_exhaustive_reordered() {
+        let src = "enum Inner { Some(i32), None }
+                   enum Outer { Some(Inner), None }
+                   fn f(o: Outer) -> i32 {
+                       match o { Some(None) => 0, Some(Some(x)) => x, None => 0, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_25 (soundness regression — arity ≥2): Both(Some(x), _) + Both(_, Some(y)) looks
+    // exhaustive per-slot but Both(None, None) is unhandled. Must emit NonExhaustiveMatchMultiSlot
+    // with a suggestion mentioning "multiple payload fields" and "catch-all".
+    #[test]
+    fn error_nested_sub_pattern_arity2_soundness() {
+        let src = "enum Opt { Some(i32), None }
+                   enum Pair { Both(Opt, Opt), Nil }
+                   fn f(p: Pair) -> i32 {
+                       match p { Both(Some(x), _) => x, Both(_, Some(y)) => y, Nil => 0, }
+                   }";
+        let errs = infer_program_errors(src);
+        assert!(errs.iter().any(|e| {
+            if let TypeError::NonExhaustiveMatchMultiSlot { missing, .. } = e {
+                if missing.iter().any(|s| s.starts_with("Both")) {
+                    let msg = format!("{e}");
+                    return msg.contains("multiple payload fields") && msg.contains("catch-all");
+                }
+            }
+            false
+        }));
+    }
+
+    // T_m_26: arity ≥2 variant with all-wildcard arm IS accepted as exhaustive.
+    #[test]
+    fn ok_nested_sub_pattern_arity2_all_wildcard() {
+        let src = "enum Opt { Some(i32), None }
+                   enum Pair { Both(Opt, Opt), Nil }
+                   fn f(p: Pair) -> i32 {
+                       match p { Both(_, _) => 0, Nil => 0, }
+                   }";
+        assert!(infer_program(src).is_ok());
+    }
+
+    // T_m_27 (regression): bare tuple-variant arm before nested constructor arm must NOT
+    // panic. The bare arm inserts an empty slot vec; the later nested arm must resize it
+    // to 1 rather than indexing slots[0] on an empty vec.
+    #[test]
+    fn error_bare_tuple_variant_before_nested_no_ice() {
+        let src = "enum Inner { Some(i32), None }
+                   enum Outer { Some(Inner), None }
+                   fn f(o: Outer) -> i32 {
+                       match o { Some => 0, Some(Some(x)) => x, None => 0, }
+                   }";
+        // Should emit TupleVariantMissingPatternPayload, NOT panic with an index-out-of-bounds.
+        let errs = infer_program_errors(src);
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::TupleVariantMissingPatternPayload { .. })));
     }
 
     // ── Infinite-size type detection (cycle check) ────────────────────────────
