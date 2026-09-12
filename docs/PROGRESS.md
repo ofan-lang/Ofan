@@ -3,9 +3,9 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-09-12 — nested sub-pattern codegen + exhaustiveness (PR #53, open)
+## Last session: 2026-09-12 — nested sub-pattern codegen + exhaustiveness (PR #53, merged)
 
-**Branch:** `feat/nested-sub-patterns` (PR #53, open)
+**Branch:** `feat/nested-sub-patterns` (PR #53, merged → main `487c230`)
 
 **What was done:**
 
@@ -58,8 +58,7 @@
   T_en_cg_14 added for depth-2 coverage.
 
 **What's next:**
-- Merge PR #53 when CI green
-- After merge: update `docs/SYNTAX_SPEC.md` §21 — replace "not yet implemented" notice
+- Update `docs/SYNTAX_SPEC.md` §21 — replace "not yet implemented" notice
   with accurate post-implementation status (arity-1 done, arity ≥2 conservative, Option C deferred).
   `docs:` commit directly to main.
 - Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
