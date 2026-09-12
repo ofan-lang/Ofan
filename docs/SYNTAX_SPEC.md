@@ -1414,32 +1414,47 @@ as a variant name. Binds the matched value to that name in the arm body scope.
 of the match subject's enum type. Matching is exhaustiveness-tracked.
 
 *Tuple variant* — variant name followed by `(` comma-separated sub-patterns `)`.
-Sub-patterns are grammatically full patterns at the parser and typechecker layers.
-Codegen does not yet lower nested sub-patterns — any sub-pattern other than a
-bare binding or wildcard (nested constructors like `Some(Some(x))`, literal
-sub-patterns like `Some(0)`, or or-patterns like `Some(A | B)`) currently produces
-a `NotYetLowered` error at compile time (not a silent miscompile — see PR #46).
-Exhaustiveness checking also does not track inner-pattern coverage: nested
-variant coverage is discarded after recursive typechecking, so once codegen support
-lands, exhaustiveness must be extended in the same change — implementing codegen
-alone without this would make `match opt_opt { Some(None) => .., None => .. }`
-incorrectly pass exhaustiveness while `Some(Some(_))` remains uncovered. Track
-progress in `docs/PROGRESS.md`; do not treat nested sub-patterns as usable until
-both are resolved.
+Sub-patterns are full patterns at all layers (parser, typechecker, codegen).
+
+**Arity-1 variants — fully implemented (PR #53):** nested constructor sub-patterns
+at arbitrary depth compile and JIT-execute correctly. Exhaustiveness tracks
+inner-pattern coverage precisely: `Some(None)` + `Some(Some(x))` + `None`
+correctly exhausts `Option<Option<T>>`.
+
+**Arity ≥2 variants — conservative soundness boundary:** a multi-slot variant arm
+is only counted as fully covered when all sub-patterns are wildcards or bindings.
+Partially-nested arms like `Both(Some(x), _)` + `Both(_, Some(y))` do not together
+count as covering `Both(_, _)` — the compiler emits `NonExhaustiveMatchMultiSlot`
+and requires an explicit catch-all arm. This is intentionally conservative: the
+per-slot OR-merge needed for precise arity-≥2 coverage (the "usefulness" algorithm)
+is deferred; silent acceptance of genuinely non-exhaustive matches would violate
+pillar 1. Option C (full usefulness algorithm) is tracked in `docs/PROGRESS.md`.
+
+**Deferred sub-pattern forms:** literal sub-patterns (`Some(0)`), or-patterns
+inside sub-patterns (`Some(A | B)`), and `@`-binding in sub-patterns. These
+produce `NotYetLowered` at codegen (compile error, not a silent miscompile).
 
 ```ofn
-// Currently valid (bare binding sub-pattern only):
-match opt_val {
-    Some(x) => x,
-    None    => fallback(),
+# Arity-1 nesting — fully supported
+match opt_opt {
+    Some(Some(x)) => x,
+    Some(None)    => default(),
+    None          => fallback(),
 }
 
-// Not yet supported (nested constructor sub-pattern) — NotYetLowered at codegen:
-// match opt_pair {
-//     Some(Some(x)) => x,
-//     Some(None)    => default(),
-//     None          => fallback(),
-// }
+# Depth-2 nesting — fully supported
+match outer {
+    Box(Wrap(Val(x))) => x,
+    Box(Wrap(Empty))  => 1,
+    Box(Nil)          => 2,
+    None              => 3,
+}
+
+# Arity-≥2 with nested sub-patterns — requires explicit wildcard arm (conservative)
+match pair {
+    Both(Some(x), Some(y)) => x + y,
+    Both(_, _)             => 0,      # catch-all required
+}
 ```
 
 **Binding vs. variant disambiguation — type-resolved (consequence of §2):**
