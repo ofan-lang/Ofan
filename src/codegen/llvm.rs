@@ -3607,7 +3607,10 @@ mod tests {
                 .unwrap()
                 .call()
         };
-        assert_eq!(result, 5, "expected q.x == 5 (translate by 5), got {result}");
+        assert_eq!(
+            result, 5,
+            "expected q.x == 5 (translate by 5), got {result}"
+        );
     }
 
     /// T_sc_02: free function returning struct value, result used in expression position.
@@ -3664,7 +3667,10 @@ mod tests {
                 .unwrap()
                 .call()
         };
-        assert_eq!(result, 10, "expected p.x + p.y == 10 (block-wrapped tail), got {result}");
+        assert_eq!(
+            result, 10,
+            "expected p.x + p.y == 10 (block-wrapped tail), got {result}"
+        );
     }
 
     /// T_sc_04: struct-returning fn whose body tail is an if/else expression.
