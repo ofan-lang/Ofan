@@ -1868,8 +1868,8 @@ syntax is settled for these.
 - **Raw strings** (no escape processing) — see §15
 
 **Parser/typechecker-relevant (out of scope for the lexer's first pass; do not block it):**
-- **Trait / interface syntax** — not started; how `impl` blocks interact with named
-  traits has not been decided, though the receiver forms themselves are now settled in §18
+- **Trait / interface syntax** — syntax and receiver-mode semantics decided in §25.
+  `dyn Trait` object safety deferred (static dispatch only for v1)
 - **Module / import syntax and path separator** — `::` used informally in examples only
 - **Field/method visibility (access levels)** — a confirmed future requirement, deferred
   until the module/namespace system (also §24) is designed. Visibility is only meaningful
@@ -1915,7 +1915,7 @@ in the lexer (`src/lexer/keywords.rs`) ahead of their syntax being decided. Rese
 means they cannot be used as identifiers; it does **not** imply any grammar or semantics
 has been decided for them.
 
-Words reserved from **decided syntax** (§16, §17, §18, §21) that were not yet in the keyword table:
+Words reserved from **decided syntax** (§16, §17, §18, §21, §25) that were not yet in the keyword table:
 
 | Word | Token | Source |
 |------|-------|--------|
@@ -1926,12 +1926,15 @@ Words reserved from **decided syntax** (§16, §17, §18, §21) that were not ye
 | `Self` | (type name, not a token variant) | §18 impl-block type alias; resolves via type namespace |
 | `impl` | `Token::Impl` | §22 impl block syntax |
 | `match` | `Token::Match` | §21 match / pattern matching |
+| `trait` | `Token::Trait` | §25 trait declaration |
+| `on` | `Token::On` | §25 `impl Trait on Type` connector |
+| `needs` | `Token::Needs` | §25 trait bound keyword |
+| `mut` | `Token::Mut` | §25 mutable receiver in trait signatures (valid only there in v1) |
 
 Words reserved **ahead of syntax decisions** (constructs in this §24 list):
 
 | Word | Token | Future construct |
 |------|-------|-----------------|
-| `trait` | `Token::Trait` | trait / interface syntax (§24) |
 | `mod` | `Token::Mod` | module / import syntax (§24) |
 
 **Process note, not a syntax item:** the coordination gap flagged here (no master reserved-
@@ -1974,6 +1977,105 @@ pattern-binding form that uses `@`. Both uses occupy syntactically disjoint posi
 attribute syntax appears before item declarations; pattern binding appears inside match
 arms between a name and a sub-pattern. No ambiguity at either position. This is flagged
 explicitly so the §21 design session does not inadvertently conflict with this reservation.
+
+---
+
+## §25 Traits
+
+**Decided: trait declarations (signatures only), `impl Trait on Type` connector, `needs`
+trait bounds, `mut self` receiver mode in trait signatures. No default method bodies in
+v1 — additive-only extension when defaults land. `dyn Trait` object safety deferred.**
+
+```ofn
+trait Comparable {
+    fn compare(self, other: &Self) -> i32;
+}
+
+trait Counter {
+    fn peek(self) -> i32;
+    fn increment(mut self);
+    fn into_total(move self) -> i32;
+}
+
+impl Comparable on Point {
+    fn compare(self, other: &Self) -> i32 { ... }
+}
+
+fn largest<T needs Ord>(items: &[T]) -> T { ... }
+fn process<T needs Ord + Clone>(item: T) { ... }
+```
+
+**Trait declaration — signatures only:**
+
+`trait Name { method-signatures }`. Method signatures use the same syntax as function
+declarations (§6) but have no body — the closing `;` takes the place of the block. No
+default method bodies in v1; adding them later is an additive, non-breaking extension.
+
+**Receiver mode in trait signatures:**
+
+§18 infers receiver mode from the method body. Trait methods have no body for inference
+to read, so receiver mode is declared explicitly at the signature:
+
+| Form | Access mode | Caller effect |
+|------|-------------|---------------|
+| `self` | immutable borrow | caller's binding usable after the call |
+| `mut self` | mutable borrow | caller's binding same, contents may change |
+| `move self` | consuming | caller's binding invalid after the call (if type is Move) |
+
+`mut self` is a new keyword form (token `Token::Mut`). It is **only valid in trait
+signatures** for v1. Inside a bare `impl Type { ... }` block, receiver mode is still
+inferred from the body exactly as §18 decides — `mut self` is not valid there. When a
+concrete impl provides the method body, the body's observable behavior must match the
+declared receiver mode; a mismatch is a compile error (see PHILOSOPHY.md §5.5).
+
+**Impl/trait connector — `on`:**
+
+`impl TraitName on TypeName { ... }`. The `on` keyword (token `Token::On`) connects the
+trait being implemented to the type implementing it.
+
+*Alternatives considered and rejected:*
+- **`for`** — already used in `for x in ...` loop syntax (§16). Doubling its role would
+  create a keyword that means two unrelated things depending on context: iteration and
+  trait implementation. Pillar-3 violation — one form, one meaning.
+- **`in`** — same problem: already the `for`-loop collection separator (§16).
+- **`:`** — established as the "left is exactly typed as right" annotation marker (§9).
+  `impl Comparable : Point` would collide with the type annotation mental model.
+- **`as`** — casting operator (§8). `impl Comparable as Point` reads as a cast, not an
+  implementation claim.
+
+**Trait bounds — `needs`, multi-bound via `+`:**
+
+`<T needs Bound>`. Multiple bounds: `<T needs Bound1 + Bound2>`. The `needs` keyword
+(token `Token::Needs`) states a compile-time capability requirement.
+
+`where` clauses: **not adopted for v1.** `<T needs Bound>` is sufficient for all
+single-parameter bounds without cross-parameter constraints. A `where` form would be a
+second syntax for the same thing — pillar-3 violation. Reopen when associated types or
+cross-parameter bounds create cases that `<T needs ...>` cannot express.
+
+*Alternatives considered and rejected for the bound keyword:*
+- **`:`** — type annotation clash (§9). `<T : Ord>` already means something different.
+- **`is`** — false-familiarity risk. Python, Kotlin, TypeScript, and C# all use `is` for
+  runtime type checks (a fundamentally different concept from a compile-time bound). A
+  programmer arriving from any of those languages would read `T is Ord` as a runtime
+  test. Compile-time bounds must not look like runtime predicates.
+- **`of`, `like`, `with`, `requires`** — weaker semantic fit or longer without added clarity.
+- **Invented abbreviations (`nds`, `req`, `reqs`)** — all Ofan keywords are real,
+  recognizable English words, never shorthand. Same reasoning that rejected Rust's `'a`
+  lifetime sigil in §7.
+
+*Alternatives considered and rejected for the multi-bound separator:*
+- **`,`** — already the compile-time-parameter-list separator. `<T needs Ord, U>` would
+  be ambiguous between "two type parameters" and "two bounds on T".
+- **`&`** — the most overloaded symbol in the language (borrow marker, reference type,
+  bitwise AND). Not worth a further role.
+
+**`Self` in trait context:**
+
+Extends §18's existing rule without a new concept. In a trait body, `Self` is the
+implicit unbound type parameter — "the type that implements this trait." At each
+`impl Trait on Type { ... }`, `Self` resolves to `Type`, exactly as it does in a bare
+`impl Type { ... }` block. No additional resolution mechanism is needed.
 
 ---
 

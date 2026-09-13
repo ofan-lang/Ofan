@@ -207,3 +207,35 @@ UB/LLVM poison). Guarded via an `icmp`-based check in codegen before `sdiv`/`sre
 
 **Float arithmetic:** IEEE 754 by spec. Division by zero yields ±∞; NaN propagates. No
 guard — this is defined, specified behavior, not silent UB.
+
+### 5.5 — Trait semantics (v1 scope)
+
+**Receiver mode is a trait contract (pillar 1).**
+
+A trait method signature declares receiver mode explicitly (`self`, `mut self`, `move self`)
+because callers depend on knowing whether a method will consume the value — without reading
+every impl. A mismatch between the declared receiver mode and the mode observable in an
+impl body is a compile error naming the trait, method, expected mode, and found mode. This
+is a direct pillar-1 consequence: the alternative (silent coercion or impl-local inference)
+would hide ownership-transfer behavior from the call site.
+
+Inside a bare `impl Type { ... }` block (no trait), §18 receiver inference is unchanged —
+there is no contract to enforce, so the body is still authoritative.
+
+**`dyn Trait` object safety: deferred.**
+
+Dynamic dispatch via trait objects is explicitly out of scope for v1. Nothing in the
+current implementation plan (compiler bootstrap, anchor CLI tool) requires dynamic
+dispatch; static dispatch is sufficient. Designing object-safety rules (size constraints,
+consuming-method restrictions) before there is a concrete use case would be premature
+constraint. When a real need arises, flag it for a design session rather than solving it
+inline. Static dispatch only until then.
+
+**`Self` in trait context: no new semantic concept.**
+
+`Self` in a trait body is the implicit unbound type parameter. At each `impl Trait on Type`,
+`Self` resolves to `Type`. This is the same name-resolution rule as §18 — extended to an
+unbound position — not a new mechanism. The decision to reuse §18's rule rather than
+introduce a distinct `ThisType` keyword or explicit parameter (`trait Comparable<Self>`) is
+consistent with pillar 2 (inference over annotation): the type being implemented is always
+known at an impl site, so no annotation is needed to name it.
