@@ -3,6 +3,60 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-09-12 — trait syntax design + doc audit (docs, closes #49)
+
+**Branch:** `main` (direct — docs-only, no `src/` touched)
+
+**What was done:**
+
+### Trait syntax design session (closes issue #49)
+
+Full design session resolving trait/impl/bounds syntax and the `Self`-in-traits
+semantic questions from issue #49. Decisions documented in two commits (`d8b092b`):
+
+**New `docs/SYNTAX_SPEC.md §25`:**
+- Trait declarations: `trait Name { fn sig; }` — signatures only, no default bodies in v1
+- Receiver mode in trait signatures: `self` (immutable), `mut self` (mutable — new, trait
+  signatures only in v1), `move self` (consuming — unchanged from §18)
+- Impl/trait connector: `impl Trait on Type { ... }`. `on` chosen over `for` (loop
+  keyword collision), `in` (same), `:` (type annotation clash), `as` (casting collision §8)
+- Trait bounds: `<T needs Bound>`, multi-bound via `+`. `needs` chosen over `is`
+  (runtime-typecheck false-familiarity in Python/Kotlin/TS/C#), `:` (§9 clash), invented
+  abbreviations (all Ofan keywords are real English words per §7 rationale)
+- `where` clauses: not adopted for v1 (redundant with `<T needs Bound>` — pillar 3)
+- `Self` in trait body = implicit unbound type parameter; resolves to concrete type at
+  each impl site — direct extension of §18's name-resolution, no new mechanism
+- §24 keyword table updated: `trait`/`on`/`needs`/`mut` moved to decided-syntax table;
+  `mod` remains deferred
+
+**New `docs/PHILOSOPHY.md §5.5`:**
+- Receiver mode as pillar-1 contract: trait signature is authoritative; impl mismatch =
+  compile error naming trait, method, expected/found mode
+- `dyn Trait` object safety: explicitly deferred — static dispatch only for v1; no use
+  case in current implementation plan (compiler bootstrap, anchor CLI)
+- `Self` reuse of §18 rule documented as pillar-2 alignment (no annotation needed when
+  the implemented type is always known at the impl site)
+
+### Doc audit (doc hygiene, `239fad7`)
+
+- `PROGRESS.md`: removed completed §21 update task from PR #53 "What's next"
+- `ARCHITECTURE.md`: codegen status updated to "slices 1–3 complete"; enum declarations
+  removed from "Not yet designed"; deferred codegen list bumped to "slice 4+" (enums removed)
+
+**Decisions:**
+- `dyn Trait` deferred by scope, not punted indefinitely — flag back when a real use case
+  appears rather than designing rules preemptively
+- `mut self` is valid only in trait signatures for v1; bare `impl` blocks still use §18
+  inference (no body-less signature to require explicit declaration)
+
+**What's next:**
+- Trait implementation (lexer: `Token::On`, `Token::Needs`, `Token::Mut`; parser: §25
+  grammar; typechecker: trait collection pass, impl-on checking, bounds checking)
+- `For` loop codegen (currently deferred)
+- Manual: pin repos on org profile (web UI)
+
+---
+
 ## Last session: 2026-09-12 — nested sub-pattern codegen + exhaustiveness (PR #53, merged)
 
 **Branch:** `feat/nested-sub-patterns` (PR #53, merged → main `487c230`)
