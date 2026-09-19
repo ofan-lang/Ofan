@@ -3436,5 +3436,87 @@ semantic-web space. Using it would silently collide with that established ecosys
 
 ---
 
+## Session: 2026-09-19 — issue triage, label taxonomy, branch protection, GIT_WORKFLOW update
+
+**Branch:** `main` (direct for docs commits; PR #64 for extension rename)
+
+**What was done:**
+
+### Issue filing — manual testing findings from @isalowpoke (issues #54–#63)
+
+Filed 10 GitHub issues covering bugs and gaps found during manual collaborator
+testing (2026-09-15 test runs, diff review of 25 commits 85a250d..93b921d):
+
+- #54 `UseAfterMove` never constructed — move semantics silently unenforced (§17) — `bug soundness typechecker priority-high`
+- #55 `Self` return type → ICE in codegen (§18/§22) — `bug ice codegen priority-high`
+- #56 Bitwise operators → ICE in codegen (§12) — `bug ice codegen priority-high`
+- #57 `&T` locals/params not lowerable in codegen (§13) — `bug ice codegen priority-high`
+- #58 Doc comments rejected by parser (§1) — `bug parser priority-medium`
+- #59 `str` vs `&static str` annotation mismatch (§15) — `bug typechecker priority-medium`
+- #60 SYNTAX_SPEC.md §21 stale — literal sub-patterns already implemented — `documentation priority-low`
+- #61 Uncommitted `/DEFAULTLIB` linker flags — investigate — `chore investigate priority-low`
+- #62 Persist `LLVM_SYS_181_PREFIX` in `.cargo/config.toml` — `chore dx priority-low`
+- #63 `dead_code` warnings without codegen feature — `cleanup priority-low`
+
+Also added `match self` / borrowed-receiver repro + workaround (found by @isalowpoke)
+as comments on existing issues #47 and #49, rather than opening a duplicate.
+
+### Extension rename `.ofn` → `.ofan` (PR #64, merged to main as `b55d3ff`)
+
+Renamed the Ofan source file extension repo-wide. Rationale: `.ofn` is the
+W3C-registered suffix for OWL Functional Syntax — collision with active bioinformatics
+tooling (ROBOT, ODK). `.ofan` is unambiguous. See 2026-09-18 session entry for full
+scope. PR ran full `pillars-reviewer` + `rust-idiom-reviewer` — both clean.
+
+### Label taxonomy audit (live GitHub changes — no commit)
+
+- Added descriptions to all 12 custom labels (previously description-less).
+- Backfilled `parser` on #47, `codegen` on #48 for component-label consistency.
+- No priority labels backfilled on closed issues — priority is forward-looking triage,
+  not meaningful on resolved work.
+- Label taxonomy finalised: Type (one required) / Priority (required on
+  bug/enhancement) / Component (optional) / Descriptive tags (optional) /
+  Special (`good first issue`). See `docs/GIT_WORKFLOW.md §Labels`.
+
+### Branch protection confirmed active (live GitHub change — no commit)
+
+`main` already had `Test & Lint` as a required status check. Sent explicit PUT to
+lock `required_pull_request_reviews: null` and `restrictions: null` canonically.
+Final state: CI required, no required PR reviews, enforce_admins: false, force-push
+and deletion blocked. Marks entry into Phase 3 of the branching model.
+
+### GIT_WORKFLOW.md update (commit `c553b98`, direct-to-main)
+
+- Added `## Labels` section — full taxonomy and label descriptions.
+- Added `## Issue linking` section — branch naming convention (`fix/issue-<N>`),
+  mandatory `Closes #N` / `Fixes #N` in every PR description.
+- Updated `## Branching model` — Phase 1/2 marked historical, Phase 3 marked current
+  with actual protection details.
+- Updated `## PR conventions` intro — same historical/historical/current reframe;
+  subsections below intro left unchanged.
+
+**Design decisions made (and why):**
+- No required PR reviews in branch protection — single maintainer; real review gate
+  is `pillars-reviewer`/`rust-idiom-reviewer` subagents, not a second GitHub approval.
+- `enforce_admins: false` — keeps direct-to-main viable for `docs:`/`chore:` without
+  requiring a PR + CI wait for every docs fix.
+- Label taxonomy reuses GitHub defaults for type rather than inventing duplicates;
+  custom labels reserved for component/priority/descriptive signal.
+- Past-tense PROGRESS.md entries left unchanged as historical record — only new
+  dated entries added going forward.
+
+**Pending / next step:**
+- Fix issues #54–#57 (four priority-high ICEs + soundness gap) — next meaningful
+  compiler work items.
+- `.gitattributes` `*.ofan linguist-language=Ofan` entry when Linguist recognition
+  is set up.
+
+**Something the agent proposed and was rejected (and why):**
+- Initial branch protection rationale cited OLE Compound Documents as the `.ofn`
+  collision — rejected; corrected to W3C OWL Functional Syntax (the actual
+  registered collision).
+
+---
+
 ## History
 <!-- Previous sessions get moved here, most recent on top -->
