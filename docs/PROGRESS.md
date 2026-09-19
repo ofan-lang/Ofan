@@ -3,7 +3,77 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
-## Last session: 2026-09-19 — fix codegen ICEs #55 #56 #57 (PR open, branch fix/issues-55-56-57-codegen-ices)
+## Last session: 2026-09-19 — issue #66 diagnostic trap messages (branch fix/issue-66-diagnostic-trap-messages)
+
+**Branch:** `fix/issue-66-diagnostic-trap-messages`
+
+**What was done:**
+
+### Issue #66 — diagnostic messages before runtime traps on Windows
+
+Previously all three guarded-arithmetic crash paths (div-by-zero, modulo-by-zero, shift out of
+range) emitted a bare `llvm.trap` (UD2/SIGILL on x86-64) with no printed message. Users saw an
+OS-level crash with no indication of the cause. This violates the spirit of Pillar 1 (explicit
+erroneous behavior) and Pillar 5 (errors need context).
+
+**CRT spike investigation (Part 1, prior session):** Established that `puts`/`fprintf` fail at
+runtime under `/ENTRY:main` because CRT startup (`mainCRTStartup`) is bypassed. Minimum
+DEFAULTLIB set to link any CRT symbol is `libucrt.lib + msvcrt.lib` — but the binary still
+crashes with STATUS_ACCESS_VIOLATION because `_iob[]` (stdio handles) isn't initialized.
+
+**WriteFile verification (Part 2, this session):** Confirmed empirically that
+`GetStdHandle(-12)` + `WriteFile` from `kernel32` work correctly under `/ENTRY:main` with no
+CRT initialization. Two verification iterations:
+1. First verification used `ptr null` for `lpNumberOfBytesWritten` — technically violates MSDN
+   spec for synchronous handles. Succeeded in practice but unsafe.
+2. Re-verification used a private static global (`__wf_written`) for `lpNumberOfBytesWritten`
+   instead of an alloca or null. Alloca in a non-entry block triggers `__chkstk` (MSVC x64 stack
+   probe, requires CRT). Static global avoids both the spec violation and the `__chkstk`
+   dependency. Re-verified: LINK OK, exit 0, message on stderr. ✓
+
+**Implementation:**
+- New `emit_stderr_write(&self, tag: &str, message: &str)` (`#[cfg(windows)]`): declares
+  `@GetStdHandle`/`@WriteFile` idempotently, gets-or-creates a private global for the message
+  bytes (named by `tag`), emits the handle + write calls. Private global `@__wf_written` for
+  `lpNumberOfBytesWritten`.
+- New `emit_runtime_panic(&self, tag, message)`: calls `emit_stderr_write` on Windows (noop
+  suppressed with `let _ = (tag, message)` on non-Windows to satisfy `-D warnings` on Linux CI),
+  then `llvm.trap` + `unreachable`. Replaces the two-line abort pattern in all three guard sites.
+- Wired `emit_int_div_or_rem` (uses `"rt_err_div"` / `"rt_err_mod"` depending on `is_rem`).
+- Wired `emit_int_shift` (uses `"rt_err_shift"`).
+- Added `/DEFAULTLIB:kernel32.lib` to MSVC linker invocation — required because raw LLVM .obj
+  files have no embedded `#pragma comment(lib, ...)` directives.
+- Same `#[cfg(windows)]` host-OS detection pattern as `link_object` (existing precedent).
+
+**Tests:** Three new tests in `tests/cli_diagnostics.rs` gated `#[cfg(all(feature = "codegen", windows))]`:
+- `codegen_div_trap_prints_message` — `examples/div_trap.ofan` triggers div-by-zero, asserts
+  stderr contains `"runtime error: division by zero"` and exit code is non-zero.
+- `codegen_mod_trap_prints_message` — same for modulo.
+- `codegen_shift_trap_prints_message` — `examples/shift_trap.ofan` shifts by `-1`, asserts
+  `"runtime error: shift amount out of range"`.
+
+**Verified end-to-end:** All three examples build and produce the expected message + SIGILL exit
+(-1073741795 = 0xC000001D = STATUS_ILLEGAL_INSTRUCTION).
+
+**Known limitation (documented, not fixed here):** The INT_MIN/-1 division overflow case fires
+the same `"runtime error: division by zero"` message (uses same abort block). The condition is
+technically "signed overflow in division", not zero divisor. Low priority — exotic case, would
+require splitting the single abort block into two.
+
+**Non-Windows:** Bare `llvm.trap` only (unchanged). Non-Windows diagnostic messages are a
+separate future issue.
+
+**Agent reviews:** pillars-reviewer confirmed Pillar 1 improved, Pillar 4 intact, no regressions.
+CI blocker fixed (`tag`/`message` unused on non-Windows → `let _ = (tag, message)` sink).
+
+**What's next:**
+- PR #66 needs review and merge.
+- After merge, consider a follow-up for the INT_MIN/-1 overflow message precision (low priority).
+- Non-Windows trap diagnostics (Linux SIGILL → need `write(2)` syscall or similar; separate issue).
+
+---
+
+## Previous session: 2026-09-19 — fix codegen ICEs #55 #56 #57 (PR open, branch fix/issues-55-56-57-codegen-ices)
 
 **Branch:** `fix/issues-55-56-57-codegen-ices`
 

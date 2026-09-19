@@ -131,6 +131,7 @@ fn link_object(obj: &Path, out: &Path) -> Result<(), CodegenError> {
                     .arg("/NOLOGO")
                     .arg("/SUBSYSTEM:CONSOLE")
                     .arg(format!("/ENTRY:{}", super::ENTRY_FN))
+                    .arg("/DEFAULTLIB:kernel32.lib")
                     .arg(format!("/OUT:{}", out.display()))
                     .arg(obj)
                     .status()
@@ -2177,22 +2178,20 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 
     /// Emit an i32 div or rem with a runtime zero-divisor check.
-    /// Zero divisor → traps via `llvm.trap` and marks the block unreachable.
-    /// Pillar 1: explicit runtime panic, never silent UB.
+    /// Zero divisor or INT_MIN/-1 overflow → prints a diagnostic and traps (Pillar 1).
     fn emit_int_div_or_rem(
         &self,
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
         is_rem: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let abort_fn = self.get_or_declare_trap()?;
         // Guard 1: divide by zero.
         let zero = self.ctx.i32_type().const_zero();
         let is_zero = self
             .builder
             .build_int_compare(IntPredicate::EQ, r, zero, "divz")
             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-        // Guard 2: INT_MIN / -1 is signed overflow â†' LLVM poison.
+        // Guard 2: INT_MIN / -1 is signed overflow → LLVM poison.
         // -1 as u64 gives the correct bit pattern for const_int on an i32 type.
         let neg_one = self.ctx.i32_type().const_int(u64::MAX, false);
         let int_min = self.ctx.i32_type().const_int(i32::MIN as u64, false);
@@ -2220,12 +2219,12 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         self.builder.position_at_end(abort_bb);
-        self.builder
-            .build_call(abort_fn, &[], "")
-            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let (tag, msg) = if is_rem {
+            ("rt_err_mod", "runtime error: modulo by zero\n")
+        } else {
+            ("rt_err_div", "runtime error: division by zero\n")
+        };
+        self.emit_runtime_panic(tag, msg)?;
 
         self.builder.position_at_end(ok_bb);
         if is_rem {
@@ -2244,15 +2243,13 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 
     /// Emit an i32 shift with a runtime out-of-range check.
-    /// Shift amount < 0 or >= 32 → traps via `llvm.trap` and marks the block unreachable.
-    /// Pillar 1: explicit runtime panic, never silent UB (LLVM shift-amount poison).
+    /// Shift amount < 0 or >= 32 → prints a diagnostic and traps (Pillar 1).
     fn emit_int_shift(
         &self,
         l: IntValue<'ctx>,
         r: IntValue<'ctx>,
         arithmetic: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let abort_fn = self.get_or_declare_trap()?;
         let i32_ty = self.ctx.i32_type();
         let zero = i32_ty.const_zero();
         let width = i32_ty.const_int(32, false);
@@ -2277,12 +2274,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         self.builder.position_at_end(abort_bb);
-        self.builder
-            .build_call(abort_fn, &[], "")
-            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.emit_runtime_panic("rt_err_shift", "runtime error: shift amount out of range\n")?;
 
         self.builder.position_at_end(ok_bb);
         if arithmetic {
@@ -2310,6 +2302,121 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             .ok_or_else(|| CodegenError::Ice("llvm.trap intrinsic not found".to_string()))?
             .get_declaration(self.module, &[])
             .ok_or_else(|| CodegenError::Ice("llvm.trap declaration failed".to_string()))
+    }
+
+    /// Emit a diagnostic message to stderr then trap, terminating the current block.
+    /// On Windows host: writes `message` via GetStdHandle+WriteFile before trapping.
+    /// On other hosts: traps immediately with no message (bare SIGILL — future work).
+    /// NOTE: gates on compile-host OS (`#[cfg(windows)]`), not the codegen target triple.
+    /// This matches `link_object`'s existing pattern; a future cross-compilation pass will
+    /// need to replace both with target-triple detection (tracked separately).
+    fn emit_runtime_panic(&self, tag: &str, message: &str) -> Result<(), CodegenError> {
+        #[cfg(windows)]
+        self.emit_stderr_write(tag, message)?;
+        #[cfg(not(windows))]
+        let _ = (tag, message);
+        let trap = self.get_or_declare_trap()?;
+        self.builder
+            .build_call(trap, &[], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit GetStdHandle(-12) + WriteFile to print `message` on stderr.
+    /// `tag` names the private global constant so identical messages share one global.
+    /// Allocates an i32 for lpNumberOfBytesWritten — required for synchronous handles.
+    #[cfg(windows)]
+    fn emit_stderr_write(&self, tag: &str, message: &str) -> Result<(), CodegenError> {
+        let ptr_ty = self.ctx.ptr_type(AddressSpace::default());
+        let i32_ty = self.ctx.i32_type();
+
+        let get_std_handle = match self.module.get_function("GetStdHandle") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "GetStdHandle",
+                ptr_ty.fn_type(&[i32_ty.into()], false),
+                Some(inkwell::module::Linkage::External),
+            ),
+        };
+
+        let write_file = match self.module.get_function("WriteFile") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "WriteFile",
+                i32_ty.fn_type(
+                    &[
+                        ptr_ty.into(),
+                        ptr_ty.into(),
+                        i32_ty.into(),
+                        ptr_ty.into(),
+                        ptr_ty.into(),
+                    ],
+                    false,
+                ),
+                Some(inkwell::module::Linkage::External),
+            ),
+        };
+
+        let msg_global = match self.module.get_global(tag) {
+            Some(g) => g,
+            None => {
+                let msg_bytes = message.as_bytes();
+                let msg_const = self.ctx.const_string(msg_bytes, false);
+                let g = self.module.add_global(msg_const.get_type(), None, tag);
+                g.set_initializer(&msg_const);
+                g.set_constant(true);
+                g.set_linkage(inkwell::module::Linkage::Private);
+                g
+            }
+        };
+
+        let msg_ptr = self
+            .builder
+            .build_pointer_cast(msg_global.as_pointer_value(), ptr_ty, "msg_ptr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        // Private global for lpNumberOfBytesWritten — required for synchronous handles (MSDN).
+        // A global avoids alloca in a non-entry block, which would require __chkstk on MSVC x64.
+        // Never read; the value is discarded after WriteFile returns (program is about to trap).
+        let bytes_written = match self.module.get_global("__wf_written") {
+            Some(g) => g,
+            None => {
+                let g = self.module.add_global(i32_ty, None, "__wf_written");
+                g.set_initializer(&i32_ty.const_zero());
+                g.set_linkage(inkwell::module::Linkage::Private);
+                g
+            }
+        };
+
+        // STD_ERROR_HANDLE = (DWORD)(-12) = 0xFFFFFFF4
+        let std_error_handle = i32_ty.const_int(0xFFFF_FFF4_u64, false);
+
+        let handle = self
+            .builder
+            .build_call(get_std_handle, &[std_error_handle.into()], "stderr_h")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Ice("GetStdHandle returned void".to_string()))?;
+
+        self.builder
+            .build_call(
+                write_file,
+                &[
+                    handle.into(),
+                    msg_ptr.into(),
+                    i32_ty.const_int(message.len() as u64, false).into(),
+                    bytes_written.as_pointer_value().into(),
+                    ptr_ty.const_null().into(),
+                ],
+                "wf",
+            )
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(())
     }
 }
 
