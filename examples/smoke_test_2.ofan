@@ -1,4 +1,4 @@
-# smoke_test_2.ofn — integration check for features since smoke_test.ofn.
+# smoke_test_2.ofan — integration check for features since smoke_test.ofan.
 #
 # Covers:
 #   PR #41 — structs-as-fields: nested struct literal INLINE as field values,

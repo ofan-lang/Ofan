@@ -98,7 +98,7 @@ cargo clippy -- -D warnings
 ## Run
 
 ```sh
-cargo run -- <file.ofn>
+cargo run -- <file.ofan>
 ```
 
 ## Design decisions

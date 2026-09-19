@@ -16,9 +16,9 @@ Three subcommands, all share the same `lex → parse → typecheck` pipeline:
 
 | Subcommand | What it does | Requires codegen? |
 |------------|--------------|:-----------------:|
-| `ofan check <file.ofn>` | Type-check only; exit 0 on success | No |
-| `ofan build <file.ofn> [-o <out>]` | Compile to binary (CWD default) | Yes |
-| `ofan run <file.ofn> [-- <args>…]` | Compile to PID-suffixed temp binary, run, forward exit code, clean up | Yes |
+| `ofan check <file.ofan>` | Type-check only; exit 0 on success | No |
+| `ofan build <file.ofan> [-o <out>]` | Compile to binary (CWD default) | Yes |
+| `ofan run <file.ofan> [-- <args>…]` | Compile to PID-suffixed temp binary, run, forward exit code, clean up | Yes |
 
 **Key design points:**
 - `check` never calls `emit_to` — works without `--features codegen`. No LLVM invocation.

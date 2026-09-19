@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const SMOKE_TEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/smoke_test.ofn");
+const SMOKE_TEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/smoke_test.ofan");
 
 #[test]
 fn diag_check_ok() {

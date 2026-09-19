@@ -2,7 +2,7 @@
 
 > Living draft. Every decision here should be able to answer "why?" with a technical reason, not an aesthetic one.
 
-Language name: **Ofan**. File extension: **.ofn**. Mascot: **Ofy** — a diminutive of Ofan.
+Language name: **Ofan**. File extension: **.ofan**. Mascot: **Ofy** — a diminutive of Ofan.
 The language name keeps a serious/imposing register; the mascot's diminutive softens that same
 name for informal use (stickers, social media, community), without losing the direct connection
 to the language name.

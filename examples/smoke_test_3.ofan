@@ -1,4 +1,4 @@
-# smoke_test_3.ofn — enum codegen smoke test (PR #46).
+# smoke_test_3.ofan — enum codegen smoke test (PR #46).
 #
 # Covers:
 #   Unit variant construction + match
