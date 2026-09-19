@@ -2570,13 +2570,11 @@ fn declare_method_sig<'ctx>(
     };
     for p in explicit_params {
         let llvm_ty: BasicMetadataTypeEnum = match &p.ty {
-            Type::SelfTy(_) => (*struct_types
-                .get(type_name)
-                .ok_or_else(|| {
-                    CodegenError::Ice(format!(
-                        "struct `{type_name}` not in struct_types for Self param"
-                    ))
-                })?)
+            Type::SelfTy(_) => (*struct_types.get(type_name).ok_or_else(|| {
+                CodegenError::Ice(format!(
+                    "struct `{type_name}` not in struct_types for Self param"
+                ))
+            })?)
             .into(),
             ty => basic_type_from_ast(ty, ctx, struct_types)?.into(),
         };

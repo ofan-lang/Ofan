@@ -3,8 +3,7 @@ use std::process::Command;
 const SMOKE_TEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/smoke_test.ofan");
 const BITWISE_OPS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/bitwise_ops.ofan");
 const SELF_RETURN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/self_return.ofan");
-const REF_TYPES_GUARD: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/examples/ref_types_guard.ofan");
+const REF_TYPES_GUARD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/ref_types_guard.ofan");
 
 #[test]
 fn diag_check_ok() {
