@@ -30,16 +30,16 @@ fix(parser): handle missing semicolon without consuming next token
 
 ## Branching model
 
-**Phase 1 — now, pre-`src/`:** direct-to-main. No feature branches.
-The repo has no code to break and no CI to enforce. Overhead with no payoff.
+**Phase 1 (historical) — pre-`src/`:** direct-to-main, no feature branches.
 
-**Phase 2 — once `src/` exists and CI is running:** feature branches for anything touching
-`lexer/`, `parser/`, `typechecker/`, or `codegen/`. Pattern: `feat/<short-name>`.
-Direct-to-main remains acceptable for `docs:` and `chore:` changes.
-**Trigger to enter Phase 2:** the first commit to `src/`.
+**Phase 2 (historical) — once `src/` existed and CI was running:** feature branches for
+anything touching `lexer/`, `parser/`, `typechecker/`, or `codegen/`. Pattern:
+`feat/<short-name>`. Direct-to-main remained acceptable for `docs:` and `chore:` changes.
 
-**Phase 3 — once the compiler can compile real Ofan programs:** branch protection on main,
-CI required to pass before merge.
+**Phase 3 (current, as of 2026-09-19):** the compiler compiles real Ofan programs. Branch
+protection is active on `main` — the `Test & Lint` CI check must pass before merge.
+Direct-to-main remains acceptable for `docs:` and `chore:` changes, consistent with
+earlier phases.
 
 ## Claude Code git permissions — what is intentionally absent
 
@@ -57,18 +57,22 @@ confirmation before Claude Code runs either command.
 
 ## PR conventions
 
-**Phase 1 (now):** No PRs. Direct-to-main. Before committing anything non-trivial, run
-`pillars-reviewer` and `rust-idiom-reviewer` manually (per `CLAUDE.md` workflow).
+**Phase 1 (historical) — no PRs, direct-to-main:** before committing anything non-trivial,
+`pillars-reviewer` and `rust-idiom-reviewer` were run manually (per `CLAUDE.md` workflow).
 
-**Phase 2 (feature branches):** PRs for all changes to compiler internals. Before opening:
+**Phase 2 (historical) — feature branches introduced:** PRs required for all changes to
+compiler internals. Before opening:
 1. Run `pillars-reviewer` on the branch diff.
 2. Run `rust-idiom-reviewer` on the branch diff.
 3. Write a PR description that explains *why* — it becomes the permanent record when
    `git log` is read months later.
 
+**Phase 3 (current):** PRs remain required for all changes to compiler internals, now
+additionally gated by required CI status checks on `main` (see Branching model). The same
+before-opening steps apply.
+
 PRs are worth it solo once real code exists: the description forces a moment of "would I
 be comfortable explaining this decision to a future contributor?" before it lands.
-Pre-code, they are overhead with no payoff — not used in Phase 1.
 
 ### Mandatory agent reviews
 
@@ -121,3 +125,36 @@ This is standard practice, not optional.
 - Locally: `git branch -d <branch>` (safe delete — refuses if branch is unmerged).
 - The remote tracking ref is removed automatically when you use GitHub's button; to clean
   it up manually: `git push origin --delete <branch>`.
+
+## Labels
+
+**Type** (one required per issue): `bug`, `enhancement`, `documentation`, `chore`,
+`question` (used for open design questions, e.g. issues tracing to an unresolved
+pillar/spec decision).
+
+**Priority** (required on `bug`/`enhancement`): `priority-high`, `priority-medium`,
+`priority-low`.
+
+**Component** (optional, combinable): `lexer`, `parser`, `typechecker`, `codegen`,
+`tooling`, `docs-infra` — add a new component label only once an issue genuinely
+needs it, not preemptively.
+
+**Descriptive tags** (optional, as needed): `soundness`, `ice`, `investigate`,
+`cleanup`, `dx` — use for issues that warrant the extra signal; don't invent new
+ones ad hoc without updating this list.
+
+**Special:** `good first issue` — reserve for genuinely entry-level issues, per
+the Discord `#good-first-issues` channel policy (kept empty until one exists).
+
+Existing GitHub defaults not otherwise assigned a meaning here (`duplicate`,
+`help wanted`, `invalid`, `wontfix`) keep their default GitHub meaning.
+
+## Issue linking
+
+- Branch naming: `fix/issue-<N>` for a single issue, `fix/issues-<N>-<M>` (or a
+  short descriptive suffix, e.g. `fix/issues-1-4-codegen-ices`) when a branch
+  resolves several at once.
+- Every PR description must include `Closes #N` (or `Fixes #N`) for each issue it
+  resolves, listed in the "What Changed" section — this is what GitHub parses to
+  auto-close the issue on merge to `main`. Do not rely on manual closing or bare
+  commit references going forward.
