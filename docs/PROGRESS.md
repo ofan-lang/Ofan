@@ -3399,5 +3399,42 @@ Working tree clean. All feature and docs branches deleted (local and remote).
 
 ---
 
+## Session: 2026-09-18 — rename source file extension `.ofn` → `.ofan`
+
+**Branch:** `main` (direct — no `src/` logic touched)
+
+**What was done:**
+
+Renamed the Ofan language source file extension from `.ofn` to `.ofan` across the
+entire repository.
+
+**Design decision: why `.ofan`?**
+
+`.ofn` is the W3C-registered preferred suffix for **OWL Functional Syntax**
+(MIME type `text/owl-functional`, OWL 2 Web Ontology Language Recommendation),
+actively used by ontology tooling (ROBOT, ODK) in the bioinformatics /
+semantic-web space. Using it would silently collide with that established ecosystem.
+`.ofan` avoids the collision and more directly reflects the full language name.
+
+**Scope of changes:**
+- Renamed `examples/smoke_test.ofn` → `examples/smoke_test.ofan` (and ×2 for
+  `smoke_test_2`, `smoke_test_3`).
+- Updated `tests/cli_diagnostics.rs` path constant.
+- Updated all extension mentions in `src/main.rs` (doc comments + error message).
+- Updated `docs/PHILOSOPHY.md`, `docs/ARCHITECTURE.md`, `docs/SYNTAX_SPEC.md`,
+  `README.md`, `CONTRIBUTING.md`.
+- Historical references in this file's dated log entries left unchanged as record.
+
+**Pending / next step:**
+- When VS Code extension scaffold is added, `contributes.languages.extensions`
+  should list `[".ofan"]`.
+- `.gitattributes` entry (`*.ofan linguist-language=Ofan`) should be added when
+  Linguist recognition is set up.
+
+**Something the agent proposed and was rejected (and why):**
+-
+
+---
+
 ## History
 <!-- Previous sessions get moved here, most recent on top -->

@@ -14,28 +14,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile a .ofn source file to a native binary.
+    /// Compile a .ofan source file to a native binary.
     Build {
-        /// Source file to compile (.ofn)
+        /// Source file to compile (.ofan)
         source: PathBuf,
         /// Output path for the compiled binary [default: ./<stem>[.exe]]
         #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
     },
-    /// Compile a .ofn source file and immediately execute it.
+    /// Compile a .ofan source file and immediately execute it.
     ///
     /// Exits with the compiled program's exit code. Pass arguments to the
-    /// program after `--`: `ofan run foo.ofn -- arg1 arg2`
+    /// program after `--`: `ofan run foo.ofan -- arg1 arg2`
     Run {
-        /// Source file to compile and run (.ofn)
+        /// Source file to compile and run (.ofan)
         source: PathBuf,
         /// Arguments forwarded to the compiled program
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Type-check a .ofn source file without invoking the code generator.
+    /// Type-check a .ofan source file without invoking the code generator.
     Check {
-        /// Source file to type-check (.ofn)
+        /// Source file to type-check (.ofan)
         source: PathBuf,
     },
 }
@@ -75,7 +75,7 @@ fn cmd_build(source: PathBuf, output: Option<PathBuf>) -> i32 {
     // Resolve output path before borrowing source in run_pipeline.
     // Default: <stem>[.exe] in CWD — deliberately NOT next to the source file.
     // Prior behavior placed the binary next to the source; this was changed to
-    // avoid cluttering .ofn directories with build artifacts.
+    // avoid cluttering .ofan directories with build artifacts.
     let out = match output {
         Some(p) => p,
         None => match source.file_stem() {
@@ -116,7 +116,7 @@ fn cmd_run(source: PathBuf, args: Vec<String>) -> i32 {
         }
         None => {
             eprintln!(
-                "ofan: cannot derive temp name from '{}'; pass a valid .ofn path",
+                "ofan: cannot derive temp name from '{}'; pass a valid .ofan path",
                 source.display()
             );
             return 1;

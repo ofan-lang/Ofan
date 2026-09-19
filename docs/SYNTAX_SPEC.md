@@ -453,7 +453,7 @@ pattern and collide with the primitive each is built from.
 
 ```ofn
 fn read_config() -> Checked<Config, &str> {
-    let raw = read_file("config.ofn")?;
+    let raw = read_file("config.ofan")?;
     let parsed = parse(raw)?;
     Ok(parsed)
 }
@@ -1067,7 +1067,7 @@ fn read_config(path: &str) -> Checked<Config, &str> {
 }
 
 fn caller() -> Checked<(), &str> {
-    let cfg = read_config("app.ofn")?;
+    let cfg = read_config("app.ofan")?;
     // match is the only way to branch on Checked — ?:  is deliberately
     // invalid on Checked<T, E> (see §12 and rationale below)
     Ok(())
@@ -1319,7 +1319,7 @@ let label = match opt {
 };
 
 # Checked error handling — the only way to supply a fallback for Checked<T, E>
-let val = match read_config("app.ofn") {
+let val = match read_config("app.ofan") {
     Ok(cfg)  => cfg.timeout,
     Err(msg) => {
         log_error(msg);
@@ -1617,12 +1617,12 @@ This is a **whole-program property**, consistent with the single-binary-install 
 (pillar 4) and the compiler's existing whole-program analysis.
 
 ```ofn
-// file: entity_movement.ofn
+// file: entity_movement.ofan
 impl Entity {
     fn move_by(self, dx: f32, dy: f32) { ... }
 }
 
-// file: entity_render.ofn
+// file: entity_render.ofan
 impl Entity {
     fn draw(self, canvas: &Canvas) { ... }
 }
@@ -1640,8 +1640,8 @@ conflict sites by file and line (pillar 5) — no silent last-write-wins.
 
 ```
 error: duplicate method `draw` on type `Entity`
-  → entity_render.ofn:4:5 — first definition
-  → entity_render_hd.ofn:12:5 — duplicate definition
+  → entity_render.ofan:4:5 — first definition
+  → entity_render_hd.ofan:12:5 — duplicate definition
 note: all `impl Entity` blocks merge into one namespace;
       each name must be unique across all of them
 suggestion: rename one of the conflicting definitions
@@ -1794,7 +1794,7 @@ Pre-reserving `move obj.field` syntax ahead of the phase-2 partial-move design s
 
 Internal compiler scaffolding added ahead of its use — `Ty::TyVar`, `Region::Var`, phase-2
 `TypeError` variants — costs nothing observable: those identifiers live only in `.rs` source
-files and have no surface in the compiled program or in persisted `.ofn` source files.
+files and have no surface in the compiled program or in persisted `.ofan` source files.
 
 `move obj.field` is different in kind: it would be **user-facing syntax written into real
 programs** before its semantics are designed. If the phase-2 partial-move design session settles

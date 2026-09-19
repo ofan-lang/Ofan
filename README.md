@@ -33,16 +33,16 @@ fn main() -> i32 {
 ```
 
 Self-receiver mode (`&self`, `&mut self`, or by value) is inferred from the method body —
-no annotations required. The full end-to-end smoke test (`examples/smoke_test.ofn`)
+no annotations required. The full end-to-end smoke test (`examples/smoke_test.ofan`)
 exercises structs, methods, recursion, all arithmetic and comparison operators, `while`,
 `loop`, `if/else` as a value, and compound assignment, and exits with the correct checksum.
 
 ## CLI
 
 ```
-ofan build <file.ofn> [-o <output>]   # compile to binary (default output: ./stem[.exe])
-ofan run   <file.ofn> [-- <args>...]  # compile, run, forward exit code, clean up temp
-ofan check <file.ofn>                 # type-check only — no LLVM required
+ofan build <file.ofan> [-o <output>]   # compile to binary (default output: ./stem[.exe])
+ofan run   <file.ofan> [-- <args>...]  # compile, run, forward exit code, clean up temp
+ofan check <file.ofan>                 # type-check only — no LLVM required
 ```
 
 `check` never calls LLVM and works without the `codegen` feature flag. Useful for editor
