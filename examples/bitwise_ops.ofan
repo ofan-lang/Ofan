@@ -1,0 +1,10 @@
+fn main() -> i32 {
+    let a: i32 = 0b11001100;
+    let b: i32 = 0b10101010;
+    let c: i32 = a & b;    # bitwise AND
+    let d: i32 = a | b;    # bitwise OR
+    let e: i32 = a ^ b;    # bitwise XOR
+    let f: i32 = a << 2;   # left shift
+    let g: i32 = a >> 1;   # right shift: 0b11001100 >> 1 = 0b01100110 = 102, exit code 102
+    return g;
+}

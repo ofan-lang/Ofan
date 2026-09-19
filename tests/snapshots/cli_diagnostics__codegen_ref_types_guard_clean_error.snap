@@ -1,0 +1,5 @@
+---
+source: tests/cli_diagnostics.rs
+expression: stderr.trim()
+---
+ofan: codegen error: not yet lowerable: reference types (&T) as locals or parameters (at byte 16) — this construct is planned; track progress in docs/PROGRESS.md

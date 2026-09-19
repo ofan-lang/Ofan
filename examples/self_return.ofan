@@ -1,0 +1,13 @@
+struct Entity { id: i32 }
+
+impl Entity {
+    fn clone_it(move self) -> Self {
+        return Entity { id = self.id };
+    }
+}
+
+fn main() -> i32 {
+    let e = Entity { id = 7 };
+    let e2 = e.clone_it();
+    return e2.id;
+}
