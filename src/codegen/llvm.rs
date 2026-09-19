@@ -2305,9 +2305,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 
     /// Emit a diagnostic message to stderr then trap, terminating the current block.
-    /// On Windows: writes `message` via GetStdHandle+WriteFile before trapping.
-    /// On other platforms: traps immediately (bare SIGILL — future work for non-Windows).
-    /// Uses the same host-OS-detection pattern (`#[cfg(windows)]`) as `link_object`.
+    /// On Windows host: writes `message` via GetStdHandle+WriteFile before trapping.
+    /// On other hosts: traps immediately with no message (bare SIGILL — future work).
+    /// NOTE: gates on compile-host OS (`#[cfg(windows)]`), not the codegen target triple.
+    /// This matches `link_object`'s existing pattern; a future cross-compilation pass will
+    /// need to replace both with target-triple detection (tracked separately).
     fn emit_runtime_panic(&self, tag: &str, message: &str) -> Result<(), CodegenError> {
         #[cfg(windows)]
         self.emit_stderr_write(tag, message)?;
