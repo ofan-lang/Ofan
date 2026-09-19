@@ -1,9 +1,9 @@
 use inkwell::{
-    attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
-    module::{Linkage, Module},
+    intrinsics::Intrinsic,
+    module::Module,
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
     },
@@ -182,9 +182,9 @@ fn linker_candidates() -> Vec<LinkerKind> {
     }
 }
 
-// â"€â"€â"€ AST â†’ LLVM IR lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+// â"€â"€â"€ AST â†' LLVM IR lowering â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-/// Maps variable name â†’ (alloca pointer, LLVM pointee type).
+/// Maps variable name â†' (alloca pointer, LLVM pointee type).
 /// Storing the type avoids re-querying InferResult on every load and makes
 /// compound assignment (+=, -=, â€¦) straightforward.
 type CodegenEnv<'ctx, 'src> = HashMap<&'src str, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>;
@@ -227,7 +227,7 @@ struct FnLower<'ctx, 'b> {
     struct_types: &'b HashMap<String, StructType<'ctx>>,
     /// LLVM tagged-union types keyed by enum name — `{ i32, [N x i8] }`. Built in Pass 0c/0e.
     enum_types: &'b HashMap<String, StructType<'ctx>>,
-    /// LLVM payload struct types keyed by `enum_name â†’ variant_name`. Built in Pass 0d.
+    /// LLVM payload struct types keyed by `enum_name â†' variant_name`. Built in Pass 0d.
     variant_payload_types: &'b HashMap<String, HashMap<String, StructType<'ctx>>>,
     /// One pre-hoisted alloca per `Stmt::Let`, keyed by the binding's `name_span`.
     /// Populated by `emit_allocas` before any `lower_stmt` call; never mutated after.
@@ -414,10 +414,10 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     /// Lower `expr` to a pointer suitable for use as a method self-receiver or
     /// field-assignment target.
     ///
-    /// - `Expr::Ident` â†’ the pre-allocated variable alloca (already a pointer).
-    /// - `Expr::StructLit` â†’ fresh alloca filled by `lower_struct_lit_into`, pointer returned.
-    /// - `Expr::Field` â†’ GEP into the parent struct without a load (field pointer).
-    /// - Anything else â†’ lower to value, spill to a fresh alloca, return that pointer.
+    /// - `Expr::Ident` â†' the pre-allocated variable alloca (already a pointer).
+    /// - `Expr::StructLit` â†' fresh alloca filled by `lower_struct_lit_into`, pointer returned.
+    /// - `Expr::Field` â†' GEP into the parent struct without a load (field pointer).
+    /// - Anything else â†' lower to value, spill to a fresh alloca, return that pointer.
     fn lower_as_ptr<'src>(
         &self,
         expr: &Expr<'src>,
@@ -1176,7 +1176,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
         // â"€â"€ Classify arms â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         // tag_arms: ordered (tag, arm_indices) pairs (Vec for determinism).
-        // tag_arm_pos: tag â†’ index into tag_arms.
+        // tag_arm_pos: tag â†' index into tag_arms.
         let mut tag_arms: Vec<(u32, Vec<usize>)> = Vec::new();
         let mut tag_arm_pos: HashMap<u32, usize> = HashMap::new();
         // or_arms: (arm_idx, tags) for Or-patterns of unit variants.
@@ -1631,7 +1631,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
             Expr::Unary {
                 op, expr: inner, ..
             } => {
-                // Fold Neg(Literal::Integer(2147483648)) â†’ i32::MIN constant directly.
+                // Fold Neg(Literal::Integer(2147483648)) â†' i32::MIN constant directly.
                 // The typechecker blesses this via the infer_unary INT_MIN special case,
                 // but the literal lowering guard rejects 2147483648 > i32::MAX. Bypass it.
                 if matches!(op, UnaryOp::Neg) {
@@ -1664,6 +1664,11 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     (UnaryOp::Not, Ty::Bool) => self
                         .builder
                         .build_not(val.into_int_value(), "not")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))
+                        .map(Into::into),
+                    (UnaryOp::BitNot, Ty::I32) => self
+                        .builder
+                        .build_not(val.into_int_value(), "bnot")
                         .map_err(|e| CodegenError::Llvm(e.to_string()))
                         .map(Into::into),
                     (op, ty) => Err(CodegenError::Ice(format!(
@@ -1718,7 +1723,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
 
                     self.builder.position_at_end(merge_bb);
 
-                    // Unit if or both arms terminate early â†’ no phi needed.
+                    // Unit if or both arms terminate early â†' no phi needed.
                     if is_unit || (!then_flows && !else_flows) {
                         return Ok(unit_value(self.ctx));
                     }
@@ -1745,7 +1750,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                     }
                     Ok(phi.as_basic_value())
                 } else {
-                    // No else branch â†’ always Unit.
+                    // No else branch â†' always Unit.
                     self.builder
                         .build_conditional_branch(cond_val, then_bb, merge_bb)
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
@@ -2020,7 +2025,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .build_int_mul(l, r, "mul")
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
-                    // Div/Mod: runtime zero-divisor check â†’ calls libc abort() (pillar 1).
+                    // Div/Mod: runtime zero-divisor check â†' calls libc abort() (pillar 1).
                     BinOp::Div => self.emit_int_div_or_rem(l, r, false)?,
                     BinOp::Mod => self.emit_int_div_or_rem(l, r, true)?,
                     BinOp::Eq => self
@@ -2053,6 +2058,23 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?
                         .into(),
+                    BinOp::BitAnd => self
+                        .builder
+                        .build_and(l, r, "band")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .into(),
+                    BinOp::BitOr => self
+                        .builder
+                        .build_or(l, r, "bor")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .into(),
+                    BinOp::BitXor => self
+                        .builder
+                        .build_xor(l, r, "bxor")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .into(),
+                    BinOp::Shl => self.emit_int_shift(l, r, false)?,
+                    BinOp::Shr => self.emit_int_shift(l, r, true)?,
                     _ => {
                         return Err(CodegenError::Ice(format!(
                             "operator {op:?} not supported for i32"
@@ -2155,7 +2177,7 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
     }
 
     /// Emit an i32 div or rem with a runtime zero-divisor check.
-    /// Zero divisor â†’ calls libc `abort()` and marks the block unreachable.
+    /// Zero divisor → traps via `llvm.trap` and marks the block unreachable.
     /// Pillar 1: explicit runtime panic, never silent UB.
     fn emit_int_div_or_rem(
         &self,
@@ -2163,14 +2185,14 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         r: IntValue<'ctx>,
         is_rem: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let abort_fn = self.get_or_declare_abort();
+        let abort_fn = self.get_or_declare_trap()?;
         // Guard 1: divide by zero.
         let zero = self.ctx.i32_type().const_zero();
         let is_zero = self
             .builder
             .build_int_compare(IntPredicate::EQ, r, zero, "divz")
             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-        // Guard 2: INT_MIN / -1 is signed overflow â†’ LLVM poison.
+        // Guard 2: INT_MIN / -1 is signed overflow â†' LLVM poison.
         // -1 as u64 gives the correct bit pattern for const_int on an i32 type.
         let neg_one = self.ctx.i32_type().const_int(u64::MAX, false);
         let int_min = self.ctx.i32_type().const_int(i32::MIN as u64, false);
@@ -2221,20 +2243,73 @@ impl<'ctx, 'b> FnLower<'ctx, 'b> {
         }
     }
 
-    fn get_or_declare_abort(&self) -> FunctionValue<'ctx> {
-        if let Some(f) = self.module.get_function("abort") {
-            return f;
+    /// Emit an i32 shift with a runtime out-of-range check.
+    /// Shift amount < 0 or >= 32 → traps via `llvm.trap` and marks the block unreachable.
+    /// Pillar 1: explicit runtime panic, never silent UB (LLVM shift-amount poison).
+    fn emit_int_shift(
+        &self,
+        l: IntValue<'ctx>,
+        r: IntValue<'ctx>,
+        arithmetic: bool,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let abort_fn = self.get_or_declare_trap()?;
+        let i32_ty = self.ctx.i32_type();
+        let zero = i32_ty.const_zero();
+        let width = i32_ty.const_int(32, false);
+        // Guard: shift amount < 0 (negative) or >= 32 (wider than i32) → poison in LLVM.
+        let is_neg = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, r, zero, "shneg")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let is_wide = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, r, width, "shwide")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let is_bad = self
+            .builder
+            .build_or(is_neg, is_wide, "shbad")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        let abort_bb = self.ctx.append_basic_block(self.fn_val, "sh.abort");
+        let ok_bb = self.ctx.append_basic_block(self.fn_val, "sh.ok");
+        self.builder
+            .build_conditional_branch(is_bad, abort_bb, ok_bb)
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        self.builder.position_at_end(abort_bb);
+        self.builder
+            .build_call(abort_fn, &[], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        self.builder.position_at_end(ok_bb);
+        if arithmetic {
+            Ok(self
+                .builder
+                .build_right_shift(l, r, true, "shr")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .into())
+        } else {
+            Ok(self
+                .builder
+                .build_left_shift(l, r, "shl")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .into())
         }
-        let ty = self.ctx.void_type().fn_type(&[], false);
-        let f = self
-            .module
-            .add_function("abort", ty, Some(Linkage::External));
-        // Mark noreturn so LLVM knows code after the call is unreachable (not UB-shaped).
-        let noreturn = self
-            .ctx
-            .create_enum_attribute(Attribute::get_named_enum_kind_id("noreturn"), 0);
-        f.add_attribute(AttributeLoc::Function, noreturn);
-        f
+    }
+
+    /// Returns the `llvm.trap` intrinsic declaration for this module.
+    /// Using the intrinsic avoids a libc/CRT dependency for the crash path — no
+    /// external `abort` symbol needed at link time.  LLVM lowers `llvm.trap` to
+    /// an architecture trap instruction (UD2 on x86-64) which is noreturn by
+    /// definition without requiring an explicit attribute.
+    fn get_or_declare_trap(&self) -> Result<FunctionValue<'ctx>, CodegenError> {
+        Intrinsic::find("llvm.trap")
+            .ok_or_else(|| CodegenError::Ice("llvm.trap intrinsic not found".to_string()))?
+            .get_declaration(self.module, &[])
+            .ok_or_else(|| CodegenError::Ice("llvm.trap declaration failed".to_string()))
     }
 }
 
@@ -2494,11 +2569,31 @@ fn declare_method_sig<'ctx>(
         &method.params[..]
     };
     for p in explicit_params {
-        param_types.push(basic_type_from_ast(&p.ty, ctx, struct_types).map(Into::into)?);
+        let llvm_ty: BasicMetadataTypeEnum = match &p.ty {
+            Type::SelfTy(_) => (*struct_types
+                .get(type_name)
+                .ok_or_else(|| {
+                    CodegenError::Ice(format!(
+                        "struct `{type_name}` not in struct_types for Self param"
+                    ))
+                })?)
+            .into(),
+            ty => basic_type_from_ast(ty, ctx, struct_types)?.into(),
+        };
+        param_types.push(llvm_ty);
     }
 
     let fn_type = match method.return_ty.as_ref() {
         None => ctx.void_type().fn_type(&param_types, false),
+        Some(Type::SelfTy(_)) => struct_types
+            .get(type_name)
+            .copied()
+            .ok_or_else(|| {
+                CodegenError::Ice(format!(
+                    "struct `{type_name}` not in struct_types for Self return"
+                ))
+            })?
+            .fn_type(&param_types, false),
         Some(ty) => basic_type_from_ast(ty, ctx, struct_types)?.fn_type(&param_types, false),
     };
     module.add_function(&mangled, fn_type, None);
@@ -2577,7 +2672,7 @@ fn lower_function<'ctx, 'b, 'src>(
         }
     }
 
-    // Phase 4: tail expression â†’ return instruction (only when no explicit terminator).
+    // Phase 4: tail expression â†' return instruction (only when no explicit terminator).
     if lower
         .builder
         .get_insert_block()
@@ -2718,7 +2813,7 @@ fn lower_method<'ctx, 'b, 'src>(
         }
     }
 
-    // Phase 4: tail expression â†’ return.
+    // Phase 4: tail expression â†' return.
     if lower
         .builder
         .get_insert_block()
@@ -2789,6 +2884,10 @@ fn basic_type<'ctx>(ty: &Ty, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, 
         Ty::I32 => Ok(ctx.i32_type().into()),
         Ty::F64 => Ok(ctx.f64_type().into()),
         Ty::Bool => Ok(ctx.bool_type().into()),
+        Ty::Ref { .. } => Err(CodegenError::NotYetLowered {
+            feature: "reference types (&T) in non-receiver positions",
+            byte: 0,
+        }),
         other => Err(CodegenError::Ice(format!(
             "type `{other}` is not yet lowerable to a basic LLVM type; \
              only i32, f64, bool, and struct types are supported"
@@ -2809,6 +2908,10 @@ fn basic_type_from_ast<'ctx>(
             .get(*name)
             .map(|st| BasicTypeEnum::StructType(*st))
             .ok_or_else(|| CodegenError::Ice(format!("unknown type `{name}` in codegen"))),
+        Type::Ref { span, .. } => Err(CodegenError::NotYetLowered {
+            feature: "reference types (&T) as locals or parameters",
+            byte: span.start,
+        }),
         // SelfTy is only valid as a receiver, never as a value-type param in declare
         other => Err(CodegenError::Ice(format!(
             "type not supported in codegen: {other:?}"
@@ -2967,7 +3070,8 @@ mod tests {
         assert_eq!(result, 5, "expected loop_break() == 5, got {result}");
     }
 
-    /// T10 — zero-divisor check: IR for `10 / 0` contains a call to abort (pillar 1).
+    /// T10 — zero-divisor check: IR for `10 / 0` contains a call to llvm.trap (pillar 1).
+    /// Uses llvm.trap intrinsic (not libc abort) so no CRT dependency at link time.
     #[test]
     fn test_div_zero_emits_abort() {
         let ctx = Context::create();
@@ -2975,8 +3079,8 @@ mod tests {
         let module = compile_to_module(&ctx, src);
         let ir = module.print_to_string().to_string();
         assert!(
-            ir.contains("call void @abort"),
-            "expected abort call in IR for division by zero literal, IR:\n{ir}"
+            ir.contains("call void @llvm.trap"),
+            "expected llvm.trap call in IR for division by zero literal, IR:\n{ir}"
         );
     }
 
@@ -3082,7 +3186,7 @@ mod tests {
     }
 
     /// T16 — struct literal as direct method receiver (no intermediate `let`): JIT.
-    /// Exercises the `lower_as_ptr(StructLit)` â†’ fresh alloca â†’ self pointer path.
+    /// Exercises the `lower_as_ptr(StructLit)` â†' fresh alloca â†' self pointer path.
     #[test]
     fn test_struct_lit_direct_method_receiver_jit() {
         let ctx = Context::create();
@@ -3433,7 +3537,7 @@ mod tests {
     }
 
     /// T30 — nested-block shadow self-reference + outer binding preserved.
-    /// `let x=1; let y={ let x=x+10; x }; x+y` â†’ x=1, y=11, result=12.
+    /// `let x=1; let y={ let x=x+10; x }; x+y` â†' x=1, y=11, result=12.
     /// Covers nested-block + self-reference together; verifies outer x not corrupted.
     #[test]
     fn test_nested_block_shadow_self_reference_jit() {
@@ -3460,7 +3564,7 @@ mod tests {
     }
 
     /// T31 — chained shadow self-references.
-    /// `let x=1; let x=x+1; let x=x+1; x` â†’ each shadow reads the previous, result=3.
+    /// `let x=1; let x=x+1; let x=x+1; x` â†' each shadow reads the previous, result=3.
     #[test]
     fn test_chained_shadow_self_reference_jit() {
         let ctx = Context::create();
@@ -3477,12 +3581,12 @@ mod tests {
         };
         assert_eq!(
             result, 3,
-            "each shadow reads previous: 1â†’2â†’3, got {result}"
+            "each shadow reads previous: 1â†'2â†'3, got {result}"
         );
     }
 
-    /// T32 — different-type shadow self-reference (i32 â†’ bool).
-    /// `let flag=5; let flag=flag>3; if flag {1} else {0}` â†’ 1.
+    /// T32 — different-type shadow self-reference (i32 â†' bool).
+    /// `let flag=5; let flag=flag>3; if flag {1} else {0}` â†' 1.
     /// Confirms "different-type self-reference is unrepresentable" claim is FALSE.
     #[test]
     fn test_shadow_self_reference_type_change_jit() {

@@ -3,6 +3,83 @@
 > Updated at the end of every working session with the agent. The next session starts by
 > reading this file.
 
+## Last session: 2026-09-19 — fix codegen ICEs #55 #56 #57 (PR open, branch fix/issues-55-56-57-codegen-ices)
+
+**Branch:** `fix/issues-55-56-57-codegen-ices`
+
+**What was done:**
+
+### Issue #55 — `Self` return type ICE (`declare_method_sig`)
+
+`declare_method_sig` (codegen Pass 1) called `basic_type_from_ast` on raw AST types, including
+`Type::SelfTy` in return and explicit-param positions, which hit the `other` ICE catch-all.
+The typechecker already resolves `Self` → `Ty::Named(struct_name)` but Pass 1 reads the AST.
+
+Fix: added `Type::SelfTy(_)` arms in the explicit-params loop and return-type match inside
+`declare_method_sig`, substituting `struct_types.get(type_name)` using `type_name: &str`
+already in scope. No change needed in Pass 2 (`lower_method`): body operates on `Ty` values.
+
+Test: `examples/self_return.ofan` + `codegen_self_return_build_and_run` (exit 7). Passes.
+
+### Issue #56 — Bitwise operators ICE (`lower_binary` / unary match)
+
+`lower_binary`'s `Ty::I32` arm had a `_` catch-all that fired for `BitAnd/BitOr/BitXor/Shl/Shr`.
+Unary `(BitNot, Ty::I32)` similarly fell through.
+
+Fix: added `BitAnd/BitOr/BitXor` arms using `build_and/build_or/build_xor`. Added `BitNot` arm
+using `build_not`. Added `Shl/Shr` via new `emit_int_shift` helper (modeled after
+`emit_int_div_or_rem`) that guards against shift amount < 0 or ≥ 32 — both produce LLVM poison
+without a guard. Guard emits `llvm.trap` + unreachable (pillar 1).
+
+`llvm.trap` replaces the previous `libc abort()` call across all guarded-arithmetic paths. The old
+`get_or_declare_abort` was renamed to `get_or_declare_trap` (returns `Result` — no more
+`.expect()`). This also fixed a pre-existing LNK2019 (`abort` unresolved) on Windows for any
+program using division.
+
+Test: `examples/bitwise_ops.ofan` + `codegen_bitwise_ops_build_and_run` (exit 102). Passes.
+
+### Issue #57 — `&T` reference types ICE → clean `NotYetLowered`
+
+`basic_type()` (`Ty::Ref`) and `basic_type_from_ast()` (`Type::Ref`) both hit `other` ICE arms.
+Real `&T` lowering requires design decisions (stack-slot strategy, deref semantics, borrow/LLVM
+lifetime interaction) — deferred.
+
+Fix: added `Ty::Ref { .. }` arm in `basic_type` and `Type::Ref { span, .. }` arm in
+`basic_type_from_ast`, each returning `CodegenError::NotYetLowered`. AST arm uses `span.start`
+for the byte offset; `Ty::Ref` carries no span so falls back to `byte: 0`.
+
+Test: `examples/ref_types_guard.ofan` + `codegen_ref_types_guard_clean_error` snapshot. Snapshot
+accepted. `ofan check` passes (unchanged); `ofan build` fails cleanly.
+
+**Decisions:**
+
+- `llvm.trap` intrinsic over `libc abort()` for all guarded-arithmetic crash paths: eliminates
+  the external CRT symbol dependency (LNK2019 on Windows for div/shift programs). Trade-off: raw
+  SIGILL with no printed message (silent crash), same as before (abort gives no message either).
+  Noted in reviews as a pillar-1/5 tension for a future follow-up — not blocking.
+- Shift guard (< 0 or ≥ 32 abort) matches the div/mod pattern rather than masked semantics
+  (`amt & 31`): consistent with "explicit erroneous behavior" over "defined-but-surprising."
+- Exit code 102 for bitwise_ops test (not 51 as written in the issue body comment — that comment
+  had a double-shift calculation error: `0b11001100 >> 1 = 102`, not `51`).
+
+**Agent reviews (both addressed before commit):**
+
+- `pillars-reviewer`: found blocking pillar-1 violation — unguarded LLVM shifts produce poison.
+  Fixed by adding `emit_int_shift` with runtime trap guard.
+- `rust-idiom-reviewer`: stale "libc abort()" doc comments fixed; `get_or_declare_abort`
+  renamed to `get_or_declare_trap`; return type changed to `Result` (drops `.expect()`).
+
+**What's next:**
+- Open PR for `fix/issues-55-56-57-codegen-ices` and merge
+- Document the `llvm.trap` silent-crash tradeoff in PHILOSOPHY.md (no printed message on runtime
+  panic) as a follow-up — either add a runtime shim that prints diagnostics, or explicitly accept
+  bare traps as the v1 policy
+- Integer overflow policy: document wrapping/panic decision in `PHILOSOPHY.md`
+- `For` loop codegen (currently deferred)
+- Trait implementation (lexer/parser/typechecker)
+
+---
+
 ## Last session: 2026-09-12 — trait syntax design + doc audit (docs, closes #49)
 
 **Branch:** `main` (direct — docs-only, no `src/` touched)
